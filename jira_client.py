@@ -198,6 +198,109 @@ class JiraClient:
 
         return self._issues_to_dataframe(issues)
 
+    def update_issue(self, key: str, fields: dict[str, Any]) -> None:
+        """Update arbitrary fields on a single Jira issue."""
+        url = f"{self.base_url}/rest/api/3/issue/{key}"
+        with self._session() as session:
+            session.headers["Content-Type"] = "application/json"
+            response = session.put(url, json={"fields": fields}, timeout=30)
+        if response.status_code not in {200, 204}:
+            raise RuntimeError(
+                f"Failed to update {key} ({response.status_code}): {response.text[:300]}"
+            )
+
+    def bulk_update_priority(
+        self,
+        keys: list[str],
+        priority_name: str,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Set priority on each ticket in keys.
+        Returns (succeeded_keys, {key: error_message}) for failed ones.
+        """
+        succeeded: list[str] = []
+        failed: dict[str, str] = {}
+        for key in keys:
+            try:
+                self.update_issue(key, {"priority": {"name": priority_name}})
+                succeeded.append(key)
+            except Exception as exc:  # noqa: BLE001
+                failed[key] = str(exc)
+        return succeeded, failed
+
+    def get_issue_transitions(self, key: str) -> list[dict[str, str]]:
+        """Return available transitions for a Jira issue key."""
+        url = f"{self.base_url}/rest/api/3/issue/{key}/transitions"
+        with self._session() as session:
+            response = session.get(url, timeout=30)
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Failed to fetch transitions for {key} ({response.status_code}): {response.text[:300]}"
+            )
+
+        payload = response.json() or {}
+        transitions = payload.get("transitions", [])
+        return [
+            {
+                "id": str(t.get("id", "")),
+                "name": str(t.get("name", "")),
+                "to_status": str((t.get("to") or {}).get("name", "")),
+            }
+            for t in transitions
+            if t.get("id")
+        ]
+
+    def transition_issue(self, key: str, transition_id: str) -> None:
+        """Transition a Jira issue using a transition id."""
+        url = f"{self.base_url}/rest/api/3/issue/{key}/transitions"
+        with self._session() as session:
+            session.headers["Content-Type"] = "application/json"
+            response = session.post(
+                url,
+                json={"transition": {"id": transition_id}},
+                timeout=30,
+            )
+
+        if response.status_code not in {200, 204}:
+            raise RuntimeError(
+                f"Failed to transition {key} ({response.status_code}): {response.text[:300]}"
+            )
+
+    def bulk_transition_status(
+        self,
+        keys: list[str],
+        to_status_name: str,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Transition each ticket to the given target status when possible.
+        Returns (succeeded_keys, {key: error_message}) for failed ones.
+        """
+        target = to_status_name.strip().lower()
+        succeeded: list[str] = []
+        failed: dict[str, str] = {}
+
+        for key in keys:
+            try:
+                transitions = self.get_issue_transitions(key)
+                matched = next(
+                    (t for t in transitions if t.get("to_status", "").strip().lower() == target),
+                    None,
+                )
+                if not matched:
+                    available = ", ".join(
+                        sorted({t.get("to_status", "") for t in transitions if t.get("to_status")})
+                    )
+                    raise RuntimeError(
+                        "No valid transition to target status. "
+                        + (f"Available: {available}" if available else "No transitions available")
+                    )
+
+                self.transition_issue(key, matched["id"])
+                succeeded.append(key)
+            except Exception as exc:  # noqa: BLE001
+                failed[key] = str(exc)
+
+        return succeeded, failed
+
     def _issues_to_dataframe(self, issues: list[dict[str, Any]]) -> pd.DataFrame:
         rows: list[dict[str, Any]] = []
         for issue in issues:

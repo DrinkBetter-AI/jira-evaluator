@@ -260,6 +260,95 @@ def main() -> None:
         use_container_width=True,
     )
 
+    st.divider()
+    st.subheader("Suggested First Action")
+
+    PRIORITY_OPTIONS = ["Highest", "High", "Normal", "Low", "Lowest"]
+    action_type = st.selectbox(
+        "Action",
+        options=["Set None-priority tickets", "Change status"],
+        index=0,
+        help="Default action keeps the first cleanup flow: None priority -> Normal.",
+    )
+
+    status_options = sorted(filtered["status"].dropna().astype(str).unique().tolist())
+    normalized_priority = filtered["priority"].fillna("").astype(str).str.strip().str.lower()
+    none_priority_keys = sorted(filtered[normalized_priority.isin(["", "none"])]["key"].tolist())
+
+    with st.container(border=True):
+        if action_type == "Set None-priority tickets":
+            st.markdown("**Detected tickets without priority**")
+            st.caption(
+                f"{len(none_priority_keys)} ticket(s) in the current view have no priority set."
+            )
+            if none_priority_keys:
+                preview = ", ".join(none_priority_keys[:15])
+                suffix = " ..." if len(none_priority_keys) > 15 else ""
+                st.caption(f"Sample: {preview}{suffix}")
+
+            selected_keys = st.multiselect(
+                "Tickets to update",
+                options=none_priority_keys,
+                default=none_priority_keys,
+                help="Remove any tickets you do not want to update.",
+            )
+
+            target_priority = st.selectbox(
+                "Suggested priority",
+                options=PRIORITY_OPTIONS,
+                index=2,
+                help="Normal is selected by default as the first cleanup action.",
+            )
+            target_label = f"priority '{target_priority}'"
+        else:
+            st.markdown("**Change ticket status**")
+            if not status_options:
+                st.info("No statuses available in the current filtered view.")
+                source_status = None
+                target_status = None
+                selected_keys = []
+            else:
+                source_status = st.selectbox("From status", options=status_options, index=0)
+                to_options = [s for s in status_options if s != source_status] or status_options
+                target_status = st.selectbox("To status", options=to_options, index=0)
+
+                source_keys = sorted(filtered[filtered["status"] == source_status]["key"].tolist())
+                selected_keys = st.multiselect(
+                    "Tickets to update",
+                    options=source_keys,
+                    default=source_keys,
+                    help="Only tickets currently in the selected source status are listed.",
+                )
+                target_label = f"status '{source_status}' -> '{target_status}'"
+
+        apply_suggestion = st.button(
+            f"Apply to {len(selected_keys)} ticket(s)",
+            disabled=not selected_keys,
+            type="primary",
+        )
+
+    if apply_suggestion and selected_keys:
+        client = JiraClient.from_yaml(
+            creds_path="~/.creds/vinovoss.yml",
+            profile_name="ML-TEAM-MANAGEMENT",
+        )
+        with st.spinner(f"Updating {len(selected_keys)} tickets..."):
+            if action_type == "Set None-priority tickets":
+                succeeded, failed = client.bulk_update_priority(selected_keys, target_priority)
+            else:
+                succeeded, failed = client.bulk_transition_status(selected_keys, target_status)
+
+        if succeeded:
+            st.success(
+                f"Updated {len(succeeded)} ticket(s) to {target_label}."
+            )
+        if failed:
+            for key, err in failed.items():
+                st.error(f"{key}: {err}")
+
+        st.cache_data.clear()
+        st.rerun()
+
     st.caption(
         f"Active status set for zombie logic: {', '.join(sorted(DEFAULT_ACTIVE_STATUSES))}"
     )
