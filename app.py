@@ -102,7 +102,7 @@ def _parse_estimate_to_seconds(value: str) -> float | None:
     return total
 
 
-def _render_sprint_capacity(df: pd.DataFrame) -> None:
+def _render_sprint_capacity(df: pd.DataFrame, status_source_df: pd.DataFrame | None = None) -> None:
     """Show sprint capacity breakdown for a selected future/active sprint, grouped by assignee."""
     required_cols = {"sprint_id", "sprint_name", "sprint_state", "sprint_board_id"}
     missing_cols = sorted(required_cols - set(df.columns))
@@ -252,6 +252,8 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
 
     preview_scoped = df[df["key"].isin(desired_in_sprint)].copy()
     all_sprint_tickets = df[df["sprint_name"].notna()].copy()
+    status_df = status_source_df if status_source_df is not None else df
+    status_all_sprint_tickets = status_df[status_df["sprint_name"].notna()].copy()
     preview_scoped["estimate_seconds_live"] = (
         preview_scoped["key"].astype(str).map(parsed_estimate_seconds_by_key)
         .fillna(preview_scoped["original_estimate_sec"])
@@ -264,7 +266,7 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
     )
 
     workload_status_options = sorted(
-        pd.Index(pd.concat([preview_scoped["status"], all_sprint_tickets["status"]]).dropna().unique()).tolist()
+        pd.Index(status_all_sprint_tickets["status"].dropna().unique()).tolist()
     )
     default_workload_statuses = [status for status in ["To Do", "In Progress"] if status in workload_status_options]
     if not default_workload_statuses:
@@ -427,10 +429,10 @@ _PRIORITY_BUCKET_MAP = {
 _BUCKET_COLORS = {"Normal": "#2ECC71", "High": "#F5A623", "Urgent": "#E74C3C"}
 
 
-def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority", agg_priority: bool = False) -> None:
+def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority", agg_priority: bool = False) -> str | None:
     if df.empty:
         st.info("No data available for staleness bubble chart.")
-        return
+        return None
 
     plot_df = df.copy()
 
@@ -513,7 +515,11 @@ def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority", agg_prior
         title="Status",
     )
     fig.update_layout(height=560)
-    st.plotly_chart(fig, use_container_width=True)
+    event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key="bubble_chart")
+    points = (event or {}).get("selection", {}).get("points", [])
+    if points:
+        return str(points[0].get("customdata", [None])[0])
+    return None
 
 def _apply_action_with_audit(
     client: JiraClient,
@@ -650,13 +656,24 @@ def main() -> None:
         value=False,
         help="Buckets: Normal = None/Low/Normal · High = High · Urgent = Highest/Urgent",
     )
-    _render_bubble_chart(filtered, color_by=color_by, agg_priority=agg_priority)
+    selected_key = _render_bubble_chart(filtered, color_by=color_by, agg_priority=agg_priority)
+
+    # One-shot filtering: only apply when a click event is present on this rerun.
+    if selected_key and selected_key in filtered["key"].values:
+        st.info(f"Showing only: **{selected_key}** in Sprint Capacity")
+        view_df = filtered[filtered["key"] == selected_key]
+    else:
+        view_df = filtered
 
     st.divider()
     st.subheader("Sprint Capacity")
-    _render_sprint_capacity(filtered)
+    _render_sprint_capacity(view_df, status_source_df=filtered)
 
     st.subheader("Raw Tickets")
+    search_term = st.text_input(
+        "Search tickets",
+        placeholder="Filter by ID, summary, assignee, status…",
+    )
     raw_columns = [
         "key",
         "summary",
@@ -713,11 +730,17 @@ def main() -> None:
                 sort_cols.append(SORT_DISPLAY_INV[chosen_label])
                 sort_asc.append(direction == "ASC")
 
-    raw_display_df = (
-        filtered[raw_columns]
-        .sort_values(sort_cols, ascending=sort_asc)
-        .rename(columns={"created": "Created at", "updated": "Updated at", "completion_pct": "Completion %", "original_estimate": "Original Estimate", "logged_time": "Logged Time"})
-    )
+    sorted_df = filtered[raw_columns].sort_values(sort_cols, ascending=sort_asc)
+    if search_term:
+        mask = (
+            sorted_df["key"].astype(str).str.contains(search_term, case=False, na=False)
+            | sorted_df["summary"].astype(str).str.contains(search_term, case=False, na=False)
+            | sorted_df["assignee"].astype(str).str.contains(search_term, case=False, na=False)
+            | sorted_df["status"].astype(str).str.contains(search_term, case=False, na=False)
+            | sorted_df["priority"].astype(str).str.contains(search_term, case=False, na=False)
+        )
+        sorted_df = sorted_df[mask]
+    raw_display_df = sorted_df.rename(columns={"created": "Created at", "updated": "Updated at", "completion_pct": "Completion %", "original_estimate": "Original Estimate", "logged_time": "Logged Time"})
     st.dataframe(raw_display_df, use_container_width=True)
 
     st.divider()
