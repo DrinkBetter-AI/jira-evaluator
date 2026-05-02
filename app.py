@@ -58,7 +58,20 @@ def _render_metrics(df: pd.DataFrame) -> None:
     m4.metric("Oldest Ticket Age", f"{oldest:.1f}")
 
 
-def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority") -> None:
+_PRIORITY_BUCKET_MAP = {
+    "none": "Low",
+    "low": "Low",
+    "lowest": "Low",
+    "normal": "Low",
+    "medium": "Low",
+    "high": "High",
+    "highest": "Urgent",
+    "urgent": "Urgent",
+}
+_BUCKET_COLORS = {"Low": "#2ECC71", "High": "#F5A623", "Urgent": "#E74C3C"}
+
+
+def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority", agg_priority: bool = False) -> None:
     if df.empty:
         st.info("No data available for staleness bubble chart.")
         return
@@ -91,20 +104,42 @@ def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority") -> None:
 
     # Normalise bubble size so smallest is still visible.
     age = plot_df["ticket_age_days"].clip(lower=1)
-    plot_df["bubble_size"] = ((age - age.min()) / (age.max() - age.min() + 1e-9) * 28 + 6).round(1)
+    plot_df["bubble_size"] = ((age - age.min()) / (age.max() - age.min() + 1e-9) * 31 + 3).round(1)
 
-    fig = px.scatter(
-        plot_df,
-        x="idle_days",
-        y="y_jitter",
-        size="bubble_size",
-        color=color_by,
-        custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days"],
-        title="Staleness vs Workflow Status",
-        labels={"idle_days": "Idle Days", "y_jitter": "Status"},
-        size_max=34,
-        opacity=0.3,
-    )
+    # Aggregate priority bucket if requested.
+    if agg_priority and color_by == "priority":
+        plot_df["priority_bucket"] = (
+            plot_df["priority"].fillna("none").astype(str).str.strip().str.lower()
+            .map(_PRIORITY_BUCKET_MAP)
+            .fillna("Low")
+        )
+        fig = px.scatter(
+            plot_df,
+            x="idle_days",
+            y="y_jitter",
+            size="bubble_size",
+            color="priority_bucket",
+            color_discrete_map=_BUCKET_COLORS,
+            category_orders={"priority_bucket": ["Low", "High", "Urgent"]},
+            custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days"],
+            title="Staleness vs Workflow Status (Aggregated Priority)",
+            labels={"idle_days": "Idle Days", "y_jitter": "Status", "priority_bucket": "Priority"},
+            size_max=34,
+            opacity=0.3,
+        )
+    else:
+        fig = px.scatter(
+            plot_df,
+            x="idle_days",
+            y="y_jitter",
+            size="bubble_size",
+            color=color_by,
+            custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days"],
+            title="Staleness vs Workflow Status",
+            labels={"idle_days": "Idle Days", "y_jitter": "Status"},
+            size_max=34,
+            opacity=0.3,
+        )
 
     fig.update_traces(
         hovertemplate=(
@@ -273,7 +308,12 @@ def main() -> None:
 
     _render_metrics(filtered)
 
-    _render_bubble_chart(filtered, color_by=color_by)
+    agg_priority = st.checkbox(
+        "Aggregate Priorities (Normal / High / Urgent)",
+        value=False,
+        help="Buckets: Normal = None/Low/Normal · High = High · Urgent = Highest/Urgent",
+    )
+    _render_bubble_chart(filtered, color_by=color_by, agg_priority=agg_priority)
 
     st.subheader("Raw Tickets")
     raw_columns = [
