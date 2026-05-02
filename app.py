@@ -78,8 +78,6 @@ def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority", agg_prior
 
     plot_df = df.copy()
 
-    # Assign a numeric Y position per status so we can add jitter around it.
-    # Fixed order bottom (0) → top (n).
     STATUS_ORDER = [
         "Backlog",
         "DISCUSSION NEEDED",
@@ -102,11 +100,9 @@ def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority", agg_prior
     )
     plot_df["status_label"] = statuses
 
-    # Normalise bubble size so smallest is still visible.
     age = plot_df["ticket_age_days"].clip(lower=1)
     plot_df["bubble_size"] = ((age - age.min()) / (age.max() - age.min() + 1e-9) * 31 + 3).round(1)
 
-    # Aggregate priority bucket if requested.
     if agg_priority and color_by == "priority":
         plot_df["priority_bucket"] = (
             plot_df["priority"].fillna("none").astype(str).str.strip().str.lower()
@@ -154,7 +150,6 @@ def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority", agg_prior
         )
     )
 
-    # Replace numeric Y ticks with status labels.
     fig.update_yaxes(
         tickmode="array",
         tickvals=list(status_to_y.values()),
@@ -320,10 +315,12 @@ def main() -> None:
         "key",
         "summary",
         "status",
-        "status_category",
         "priority",
         "assignee",
         "reporter",
+        "original_estimate",
+        "logged_time",
+        "completion_pct",
         "ticket_age_days",
         "idle_days",
         "created",
@@ -333,10 +330,12 @@ def main() -> None:
         "key": "Key",
         "summary": "Summary",
         "status": "Status",
-        "status_category": "Status Category",
         "priority": "Priority",
         "assignee": "Assignee",
         "reporter": "Reporter",
+        "original_estimate": "Original Estimate",
+        "logged_time": "Logged Time",
+        "completion_pct": "Completion %",
         "ticket_age_days": "Age (days)",
         "idle_days": "Idle (days)",
         "created": "Created at",
@@ -371,7 +370,7 @@ def main() -> None:
     raw_display_df = (
         filtered[raw_columns]
         .sort_values(sort_cols, ascending=sort_asc)
-        .rename(columns={"created": "Created at", "updated": "Updated at"})
+        .rename(columns={"created": "Created at", "updated": "Updated at", "completion_pct": "Completion %", "original_estimate": "Original Estimate", "logged_time": "Logged Time"})
     )
     st.dataframe(raw_display_df, use_container_width=True)
 

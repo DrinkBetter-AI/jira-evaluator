@@ -22,6 +22,7 @@ DEFAULT_FIELDS = [
     "labels",
     "resolution",
     "statuscategorychangedate",
+    "timetracking",
 ]
 
 
@@ -354,6 +355,10 @@ class JiraClient:
             priority = fields.get("priority") or {}
             issue_type = fields.get("issuetype") or {}
             resolution = fields.get("resolution") or {}
+            timetracking = fields.get("timetracking") or {}
+            time_spent_sec = timetracking.get("timeSpentSeconds") or 0
+            orig_est_sec = timetracking.get("originalEstimateSeconds") or 0
+            completion_pct = round(time_spent_sec / orig_est_sec * 100, 1) if orig_est_sec > 0 else None
 
             rows.append(
                 {
@@ -372,6 +377,9 @@ class JiraClient:
                     "labels": ", ".join(fields.get("labels", [])),
                     "resolution": resolution.get("name"),
                     "status_category_changed_date": fields.get("statuscategorychangedate"),
+                    "original_estimate": timetracking.get("originalEstimate"),
+                    "logged_time": timetracking.get("timeSpent"),
+                    "completion_pct": completion_pct,
                     "ticket_url": f"{self.base_url}/browse/{issue.get('key')}",
                 }
             )
