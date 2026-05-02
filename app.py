@@ -287,10 +287,52 @@ def main() -> None:
         "ticket_age_days",
         "idle_days",
         "created",
-        "updated"
+        "updated",
     ]
-    raw_display_df = filtered.sort_values(["idle_days", "ticket_age_days"], ascending=[False, False])[raw_columns]
-    raw_display_df = raw_display_df.rename(columns={"created": "Created at", "updated": "Updated at"})
+    SORT_DISPLAY = {
+        "key": "Key",
+        "summary": "Summary",
+        "status": "Status",
+        "status_category": "Status Category",
+        "priority": "Priority",
+        "assignee": "Assignee",
+        "reporter": "Reporter",
+        "ticket_age_days": "Age (days)",
+        "idle_days": "Idle (days)",
+        "created": "Created at",
+        "updated": "Updated at",
+    }
+    SORT_DISPLAY_INV = {v: k for k, v in SORT_DISPLAY.items()}
+
+    with st.expander("Sort order (SQL-style ORDER BY)", expanded=False):
+        n_sorts = st.number_input("Number of sort levels", min_value=1, max_value=5, value=2, step=1)
+        sort_cols: list[str] = []
+        sort_asc: list[bool] = []
+        sort_row_cols = st.columns(int(n_sorts))
+        for i, col_widget in enumerate(sort_row_cols):
+            with col_widget:
+                default_col = list(SORT_DISPLAY.values())[min(i, len(SORT_DISPLAY) - 1)]
+                chosen_label = st.selectbox(
+                    f"Level {i + 1} column",
+                    options=list(SORT_DISPLAY.values()),
+                    index=list(SORT_DISPLAY.values()).index(default_col),
+                    key=f"sort_col_{i}",
+                )
+                direction = st.radio(
+                    "Direction",
+                    options=["ASC", "DESC"],
+                    index=0,
+                    horizontal=True,
+                    key=f"sort_dir_{i}",
+                )
+                sort_cols.append(SORT_DISPLAY_INV[chosen_label])
+                sort_asc.append(direction == "ASC")
+
+    raw_display_df = (
+        filtered[raw_columns]
+        .sort_values(sort_cols, ascending=sort_asc)
+        .rename(columns={"created": "Created at", "updated": "Updated at"})
+    )
     st.dataframe(raw_display_df, use_container_width=True)
 
     st.divider()
