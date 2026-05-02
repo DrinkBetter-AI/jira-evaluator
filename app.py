@@ -152,13 +152,16 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
 
     editable = str(selected_row["sprint_state"]).lower() in {"future", "active"}
     ticket_editor_df = df.copy()
+    ticket_editor_df = ticket_editor_df[
+        ticket_editor_df["issue_type"].fillna("").astype(str).str.strip().str.lower() != "epic"
+    ].copy()
     ticket_editor_df["in_selected_sprint"] = (
         ticket_editor_df["sprint_id"].fillna(-1).astype(str) == str(selected_row["sprint_id"])
     )
     ticket_editor_df["include"] = ticket_editor_df["in_selected_sprint"]
     ticket_editor_df["estimate_edit"] = ticket_editor_df["original_estimate"].fillna("")
     ticket_editor_df = ticket_editor_df[
-        ["include", "key", "summary", "assignee", "status", "estimate_edit", "logged_time"]
+        ["include", "key", "summary", "assignee", "status", "estimate_edit", "logged_time", "issue_type"]
     ].sort_values(["include", "assignee", "key"], ascending=[False, True, True])
 
     st.markdown("##### Sprint Tickets")
@@ -167,7 +170,7 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
         ticket_editor_df,
         use_container_width=True,
         hide_index=True,
-        disabled=(not editable) or (not is_ml_sprint) or ["key", "summary", "assignee", "status", "logged_time"],
+        disabled=(not editable) or (not is_ml_sprint) or ["key", "summary", "assignee", "status", "logged_time", "issue_type"],
         column_config={
             "include": st.column_config.CheckboxColumn("In Sprint"),
             "key": "Key",
@@ -179,6 +182,7 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
                 help="Editable Jira estimate format (examples: 2h, 1d 2h, 30m)",
             ),
             "logged_time": "Logged",
+            "issue_type": "Type",
         },
         key=f"sprint_editor_{selected_row['sprint_id']}",
     )
