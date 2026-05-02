@@ -209,6 +209,43 @@ class JiraClient:
                 f"Failed to update {key} ({response.status_code}): {response.text[:300]}"
             )
 
+    def get_issue(self, key: str, fields: list[str] | None = None) -> dict[str, Any]:
+        """Fetch a Jira issue payload for a key."""
+        url = f"{self.base_url}/rest/api/3/issue/{key}"
+        params: dict[str, str] = {}
+        if fields:
+            params["fields"] = ",".join(fields)
+
+        with self._session() as session:
+            response = session.get(url, params=params, timeout=30)
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Failed to fetch issue {key} ({response.status_code}): {response.text[:300]}"
+            )
+        return response.json() or {}
+
+    def get_issue_snapshot(self, key: str) -> dict[str, Any]:
+        """Return a compact live snapshot used for audit/revert."""
+        issue = self.get_issue(key, fields=["summary", "status", "priority", "updated"])
+        fields = issue.get("fields") or {}
+        priority = fields.get("priority") or {}
+        status = fields.get("status") or {}
+        return {
+            "key": key,
+            "summary": fields.get("summary"),
+            "status": status.get("name"),
+            "priority": priority.get("name"),
+            "priority_id": priority.get("id"),
+            "updated": fields.get("updated"),
+        }
+
+    def set_priority(self, key: str, priority_name: str) -> None:
+        self.update_issue(key, {"priority": {"name": priority_name}})
+
+    def set_priority_by_id(self, key: str, priority_id: str) -> None:
+        self.update_issue(key, {"priority": {"id": priority_id}})
+
     def bulk_update_priority(
         self,
         keys: list[str],
@@ -221,7 +258,7 @@ class JiraClient:
         failed: dict[str, str] = {}
         for key in keys:
             try:
-                self.update_issue(key, {"priority": {"name": priority_name}})
+                self.set_priority(key, priority_name)
                 succeeded.append(key)
             except Exception as exc:  # noqa: BLE001
                 failed[key] = str(exc)
@@ -266,6 +303,24 @@ class JiraClient:
                 f"Failed to transition {key} ({response.status_code}): {response.text[:300]}"
             )
 
+    def transition_issue_to_status(self, key: str, to_status_name: str) -> None:
+        """Transition a Jira issue to a target status name when valid."""
+        target = to_status_name.strip().lower()
+        transitions = self.get_issue_transitions(key)
+        matched = next(
+            (t for t in transitions if t.get("to_status", "").strip().lower() == target),
+            None,
+        )
+        if not matched:
+            available = ", ".join(
+                sorted({t.get("to_status", "") for t in transitions if t.get("to_status")})
+            )
+            raise RuntimeError(
+                "No valid transition to target status. "
+                + (f"Available: {available}" if available else "No transitions available")
+            )
+        self.transition_issue(key, matched["id"])
+
     def bulk_transition_status(
         self,
         keys: list[str],
@@ -280,21 +335,7 @@ class JiraClient:
 
         for key in keys:
             try:
-                transitions = self.get_issue_transitions(key)
-                matched = next(
-                    (t for t in transitions if t.get("to_status", "").strip().lower() == target),
-                    None,
-                )
-                if not matched:
-                    available = ", ".join(
-                        sorted({t.get("to_status", "") for t in transitions if t.get("to_status")})
-                    )
-                    raise RuntimeError(
-                        "No valid transition to target status. "
-                        + (f"Available: {available}" if available else "No transitions available")
-                    )
-
-                self.transition_issue(key, matched["id"])
+                self.transition_issue_to_status(key, target)
                 succeeded.append(key)
             except Exception as exc:  # noqa: BLE001
                 failed[key] = str(exc)

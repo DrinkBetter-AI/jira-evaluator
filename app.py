@@ -6,6 +6,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from change_audit import (
+    append_operation,
+    finalize_operation,
+    load_operations,
+    new_operation_record,
+    summarize_operations,
+)
 from jira_client import DEFAULT_FIELDS, JiraClient, JiraConfigError
 from transformations import DEFAULT_ACTIVE_STATUSES, add_ticket_health_fields
 
@@ -151,6 +158,72 @@ def _render_zombie_table(df: pd.DataFrame) -> None:
         return
 
     st.dataframe(zombies, use_container_width=True)
+
+
+def _apply_action_with_audit(
+    client: JiraClient,
+    action_type: str,
+    selected_keys: list[str],
+    target: str,
+    source_status: str | None = None,
+    parent_operation_id: str | None = None,
+) -> tuple[list[str], dict[str, str], dict[str, object]]:
+    operation = new_operation_record(
+        action_type=action_type,
+        target=target,
+        selected_keys=selected_keys,
+        source_status=source_status,
+        parent_operation_id=parent_operation_id,
+    )
+
+    items: list[dict[str, object]] = []
+    succeeded: list[str] = []
+    failed: dict[str, str] = {}
+
+    for key in selected_keys:
+        before_snapshot: dict[str, object] = {}
+        try:
+            before_snapshot = client.get_issue_snapshot(key)
+
+            if action_type == "priority":
+                client.set_priority(key, target)
+            elif action_type == "status":
+                client.transition_issue_to_status(key, target)
+            elif action_type == "revert_priority":
+                prior_id = str(target).strip()
+                if prior_id:
+                    client.set_priority_by_id(key, prior_id)
+                else:
+                    raise RuntimeError("Cannot revert: original priority id is missing.")
+            elif action_type == "revert_status":
+                client.transition_issue_to_status(key, target)
+            else:
+                raise RuntimeError(f"Unsupported action type: {action_type}")
+
+            after_snapshot = client.get_issue_snapshot(key)
+            items.append(
+                {
+                    "key": key,
+                    "success": True,
+                    "before": before_snapshot,
+                    "after": after_snapshot,
+                }
+            )
+            succeeded.append(key)
+        except Exception as exc:  # noqa: BLE001
+            failed[key] = str(exc)
+            items.append(
+                {
+                    "key": key,
+                    "success": False,
+                    "before": before_snapshot,
+                    "error": str(exc),
+                }
+            )
+
+    operation = finalize_operation(operation, items)
+    append_operation(operation)
+    return succeeded, failed, operation
 
 
 def main() -> None:
@@ -334,13 +407,24 @@ def main() -> None:
         )
         with st.spinner(f"Updating {len(selected_keys)} tickets..."):
             if action_type == "Set None-priority tickets":
-                succeeded, failed = client.bulk_update_priority(selected_keys, target_priority)
+                succeeded, failed, operation = _apply_action_with_audit(
+                    client=client,
+                    action_type="priority",
+                    selected_keys=selected_keys,
+                    target=target_priority,
+                )
             else:
-                succeeded, failed = client.bulk_transition_status(selected_keys, target_status)
+                succeeded, failed, operation = _apply_action_with_audit(
+                    client=client,
+                    action_type="status",
+                    selected_keys=selected_keys,
+                    target=target_status,
+                    source_status=source_status,
+                )
 
         if succeeded:
             st.success(
-                f"Updated {len(succeeded)} ticket(s) to {target_label}."
+                f"Updated {len(succeeded)} ticket(s) to {target_label}. Operation ID: {operation['operation_id']}"
             )
         if failed:
             for key, err in failed.items():
@@ -348,6 +432,93 @@ def main() -> None:
 
         st.cache_data.clear()
         st.rerun()
+
+    st.divider()
+    st.subheader("Change History and Revert")
+    operations = load_operations(limit=30)
+    if not operations:
+        st.info("No write operations have been logged yet.")
+    else:
+        st.dataframe(pd.DataFrame(summarize_operations(operations)), use_container_width=True)
+
+        op_options = {
+            (
+                f"{op.get('created_at', '')} | {op.get('action_type', '')} | "
+                f"{op.get('target', '')} | success={op.get('success_count', 0)} | "
+                f"id={str(op.get('operation_id', ''))[:8]}"
+            ): op
+            for op in operations
+            if op.get("success_count", 0) > 0
+        }
+
+        if not op_options:
+            st.caption("No successful operation available for revert.")
+        else:
+            selected_label = st.selectbox(
+                "Select operation to revert",
+                options=list(op_options.keys()),
+            )
+            selected_operation = op_options[selected_label]
+            confirm_revert = st.checkbox("I understand revert may partially fail due to Jira workflow rules.")
+
+            revert_clicked = st.button("Revert selected operation", disabled=not confirm_revert)
+
+            if revert_clicked:
+                client = JiraClient.from_yaml(
+                    creds_path="~/.creds/vinovoss.yml",
+                    profile_name="ML-TEAM-MANAGEMENT",
+                )
+
+                revert_succeeded: list[str] = []
+                revert_failed: dict[str, str] = {}
+                parent_id = selected_operation.get("operation_id")
+                successful_items = [it for it in selected_operation.get("items", []) if it.get("success")]
+
+                with st.spinner(f"Reverting {len(successful_items)} ticket(s)..."):
+                    for item in successful_items:
+                        key = str(item.get("key", ""))
+                        before = item.get("before") or {}
+                        try:
+                            if selected_operation.get("action_type") == "priority":
+                                original_priority_id = before.get("priority_id")
+                                if not original_priority_id:
+                                    raise RuntimeError("Original priority id missing in audit record.")
+
+                                rev_succeeded, rev_failed, rev_op = _apply_action_with_audit(
+                                    client=client,
+                                    action_type="revert_priority",
+                                    selected_keys=[key],
+                                    target=str(original_priority_id),
+                                    parent_operation_id=str(parent_id),
+                                )
+                            elif selected_operation.get("action_type") == "status":
+                                original_status = before.get("status")
+                                if not original_status:
+                                    raise RuntimeError("Original status missing in audit record.")
+
+                                rev_succeeded, rev_failed, rev_op = _apply_action_with_audit(
+                                    client=client,
+                                    action_type="revert_status",
+                                    selected_keys=[key],
+                                    target=str(original_status),
+                                    parent_operation_id=str(parent_id),
+                                )
+                            else:
+                                raise RuntimeError("Selected operation type is not revertible by this tool.")
+
+                            revert_succeeded.extend(rev_succeeded)
+                            revert_failed.update(rev_failed)
+                        except Exception as exc:  # noqa: BLE001
+                            revert_failed[key] = str(exc)
+
+                if revert_succeeded:
+                    st.success(f"Reverted {len(revert_succeeded)} ticket(s).")
+                if revert_failed:
+                    for key, err in revert_failed.items():
+                        st.error(f"Revert failed for {key}: {err}")
+
+                st.cache_data.clear()
+                st.rerun()
 
     st.caption(
         f"Active status set for zombie logic: {', '.join(sorted(DEFAULT_ACTIVE_STATUSES))}"
