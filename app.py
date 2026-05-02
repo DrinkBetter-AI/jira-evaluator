@@ -102,7 +102,11 @@ def _parse_estimate_to_seconds(value: str) -> float | None:
     return total
 
 
-def _render_sprint_capacity(df: pd.DataFrame, status_source_df: pd.DataFrame | None = None) -> None:
+def _render_sprint_capacity(
+    df: pd.DataFrame,
+    status_source_df: pd.DataFrame | None = None,
+    selected_ticket_key: str | None = None,
+) -> None:
     """Show sprint capacity breakdown for a selected future/active sprint, grouped by assignee."""
     required_cols = {"sprint_id", "sprint_name", "sprint_state", "sprint_board_id"}
     missing_cols = sorted(required_cols - set(df.columns))
@@ -153,9 +157,34 @@ def _render_sprint_capacity(df: pd.DataFrame, status_source_df: pd.DataFrame | N
     )
     ticket_editor_df["include"] = ticket_editor_df["in_selected_sprint"]
     ticket_editor_df["estimate_edit"] = ticket_editor_df["original_estimate"].fillna("")
+    sprint_ticket_columns = [
+        "include",
+        "key",
+        "summary",
+        "status",
+        "priority",
+        "assignee",
+        "reporter",
+        "estimate_edit",
+        "original_estimate",
+        "logged_time",
+        "completion_pct",
+        "ticket_age_days",
+        "idle_days",
+        "created",
+        "updated",
+        "issue_type",
+    ]
     ticket_editor_df = ticket_editor_df[
-        ["include", "key", "summary", "assignee", "status", "estimate_edit", "logged_time", "issue_type"]
+        sprint_ticket_columns
     ].sort_values(["include", "assignee", "key"], ascending=[False, True, True])
+
+    # display_editor_df is only used for what the user sees — bubble click narrows rows here only.
+    if selected_ticket_key:
+        selected_mask = ticket_editor_df["key"].astype(str) == str(selected_ticket_key)
+        display_editor_df = ticket_editor_df[selected_mask].copy() if selected_mask.any() else ticket_editor_df
+    else:
+        display_editor_df = ticket_editor_df
 
     st.markdown("##### Sprint Tickets")
     st.caption("Check tickets to preview keeping them in or moving them into the selected sprint. Uncheck them to preview sending them to backlog.")
@@ -165,29 +194,61 @@ def _render_sprint_capacity(df: pd.DataFrame, status_source_df: pd.DataFrame | N
         st.session_state[editor_version_key] = 0
     editor_widget_key = f"{editor_key}_{st.session_state[editor_version_key]}"
     edited_tickets = st.data_editor(
-        ticket_editor_df,
+        display_editor_df,
         use_container_width=True,
         hide_index=True,
-        disabled=(not editable) or (not is_ml_sprint) or ["key", "summary", "assignee", "status", "logged_time", "issue_type"],
+        disabled=(not editable) or (not is_ml_sprint) or [
+            "key",
+            "summary",
+            "status",
+            "priority",
+            "assignee",
+            "reporter",
+            "original_estimate",
+            "logged_time",
+            "completion_pct",
+            "ticket_age_days",
+            "idle_days",
+            "created",
+            "updated",
+            "issue_type",
+        ],
         column_config={
             "include": st.column_config.CheckboxColumn("In Sprint"),
             "key": "Key",
             "summary": "Summary",
-            "assignee": "Assignee",
             "status": "Status",
+            "priority": "Priority",
+            "assignee": "Assignee",
+            "reporter": "Reporter",
             "estimate_edit": st.column_config.TextColumn(
                 "Estimate",
                 help="Editable Jira estimate format (examples: 2h, 1d 2h, 30m)",
             ),
+            "original_estimate": "Original Estimate",
             "logged_time": "Logged",
+            "completion_pct": "Completion %",
+            "ticket_age_days": "Age (days)",
+            "idle_days": "Idle (days)",
+            "created": "Created at",
+            "updated": "Updated at",
             "issue_type": "Type",
         },
         key=editor_widget_key,
     )
 
-    desired_in_sprint = set(edited_tickets.loc[edited_tickets["include"], "key"].astype(str).tolist())
-    # Compare against only the tickets shown in Sprint Tickets to avoid hidden-row drift
-    # (e.g., excluded Epic rows creating phantom backlog deltas).
+    # Merge edits from displayed rows back into the full ticket_editor_df for correct delta calculation.
+    edited_keys = edited_tickets["key"].astype(str).tolist()
+    full_with_edits = ticket_editor_df.copy()
+    if edited_keys:
+        full_with_edits = full_with_edits.set_index("key")
+        edited_idx = edited_tickets.set_index("key")
+        for col in ["include", "estimate_edit"]:
+            if col in edited_idx.columns:
+                full_with_edits.loc[full_with_edits.index.isin(edited_idx.index), col] = edited_idx[col]
+        full_with_edits = full_with_edits.reset_index()
+
+    desired_in_sprint = set(full_with_edits.loc[full_with_edits["include"], "key"].astype(str).tolist())
     current_in_sprint = set(
         ticket_editor_df.loc[ticket_editor_df["include"], "key"].astype(str).tolist()
     )
@@ -198,7 +259,7 @@ def _render_sprint_capacity(df: pd.DataFrame, status_source_df: pd.DataFrame | N
         ticket_editor_df.set_index("key")["estimate_edit"].fillna("").astype(str).str.strip().to_dict()
     )
     edited_estimate_by_key = (
-        edited_tickets.set_index("key")["estimate_edit"].fillna("").astype(str).str.strip().to_dict()
+        full_with_edits.set_index("key")["estimate_edit"].fillna("").astype(str).str.strip().to_dict()
     )
     parsed_estimate_seconds_by_key: dict[str, float] = {}
     invalid_estimate_keys: list[str] = []
@@ -224,7 +285,7 @@ def _render_sprint_capacity(df: pd.DataFrame, status_source_df: pd.DataFrame | N
     changed_keys = set(to_add) | set(to_backlog) | set(estimate_updates.keys())
     if changed_keys:
         st.caption("Pending row changes (highlighted)")
-        changed_preview = edited_tickets[edited_tickets["key"].astype(str).isin(changed_keys)].copy()
+        changed_preview = full_with_edits[full_with_edits["key"].astype(str).isin(changed_keys)].copy()
 
         def _change_type(key: str) -> str:
             parts: list[str] = []
@@ -238,7 +299,25 @@ def _render_sprint_capacity(df: pd.DataFrame, status_source_df: pd.DataFrame | N
 
         changed_preview["change_type"] = changed_preview["key"].astype(str).map(_change_type)
         changed_preview = changed_preview[
-            ["change_type", "include", "key", "summary", "assignee", "status", "estimate_edit", "logged_time", "issue_type"]
+            [
+                "change_type",
+                "include",
+                "key",
+                "summary",
+                "status",
+                "priority",
+                "assignee",
+                "reporter",
+                "estimate_edit",
+                "original_estimate",
+                "logged_time",
+                "completion_pct",
+                "ticket_age_days",
+                "idle_days",
+                "created",
+                "updated",
+                "issue_type",
+            ]
         ]
 
         def _highlight_row(_: pd.Series) -> list[str]:
@@ -668,90 +747,15 @@ def main() -> None:
     )
     selected_key = _render_bubble_chart(filtered, color_by=color_by, agg_priority=agg_priority)
 
-    # One-shot filtering: only apply when a click event is present on this rerun.
-    if selected_key and selected_key in filtered["key"].values:
-        st.info(f"Showing only: **{selected_key}** in Sprint Capacity")
-        view_df = filtered[filtered["key"] == selected_key]
-    else:
-        view_df = filtered
+    active_sprint_ticket_key = selected_key if selected_key and selected_key in filtered["key"].values else None
 
     st.divider()
     st.subheader("Sprint Capacity")
-    _render_sprint_capacity(view_df, status_source_df=filtered)
-
-    st.subheader("Raw Tickets")
-    search_term = st.text_input(
-        "Search tickets",
-        placeholder="Filter by ID, summary, assignee, status…",
+    _render_sprint_capacity(
+        filtered,
+        status_source_df=filtered,
+        selected_ticket_key=active_sprint_ticket_key,
     )
-    raw_columns = [
-        "key",
-        "summary",
-        "status",
-        "priority",
-        "assignee",
-        "reporter",
-        "original_estimate",
-        "logged_time",
-        "completion_pct",
-        "ticket_age_days",
-        "idle_days",
-        "created",
-        "updated",
-    ]
-    SORT_DISPLAY = {
-        "key": "Key",
-        "summary": "Summary",
-        "status": "Status",
-        "priority": "Priority",
-        "assignee": "Assignee",
-        "reporter": "Reporter",
-        "original_estimate": "Original Estimate",
-        "logged_time": "Logged Time",
-        "completion_pct": "Completion %",
-        "ticket_age_days": "Age (days)",
-        "idle_days": "Idle (days)",
-        "created": "Created at",
-        "updated": "Updated at",
-    }
-    SORT_DISPLAY_INV = {v: k for k, v in SORT_DISPLAY.items()}
-
-    with st.expander("Sort order (SQL-style ORDER BY)", expanded=False):
-        n_sorts = st.number_input("Number of sort levels", min_value=1, max_value=5, value=2, step=1)
-        sort_cols: list[str] = []
-        sort_asc: list[bool] = []
-        sort_row_cols = st.columns(int(n_sorts))
-        for i, col_widget in enumerate(sort_row_cols):
-            with col_widget:
-                default_col = list(SORT_DISPLAY.values())[min(i, len(SORT_DISPLAY) - 1)]
-                chosen_label = st.selectbox(
-                    f"Level {i + 1} column",
-                    options=list(SORT_DISPLAY.values()),
-                    index=list(SORT_DISPLAY.values()).index(default_col),
-                    key=f"sort_col_{i}",
-                )
-                direction = st.radio(
-                    "Direction",
-                    options=["ASC", "DESC"],
-                    index=0,
-                    horizontal=True,
-                    key=f"sort_dir_{i}",
-                )
-                sort_cols.append(SORT_DISPLAY_INV[chosen_label])
-                sort_asc.append(direction == "ASC")
-
-    sorted_df = filtered[raw_columns].sort_values(sort_cols, ascending=sort_asc)
-    if search_term:
-        mask = (
-            sorted_df["key"].astype(str).str.contains(search_term, case=False, na=False)
-            | sorted_df["summary"].astype(str).str.contains(search_term, case=False, na=False)
-            | sorted_df["assignee"].astype(str).str.contains(search_term, case=False, na=False)
-            | sorted_df["status"].astype(str).str.contains(search_term, case=False, na=False)
-            | sorted_df["priority"].astype(str).str.contains(search_term, case=False, na=False)
-        )
-        sorted_df = sorted_df[mask]
-    raw_display_df = sorted_df.rename(columns={"created": "Created at", "updated": "Updated at", "completion_pct": "Completion %", "original_estimate": "Original Estimate", "logged_time": "Logged Time"})
-    st.dataframe(raw_display_df, use_container_width=True)
 
     st.divider()
     st.subheader("Suggested First Action")
