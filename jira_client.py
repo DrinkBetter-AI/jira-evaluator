@@ -23,6 +23,7 @@ DEFAULT_FIELDS = [
     "resolution",
     "statuscategorychangedate",
     "timetracking",
+    "customfield_10020",
 ]
 
 
@@ -360,6 +361,30 @@ class JiraClient:
             orig_est_sec = timetracking.get("originalEstimateSeconds") or 0
             completion_pct = round(time_spent_sec / orig_est_sec * 100, 1) if orig_est_sec > 0 else None
 
+            # Parse sprint info from customfield_10020 (array of sprint objects).
+            sprints_raw = fields.get("customfield_10020") or []
+            future_sprints: list[dict[str, Any]] = []
+            active_sprints: list[dict[str, Any]] = []
+            closed_sprints: list[dict[str, Any]] = []
+            for sp in sprints_raw:
+                if not isinstance(sp, dict):
+                    continue
+                state = (sp.get("state") or "").lower()
+                if state == "future":
+                    future_sprints.append(sp)
+                elif state == "active":
+                    active_sprints.append(sp)
+                elif state == "closed":
+                    closed_sprints.append(sp)
+
+            chosen_sprint = (future_sprints or active_sprints or closed_sprints or [None])[-1]
+            sprint_name = chosen_sprint.get("name") if chosen_sprint else None
+            sprint_state = chosen_sprint.get("state") if chosen_sprint else None
+            sprint_board_id = chosen_sprint.get("boardId") if chosen_sprint else None
+
+            # Carry-over means the ticket is currently planned/in-flight and was also present in prior closed sprints.
+            carry_over_count = len(closed_sprints) if (future_sprints or active_sprints) else 0
+
             rows.append(
                 {
                     "key": issue.get("key"),
@@ -380,6 +405,12 @@ class JiraClient:
                     "original_estimate": timetracking.get("originalEstimate"),
                     "logged_time": timetracking.get("timeSpent"),
                     "completion_pct": completion_pct,
+                    "original_estimate_sec": orig_est_sec,
+                    "time_spent_sec": time_spent_sec,
+                    "sprint_name": sprint_name,
+                    "sprint_state": sprint_state,
+                    "sprint_board_id": sprint_board_id,
+                    "carry_over_count": carry_over_count,
                     "ticket_url": f"{self.base_url}/browse/{issue.get('key')}",
                 }
             )

@@ -58,8 +58,95 @@ def _render_metrics(df: pd.DataFrame) -> None:
     m4.metric("Oldest Ticket Age", f"{oldest:.1f}")
 
 
+def _fmt_seconds(secs: float) -> str:
+    """Convert seconds to a human-readable h/m string."""
+    if secs <= 0:
+        return "—"
+    h = int(secs // 3600)
+    m = int((secs % 3600) // 60)
+    if h and m:
+        return f"{h}h {m}m"
+    if h:
+        return f"{h}h"
+    return f"{m}m"
+
+
+def _render_sprint_capacity(df: pd.DataFrame) -> None:
+    """Show sprint capacity breakdown for a selected future/active sprint, grouped by assignee."""
+    sprint_df = df[df["sprint_name"].notna()].copy() if "sprint_name" in df.columns else pd.DataFrame()
+    if sprint_df.empty:
+        st.info("No sprint data found. Ensure your Jira board uses sprints and the sprint field is enabled.")
+        return
+
+    sprint_df["sprint_state"] = sprint_df["sprint_state"].fillna("").astype(str)
+    non_closed = sprint_df[sprint_df["sprint_state"].str.lower().isin(["future", "active"])]
+    target_df = non_closed if not non_closed.empty else sprint_df
+
+    state_rank = {"future": 0, "active": 1, "closed": 2, "": 3}
+    sprint_options_df = (
+        target_df[["sprint_name", "sprint_state", "sprint_board_id"]]
+        .drop_duplicates()
+        .assign(
+            state_rank=lambda frame: frame["sprint_state"].str.lower().map(state_rank).fillna(9),
+            sprint_label=lambda frame: frame["sprint_name"] + " (" + frame["sprint_state"].str.title().replace("", "Unknown") + ")",
+        )
+        .sort_values(["state_rank", "sprint_name"])
+    )
+    sprint_labels = sprint_options_df["sprint_label"].tolist()
+    default_idx = 0
+    selected_label = st.selectbox("Sprint", options=sprint_labels, index=default_idx)
+    selected_row = sprint_options_df.loc[sprint_options_df["sprint_label"] == selected_label].iloc[0]
+
+    scoped = target_df[
+        (target_df["sprint_name"] == selected_row["sprint_name"])
+        & (target_df["sprint_state"] == selected_row["sprint_state"])
+    ].copy()
+    carry_over = scoped[scoped["carry_over_count"] > 0] if "carry_over_count" in scoped.columns else pd.DataFrame()
+
+    st.markdown(f"**Selected sprint:** {selected_row['sprint_name']} ({str(selected_row['sprint_state']).title()})")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Tickets in sprint", len(scoped))
+    c2.metric("Carry-overs (from prev. sprints)", len(carry_over))
+    c3.metric(
+        "Total estimated (sprint)",
+        _fmt_seconds(scoped["original_estimate_sec"].fillna(0).sum()),
+    )
+
+    # Per-assignee breakdown
+    st.markdown("##### Capacity per Assignee")
+    agg = (
+        scoped.groupby("assignee")
+        .agg(
+            tickets=("key", "count"),
+            carry_overs=("carry_over_count", lambda x: (x > 0).sum()),
+            estimated_sec=("original_estimate_sec", "sum"),
+            logged_sec=("time_spent_sec", "sum"),
+        )
+        .reset_index()
+    )
+    agg["Total Estimated"] = agg["estimated_sec"].apply(_fmt_seconds)
+    agg["Total Logged"] = agg["logged_sec"].apply(_fmt_seconds)
+    agg["Remaining"] = (agg["estimated_sec"] - agg["logged_sec"]).clip(lower=0).apply(_fmt_seconds)
+    agg = agg.rename(columns={"assignee": "Assignee", "tickets": "Tickets", "carry_overs": "Carry-overs"})
+    st.dataframe(
+        agg[["Assignee", "Tickets", "Carry-overs", "Total Estimated", "Total Logged", "Remaining"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    if not carry_over.empty:
+        with st.expander(f"Carry-over tickets ({len(carry_over)})", expanded=False):
+            co_cols = ["key", "summary", "assignee", "status", "carry_over_count", "original_estimate", "logged_time"]
+            available = [c for c in co_cols if c in carry_over.columns]
+            st.dataframe(
+                carry_over[available].rename(columns={"carry_over_count": "+Sprints", "original_estimate": "Estimate", "logged_time": "Logged"}),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
 _PRIORITY_BUCKET_MAP = {
-    "none": "Low",
     "low": "Low",
     "lowest": "Low",
     "normal": "Low",
@@ -309,6 +396,10 @@ def main() -> None:
         help="Buckets: Normal = None/Low/Normal · High = High · Urgent = Highest/Urgent",
     )
     _render_bubble_chart(filtered, color_by=color_by, agg_priority=agg_priority)
+
+    st.divider()
+    st.subheader("Sprint Capacity")
+    _render_sprint_capacity(filtered)
 
     st.subheader("Raw Tickets")
     raw_columns = [
