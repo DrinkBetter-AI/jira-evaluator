@@ -19,15 +19,8 @@ from jira_client import DEFAULT_FIELDS, JiraClient, JiraConfigError
 from transformations import add_ticket_health_fields
 
 
-DEFAULT_JQL = """assignee = 712020:24fedc7d-c0b0-46c0-99a1-1b5b29efdc47
-AND statusCategory != Done
+DEFAULT_JQL = """statusCategory != Done
 ORDER BY updated ASC"""
-
-CORE_TEAM_MEMBERS = [
-    "Tam",
-    "Mehdi Ordikhani",
-    "Shivanand",
-]
 
 FETCH_SCHEMA_VERSION = 2
 
@@ -381,7 +374,16 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
         all_sprint_workload = all_sprint_tickets.iloc[0:0].copy()
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Tickets in sprint", len(preview_scoped))
+    c1.markdown(
+        (
+            '<div style="font-size: 0.875rem; opacity: 0.85; margin-bottom: 0.2rem;">Tickets in sprint</div>'
+            f'<div style="font-size: 2.2rem; font-weight: 700; line-height: 1.05;">'
+            f'{len(preview_workload)} '
+            '<span style="font-size: 0.75rem; font-weight: 500; opacity: 0.75; vertical-align: middle;">out of</span> '
+            f'{len(preview_scoped)}</div>'
+        ),
+        unsafe_allow_html=True,
+    )
     c2.metric(
         "Total estimated (sprint)",
         _fmt_seconds(preview_workload["estimate_seconds_live"].fillna(0).sum()),
@@ -584,31 +586,22 @@ def main() -> None:
     st.title("Jira Ticket Health Dashboard")
     st.caption("Visual monitoring for stale, idle, and high-risk tickets.")
 
-    with st.container(border=True):
-        st.subheader("Data Query")
-        q_col1, q_col2 = st.columns([3, 1])
-        with q_col1:
-            jql = st.text_area("JQL", value=DEFAULT_JQL, height=110)
-            selected_core_team = st.multiselect(
-                "Team members (check/uncheck)",
-                options=CORE_TEAM_MEMBERS,
-                default=CORE_TEAM_MEMBERS,
-            )
-        with q_col2:
-            max_results = st.number_input("Max tickets", min_value=1, max_value=5000, value=1000, step=100)
-            page_size = st.number_input("Page size", min_value=10, max_value=200, value=100, step=10)
-            refresh_clicked = st.button("Refresh Data", use_container_width=True)
+    refresh_clicked = st.button("Refresh Data")
 
     if refresh_clicked:
         st.cache_data.clear()
+
+    jql = DEFAULT_JQL
+    max_results = 1000
+    page_size = 100
 
     try:
         raw_df = fetch_tickets(
             creds_path="~/.creds/vinovoss.yml",
             profile_name="ML-TEAM-MANAGEMENT",
             jql=jql,
-            max_results=int(max_results),
-            page_size=int(page_size),
+            max_results=max_results,
+            page_size=page_size,
             schema_version=FETCH_SCHEMA_VERSION,
         )
     except JiraConfigError as exc:
@@ -630,7 +623,9 @@ def main() -> None:
     statuses = sorted(df["status"].dropna().unique().tolist())
     priorities = sorted(df["priority"].dropna().unique().tolist())
 
-    selected_assignees = f1.multiselect("Assignee", options=assignees, default=[])
+    ML_TEAM_MEMBERS = ["Tam", "Shivanand", "Mehdi Ordikhani"]
+    default_assignees = [m for m in ML_TEAM_MEMBERS if m in assignees]
+    selected_assignees = f1.multiselect("Assignee", options=assignees, default=default_assignees)
     selected_statuses = f2.multiselect("Status", options=statuses, default=[])
     selected_priorities = f3.multiselect("Priority", options=priorities, default=[])
     min_idle = f4.slider("Min idle days", min_value=0, max_value=180, value=0)
@@ -639,14 +634,6 @@ def main() -> None:
     color_by = st.radio("Bubble color", options=["priority", "assignee"], horizontal=True)
 
     filtered = df.copy()
-    if selected_core_team:
-        selected_core_team_lower = {name.strip().lower() for name in selected_core_team}
-        filtered = filtered[
-            filtered["assignee"].fillna("").astype(str).str.strip().str.lower().isin(selected_core_team_lower)
-        ]
-    else:
-        filtered = filtered.iloc[0:0]
-
     if selected_assignees:
         filtered = filtered[filtered["assignee"].isin(selected_assignees)]
     if selected_statuses:
