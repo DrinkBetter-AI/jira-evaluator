@@ -1,28 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable
-
 import pandas as pd
-
-
-DEFAULT_ACTIVE_STATUSES = {
-    "in progress",
-    "code review",
-    "review in staging",
-    "discussion needed",
-}
-
-PRIORITY_WEIGHTS = {
-    "highest": 10,
-    "urgent": 10,
-    "high": 7,
-    "normal": 4,
-    "medium": 4,
-    "low": 1,
-    "lowest": 1,
-    "none": 0,
-    "": 0,
-}
 
 
 def _to_utc(series: pd.Series) -> pd.Series:
@@ -33,10 +11,6 @@ def _normalize_text(value: object) -> str:
     if value is None:
         return ""
     return str(value).strip()
-
-
-def _to_lower_set(values: Iterable[str]) -> set[str]:
-    return {v.strip().lower() for v in values if str(v).strip()}
 
 
 def _workflow_stage(row: pd.Series) -> str:
@@ -54,19 +28,14 @@ def _workflow_stage(row: pd.Series) -> str:
 
 def add_ticket_health_fields(
     df: pd.DataFrame,
-    zombie_idle_threshold: int = 3,
-    active_statuses: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     if df.empty:
         out = df.copy()
         out["ticket_age_days"] = pd.Series(dtype="int64")
         out["idle_days"] = pd.Series(dtype="int64")
-        out["is_zombie"] = pd.Series(dtype="bool")
         out["idle_bucket"] = pd.Series(dtype="object")
         out["age_bucket"] = pd.Series(dtype="object")
         out["workflow_stage"] = pd.Series(dtype="object")
-        out["priority_weight"] = pd.Series(dtype="float64")
-        out["risk_score"] = pd.Series(dtype="float64")
         return out
 
     out = df.copy()
@@ -96,23 +65,5 @@ def add_ticket_health_fields(
     ).astype("object")
 
     out["workflow_stage"] = out.apply(_workflow_stage, axis=1)
-
-    out["priority_normalized"] = out["priority"].fillna("none").astype(str).str.strip().str.lower()
-    out["priority_weight"] = out["priority_normalized"].map(PRIORITY_WEIGHTS).fillna(0)
-
-    active_status_set = _to_lower_set(active_statuses or DEFAULT_ACTIVE_STATUSES)
-    status_lower = out["status"].fillna("").astype(str).str.strip().str.lower()
-
-    out["is_zombie"] = (status_lower.isin(active_status_set)) & (
-        out["idle_days"] >= float(zombie_idle_threshold)
-    )
-
-    active_status_penalty = status_lower.isin(active_status_set).astype(float) * 10.0
-    out["risk_score"] = (
-        out["idle_days"] * 2.0
-        + out["ticket_age_days"] * 0.5
-        + out["priority_weight"]
-        + active_status_penalty
-    ).round(2)
 
     return out
