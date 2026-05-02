@@ -42,10 +42,36 @@ def fetch_tickets(
         max_results=max_results,
         page_size=page_size,
     )
-    for col in ["sprint_id", "sprint_name", "sprint_state", "sprint_board_id"]:
+    for col in ["sprint_id", "sprint_name", "sprint_state", "sprint_board_id"]:  # noqa: E501
         if col not in result.columns:
             result[col] = pd.NA
     return result
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_all_priorities(creds_path: str, profile_name: str) -> list[str]:
+    client = JiraClient.from_yaml(creds_path=creds_path, profile_name=profile_name)
+    return client.get_all_priorities()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_available_transition_statuses(
+    creds_path: str,
+    profile_name: str,
+    issue_keys: tuple[str, ...],
+) -> list[str]:
+    client = JiraClient.from_yaml(creds_path=creds_path, profile_name=profile_name)
+    available: set[str] = set()
+    for key in issue_keys:
+        try:
+            transitions = client.get_issue_transitions(key)
+        except Exception:  # noqa: BLE001
+            continue
+        for transition in transitions:
+            to_status = str(transition.get("to_status", "")).strip()
+            if to_status:
+                available.add(to_status)
+    return sorted(available)
 
 
 def _render_metrics(df: pd.DataFrame) -> None:
@@ -156,7 +182,6 @@ def _render_sprint_capacity(
         ticket_editor_df["sprint_id"].fillna(-1).astype(str) == str(selected_row["sprint_id"])
     )
     ticket_editor_df["include"] = ticket_editor_df["in_selected_sprint"]
-    ticket_editor_df["estimate_edit"] = ticket_editor_df["original_estimate"].fillna("")
     sprint_ticket_columns = [
         "include",
         "key",
@@ -164,9 +189,8 @@ def _render_sprint_capacity(
         "status",
         "priority",
         "assignee",
-        "reporter",
-        "estimate_edit",
         "original_estimate",
+        "reporter",
         "logged_time",
         "completion_pct",
         "ticket_age_days",
@@ -193,6 +217,21 @@ def _render_sprint_capacity(
     if editor_version_key not in st.session_state:
         st.session_state[editor_version_key] = 0
     editor_widget_key = f"{editor_key}_{st.session_state[editor_version_key]}"
+    visible_keys = tuple(sorted(display_editor_df["key"].dropna().astype(str).unique().tolist()))
+    current_statuses = sorted(display_editor_df["status"].dropna().astype(str).str.strip().unique().tolist())
+    try:
+        transition_statuses = fetch_available_transition_statuses(
+            "~/.creds/vinovoss.yml",
+            "ML-TEAM-MANAGEMENT",
+            visible_keys,
+        )
+    except Exception:
+        transition_statuses = []
+    _all_statuses = sorted(set(current_statuses) | set(transition_statuses))
+    try:
+        _all_priorities = fetch_all_priorities("~/.creds/vinovoss.yml", "ML-TEAM-MANAGEMENT")
+    except Exception:
+        _all_priorities = ["Highest", "Urgent", "High", "Normal", "Medium", "Low", "Lowest"]
     edited_tickets = st.data_editor(
         display_editor_df,
         use_container_width=True,
@@ -200,11 +239,7 @@ def _render_sprint_capacity(
         disabled=(not editable) or (not is_ml_sprint) or [
             "key",
             "summary",
-            "status",
-            "priority",
-            "assignee",
             "reporter",
-            "original_estimate",
             "logged_time",
             "completion_pct",
             "ticket_age_days",
@@ -217,15 +252,29 @@ def _render_sprint_capacity(
             "include": st.column_config.CheckboxColumn("In Sprint"),
             "key": "Key",
             "summary": "Summary",
-            "status": "Status",
-            "priority": "Priority",
-            "assignee": "Assignee",
-            "reporter": "Reporter",
-            "estimate_edit": st.column_config.TextColumn(
-                "Estimate",
+            "status": st.column_config.SelectboxColumn(
+                "Status",
+                options=_all_statuses,
+                help="Change status — applied to Jira on Apply sprint selection",
+            ),
+            "priority": st.column_config.SelectboxColumn(
+                "Priority",
+                options=_all_priorities,
+                help="Change priority — applied to Jira on Apply sprint selection",
+            ),
+            "assignee": st.column_config.SelectboxColumn(
+                "Assignee",
+                options=sorted(
+                    set(ticket_editor_df["assignee"].dropna().astype(str).str.strip().unique().tolist())
+                    | {"Unassigned"}
+                ),
+                help="Change assignee — applied to Jira on Apply sprint selection",
+            ),
+            "original_estimate": st.column_config.TextColumn(
+                "Original Estimate",
                 help="Editable Jira estimate format (examples: 2h, 1d 2h, 30m)",
             ),
-            "original_estimate": "Original Estimate",
+            "reporter": "Reporter",
             "logged_time": "Logged",
             "completion_pct": "Completion %",
             "ticket_age_days": "Age (days)",
@@ -237,29 +286,60 @@ def _render_sprint_capacity(
         key=editor_widget_key,
     )
 
-    # Merge edits from displayed rows back into the full ticket_editor_df for correct delta calculation.
-    edited_keys = edited_tickets["key"].astype(str).tolist()
-    full_with_edits = ticket_editor_df.copy()
-    if edited_keys:
-        full_with_edits = full_with_edits.set_index("key")
-        edited_idx = edited_tickets.set_index("key")
-        for col in ["include", "estimate_edit"]:
-            if col in edited_idx.columns:
-                full_with_edits.loc[full_with_edits.index.isin(edited_idx.index), col] = edited_idx[col]
-        full_with_edits = full_with_edits.reset_index()
+    # Build edit dicts directly from the data_editor output (edited_tickets) for the displayed rows,
+    # then fall back to ticket_editor_df originals for any rows hidden by bubble-click filtering.
+    edited_include_by_key = edited_tickets.set_index("key")["include"].to_dict()
+    edited_original_est_by_key_raw = (
+        edited_tickets.set_index("key")["original_estimate"].fillna("").astype(str).str.strip().to_dict()
+    )
+    edited_status_by_key = edited_tickets.set_index("key")["status"].fillna("").astype(str).str.strip().to_dict()
+    edited_priority_by_key = edited_tickets.set_index("key")["priority"].fillna("").astype(str).str.strip().to_dict()
+    edited_assignee_by_key = edited_tickets.set_index("key")["assignee"].fillna("").astype(str).str.strip().to_dict()
 
-    desired_in_sprint = set(full_with_edits.loc[full_with_edits["include"], "key"].astype(str).tolist())
+    original_status_by_key = ticket_editor_df.set_index("key")["status"].fillna("").astype(str).str.strip().to_dict()
+    original_priority_by_key = ticket_editor_df.set_index("key")["priority"].fillna("").astype(str).str.strip().to_dict()
+    original_assignee_by_key = ticket_editor_df.set_index("key")["assignee"].fillna("").astype(str).str.strip().to_dict()
+
+    status_updates = {
+        str(k): v for k, v in edited_status_by_key.items()
+        if v and v != original_status_by_key.get(str(k), "")
+    }
+    priority_updates = {
+        str(k): v for k, v in edited_priority_by_key.items()
+        if v and v != original_priority_by_key.get(str(k), "")
+    }
+    assignee_updates = {
+        str(k): v for k, v in edited_assignee_by_key.items()
+        if v and v != original_assignee_by_key.get(str(k), "")
+    }
+
+    # Merge: start from full ticket_editor_df, overlay with editor output
+    include_by_key = ticket_editor_df.set_index("key")["include"].to_dict()
+    include_by_key.update({str(k): v for k, v in edited_include_by_key.items()})
+
+    status_by_key = ticket_editor_df.set_index("key")["status"].fillna("").astype(str).str.strip().to_dict()
+    status_by_key.update({str(k): v for k, v in edited_status_by_key.items()})
+
+    original_estimate_by_key = (
+        ticket_editor_df.set_index("key")["original_estimate"].fillna("").astype(str).str.strip().to_dict()
+    )
+    edited_estimate_by_key = dict(original_estimate_by_key)
+    edited_estimate_by_key.update({str(k): v for k, v in edited_original_est_by_key_raw.items()})
+
+    desired_in_sprint = {str(k) for k, v in include_by_key.items() if v}
     current_in_sprint = set(
         ticket_editor_df.loc[ticket_editor_df["include"], "key"].astype(str).tolist()
     )
     to_add = sorted(desired_in_sprint - current_in_sprint)
     to_backlog = sorted(current_in_sprint - desired_in_sprint)
 
-    original_estimate_by_key = (
-        ticket_editor_df.set_index("key")["estimate_edit"].fillna("").astype(str).str.strip().to_dict()
-    )
-    edited_estimate_by_key = (
-        full_with_edits.set_index("key")["estimate_edit"].fillna("").astype(str).str.strip().to_dict()
+    # full_with_edits needed only for changed-row preview table
+    full_with_edits = ticket_editor_df.copy()
+    full_with_edits["include"] = full_with_edits["key"].astype(str).map(include_by_key).fillna(full_with_edits["include"])
+    full_with_edits["status"] = full_with_edits["key"].astype(str).map(status_by_key).fillna(full_with_edits["status"])
+    full_with_edits["assignee"] = full_with_edits["key"].astype(str).map(edited_assignee_by_key).fillna(full_with_edits["assignee"])
+    full_with_edits["original_estimate"] = (
+        full_with_edits["key"].astype(str).map(edited_estimate_by_key).fillna(full_with_edits["original_estimate"])
     )
     parsed_estimate_seconds_by_key: dict[str, float] = {}
     invalid_estimate_keys: list[str] = []
@@ -282,7 +362,14 @@ def _render_sprint_capacity(
             continue
         estimate_updates[str(key)] = new_value
 
-    changed_keys = set(to_add) | set(to_backlog) | set(estimate_updates.keys())
+    changed_keys = (
+        set(to_add)
+        | set(to_backlog)
+        | set(estimate_updates.keys())
+        | set(status_updates.keys())
+        | set(priority_updates.keys())
+        | set(assignee_updates.keys())
+    )
     if changed_keys:
         st.caption("Pending row changes (highlighted)")
         changed_preview = full_with_edits[full_with_edits["key"].astype(str).isin(changed_keys)].copy()
@@ -294,7 +381,13 @@ def _render_sprint_capacity(
             if key in to_backlog:
                 parts.append("Move to backlog")
             if key in estimate_updates:
-                parts.append("Estimate edited")
+                parts.append("Original estimate edited")
+            if key in status_updates:
+                parts.append(f"Status → {status_updates[key]}")
+            if key in priority_updates:
+                parts.append(f"Priority → {priority_updates[key]}")
+            if key in assignee_updates:
+                parts.append(f"Assignee → {assignee_updates[key]}")
             return " + ".join(parts)
 
         changed_preview["change_type"] = changed_preview["key"].astype(str).map(_change_type)
@@ -308,7 +401,6 @@ def _render_sprint_capacity(
                 "priority",
                 "assignee",
                 "reporter",
-                "estimate_edit",
                 "original_estimate",
                 "logged_time",
                 "completion_pct",
@@ -333,6 +425,15 @@ def _render_sprint_capacity(
     all_sprint_tickets = df[df["sprint_name"].notna()].copy()
     status_df = status_source_df if status_source_df is not None else df
     status_all_sprint_tickets = status_df[status_df["sprint_name"].notna()].copy()
+    preview_scoped["status_live"] = (
+        preview_scoped["key"].astype(str).map(status_by_key).fillna(preview_scoped["status"])
+    )
+    all_sprint_tickets["status_live"] = (
+        all_sprint_tickets["key"].astype(str).map(status_by_key).fillna(all_sprint_tickets["status"])
+    )
+    preview_scoped["assignee_live"] = (
+        preview_scoped["key"].astype(str).map(edited_assignee_by_key).fillna(preview_scoped["assignee"])
+    )
     preview_scoped["estimate_seconds_live"] = (
         preview_scoped["key"].astype(str).map(parsed_estimate_seconds_by_key)
         .fillna(preview_scoped["original_estimate_sec"])
@@ -364,7 +465,7 @@ def _render_sprint_capacity(
     if not editable:
         st.info("Sprint membership editing is only available for future or active sprints.")
     else:
-        st.caption("`Apply sprint selection` writes sprint membership and estimate edits to Jira.")
+        st.caption("`Apply sprint selection` writes sprint membership and field edits to Jira.")
 
     if not is_ml_sprint:
         st.warning(
@@ -374,20 +475,21 @@ def _render_sprint_capacity(
 
     if skipped_blank_estimates:
         st.caption(
-            f"Blank estimate edits are ignored for {len(skipped_blank_estimates)} ticket(s). "
+            f"Blank original estimate edits are ignored for {len(skipped_blank_estimates)} ticket(s). "
             "Use a Jira estimate format like `2h` or `1d 2h`."
         )
     if invalid_estimate_keys:
         st.caption(
-            f"Invalid estimate format for {len(invalid_estimate_keys)} ticket(s); "
+            f"Invalid original estimate format for {len(invalid_estimate_keys)} ticket(s); "
             "live totals keep previous values for those rows."
         )
 
     action_col1, action_col2 = st.columns([4, 1])
     with action_col1:
         apply_sprint_selection = st.button(
-            f"Apply sprint selection ({len(to_add)} add, {len(to_backlog)} backlog, {len(estimate_updates)} estimates)",
-            disabled=(not editable) or (not is_ml_sprint) or (not to_add and not to_backlog and not estimate_updates),
+            f"Apply sprint selection ({len(to_add)} add, {len(to_backlog)} backlog, {len(estimate_updates)} estimates, {len(status_updates)} status, {len(priority_updates)} priority, {len(assignee_updates)} assignee)",
+
+            disabled=(not editable) or (not is_ml_sprint) or (not to_add and not to_backlog and not estimate_updates and not status_updates and not priority_updates and not assignee_updates),
             type="primary",
             key=f"apply_sprint_{selected_row['sprint_id']}",
         )
@@ -396,7 +498,7 @@ def _render_sprint_capacity(
             "Reset changes",
             disabled=(not editable) or (not is_ml_sprint),
             key=f"reset_sprint_{selected_row['sprint_id']}",
-            help="Discard unsaved checkbox/estimate edits in Sprint Tickets.",
+            help="Discard unsaved sprint-ticket edits in Sprint Tickets.",
         )
 
     if reset_sprint_changes:
@@ -439,6 +541,68 @@ def _render_sprint_capacity(
                 for key, err in estimate_failed.items():
                     st.error(f"Estimate update failed for {key}: {err}")
 
+            status_success = 0
+            status_failed: dict[str, str] = {}
+            for key, new_status in status_updates.items():
+                try:
+                    client.transition_issue_to_status(key, new_status)
+                    status_success += 1
+                except Exception as exc:  # noqa: BLE001
+                    status_failed[key] = str(exc)
+            if status_success:
+                parts.append(f"updated {status_success} status(es)")
+                had_success = True
+            if status_failed:
+                for key, err in status_failed.items():
+                    st.error(f"Status update failed for {key}: {err}")
+
+            priority_success = 0
+            priority_failed: dict[str, str] = {}
+            for key, new_priority in priority_updates.items():
+                try:
+                    client.set_priority(key, new_priority)
+                    priority_success += 1
+                except Exception as exc:  # noqa: BLE001
+                    priority_failed[key] = str(exc)
+            if priority_success:
+                parts.append(f"updated {priority_success} priority(ies)")
+                had_success = True
+            if priority_failed:
+                for key, err in priority_failed.items():
+                    st.error(f"Priority update failed for {key}: {err}")
+
+            assignee_name_to_account_id = (
+                df[["assignee", "assignee_account_id"]]
+                .dropna(subset=["assignee", "assignee_account_id"])
+                .drop_duplicates(subset=["assignee"])
+                .set_index("assignee")["assignee_account_id"]
+                .astype(str)
+                .to_dict()
+            )
+            assignee_success = 0
+            assignee_failed: dict[str, str] = {}
+            for key, new_assignee in assignee_updates.items():
+                try:
+                    normalized = str(new_assignee).strip()
+                    if normalized.lower() == "unassigned":
+                        client.update_issue(key, {"assignee": None})
+                    else:
+                        account_id = assignee_name_to_account_id.get(normalized)
+                        if not account_id:
+                            raise RuntimeError(
+                                f"No account id found for assignee '{normalized}'."
+                            )
+                        client.update_issue(key, {"assignee": {"accountId": account_id}})
+                    assignee_success += 1
+                except Exception as exc:  # noqa: BLE001
+                    assignee_failed[key] = str(exc)
+            if assignee_success:
+                parts.append(f"updated {assignee_success} assignee(s)")
+                had_success = True
+            if assignee_failed:
+                for key, err in assignee_failed.items():
+                    st.error(f"Assignee update failed for {key}: {err}")
+
             if parts:
                 st.success("Update completed: " + ", ".join(parts))
             if had_success:
@@ -458,8 +622,8 @@ def _render_sprint_capacity(
         st.caption("Hour totals and the assignee workload table use the selected statuses. `Tickets in sprint` stays as the full selected-sprint count.")
 
     if workload_statuses:
-        preview_workload = preview_scoped[preview_scoped["status"].isin(workload_statuses)].copy()
-        all_sprint_workload = all_sprint_tickets[all_sprint_tickets["status"].isin(workload_statuses)].copy()
+        preview_workload = preview_scoped[preview_scoped["status_live"].isin(workload_statuses)].copy()
+        all_sprint_workload = all_sprint_tickets[all_sprint_tickets["status_live"].isin(workload_statuses)].copy()
     else:
         preview_workload = preview_scoped.iloc[0:0].copy()
         all_sprint_workload = all_sprint_tickets.iloc[0:0].copy()
@@ -487,7 +651,7 @@ def _render_sprint_capacity(
     # Per-assignee breakdown
     st.markdown("##### Capacity per Assignee")
     agg = (
-        preview_workload.groupby("assignee")
+        preview_workload.groupby("assignee_live")
         .agg(
             tickets=("key", "count"),
             estimated_sec=("estimate_seconds_live", "sum"),
@@ -498,7 +662,7 @@ def _render_sprint_capacity(
     agg["Total Estimated"] = agg["estimated_sec"].apply(_fmt_seconds)
     agg["Total Logged"] = agg["logged_sec"].apply(_fmt_seconds)
     agg["Remaining"] = (agg["estimated_sec"] - agg["logged_sec"]).clip(lower=0).apply(_fmt_seconds)
-    agg = agg.rename(columns={"assignee": "Assignee", "tickets": "Tickets"})
+    agg = agg.rename(columns={"assignee_live": "Assignee", "tickets": "Tickets"})
     st.dataframe(
         agg[["Assignee", "Tickets", "Total Estimated", "Total Logged", "Remaining"]],
         use_container_width=True,

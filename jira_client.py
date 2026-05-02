@@ -376,6 +376,34 @@ class JiraClient:
 
         return succeeded, failed
 
+    def get_all_statuses(self) -> list[str]:
+        """Return all status names configured in this Jira instance."""
+        url = f"{self.base_url}/rest/api/3/status"
+        with self._session() as session:
+            response = session.get(url, timeout=30)
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Failed to fetch statuses ({response.status_code}): {response.text[:300]}"
+            )
+        return sorted({s["name"] for s in response.json() if s.get("name")})
+
+    def get_all_priorities(self) -> list[str]:
+        """Return all priority names configured in this Jira instance."""
+        url = f"{self.base_url}/rest/api/3/priority/search"
+        with self._session() as session:
+            response = session.get(url, timeout=30)
+        if response.status_code >= 400:
+            url = f"{self.base_url}/rest/api/3/priority"
+            with self._session() as session2:
+                response = session2.get(url, timeout=30)
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Failed to fetch priorities ({response.status_code}): {response.text[:300]}"
+            )
+        payload = response.json()
+        items = payload.get("values", payload) if isinstance(payload, dict) else payload
+        return [p["name"] for p in items if p.get("name")]
+
     def _issues_to_dataframe(self, issues: list[dict[str, Any]]) -> pd.DataFrame:
         rows: list[dict[str, Any]] = []
         for issue in issues:
