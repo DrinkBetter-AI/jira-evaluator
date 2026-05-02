@@ -211,6 +211,38 @@ class JiraClient:
                 f"Failed to update {key} ({response.status_code}): {response.text[:300]}"
             )
 
+    def add_issues_to_sprint(self, sprint_id: int | str, issue_keys: list[str]) -> None:
+        """Add issues to a Jira sprint via the Agile API."""
+        if not issue_keys:
+            return
+
+        url = f"{self.base_url}/rest/agile/1.0/sprint/{sprint_id}/issue"
+        payload = {"issues": issue_keys}
+        with self._session() as session:
+            session.headers["Content-Type"] = "application/json"
+            response = session.post(url, json=payload, timeout=30)
+
+        if response.status_code not in {200, 201, 204}:
+            raise RuntimeError(
+                f"Failed to add issues to sprint {sprint_id} ({response.status_code}): {response.text[:300]}"
+            )
+
+    def move_issues_to_backlog(self, issue_keys: list[str]) -> None:
+        """Move issues out of their current non-closed sprint and back to backlog."""
+        if not issue_keys:
+            return
+
+        url = f"{self.base_url}/rest/agile/1.0/backlog/issue"
+        payload = {"issues": issue_keys}
+        with self._session() as session:
+            session.headers["Content-Type"] = "application/json"
+            response = session.post(url, json=payload, timeout=30)
+
+        if response.status_code not in {200, 201, 204}:
+            raise RuntimeError(
+                f"Failed to move issues to backlog ({response.status_code}): {response.text[:300]}"
+            )
+
     def get_issue(self, key: str, fields: list[str] | None = None) -> dict[str, Any]:
         """Fetch a Jira issue payload for a key."""
         url = f"{self.base_url}/rest/api/3/issue/{key}"
@@ -380,6 +412,7 @@ class JiraClient:
             chosen_sprint = (future_sprints or active_sprints or closed_sprints or [None])[-1]
             sprint_name = chosen_sprint.get("name") if chosen_sprint else None
             sprint_state = chosen_sprint.get("state") if chosen_sprint else None
+            sprint_id = chosen_sprint.get("id") if chosen_sprint else None
             sprint_board_id = chosen_sprint.get("boardId") if chosen_sprint else None
 
             # Carry-over means the ticket is currently planned/in-flight and was also present in prior closed sprints.
@@ -407,6 +440,7 @@ class JiraClient:
                     "completion_pct": completion_pct,
                     "original_estimate_sec": orig_est_sec,
                     "time_spent_sec": time_spent_sec,
+                    "sprint_id": sprint_id,
                     "sprint_name": sprint_name,
                     "sprint_state": sprint_state,
                     "sprint_board_id": sprint_board_id,

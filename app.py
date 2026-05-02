@@ -27,6 +27,8 @@ CORE_TEAM_MEMBERS = [
     "Shivanand",
 ]
 
+FETCH_SCHEMA_VERSION = 2
+
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_tickets(
@@ -35,14 +37,20 @@ def fetch_tickets(
     jql: str,
     max_results: int,
     page_size: int,
+    schema_version: int,
 ) -> pd.DataFrame:
     client = JiraClient.from_yaml(creds_path=creds_path, profile_name=profile_name)
-    return client.search_issues(
+    _ = schema_version
+    result = client.search_issues(
         jql=jql,
         fields=DEFAULT_FIELDS,
         max_results=max_results,
         page_size=page_size,
     )
+    for col in ["sprint_id", "sprint_name", "sprint_state", "sprint_board_id"]:
+        if col not in result.columns:
+            result[col] = pd.NA
+    return result
 
 
 def _render_metrics(df: pd.DataFrame) -> None:
@@ -73,6 +81,12 @@ def _fmt_seconds(secs: float) -> str:
 
 def _render_sprint_capacity(df: pd.DataFrame) -> None:
     """Show sprint capacity breakdown for a selected future/active sprint, grouped by assignee."""
+    required_cols = {"sprint_id", "sprint_name", "sprint_state", "sprint_board_id"}
+    missing_cols = sorted(required_cols - set(df.columns))
+    if missing_cols:
+        st.info("Sprint data is not fully loaded yet. Refresh data to enable sprint capacity editing.")
+        return
+
     sprint_df = df[df["sprint_name"].notna()].copy() if "sprint_name" in df.columns else pd.DataFrame()
     if sprint_df.empty:
         st.info("No sprint data found. Ensure your Jira board uses sprints and the sprint field is enabled.")
@@ -84,7 +98,7 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
 
     state_rank = {"future": 0, "active": 1, "closed": 2, "": 3}
     sprint_options_df = (
-        target_df[["sprint_name", "sprint_state", "sprint_board_id"]]
+        target_df[["sprint_id", "sprint_name", "sprint_state", "sprint_board_id"]]
         .drop_duplicates()
         .assign(
             state_rank=lambda frame: frame["sprint_state"].str.lower().map(state_rank).fillna(9),
@@ -101,25 +115,131 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
         (target_df["sprint_name"] == selected_row["sprint_name"])
         & (target_df["sprint_state"] == selected_row["sprint_state"])
     ].copy()
-    carry_over = scoped[scoped["carry_over_count"] > 0] if "carry_over_count" in scoped.columns else pd.DataFrame()
 
     st.markdown(f"**Selected sprint:** {selected_row['sprint_name']} ({str(selected_row['sprint_state']).title()})")
 
+    is_ml_sprint = str(selected_row["sprint_name"]).startswith("ML Sprint")
+
+    editable = str(selected_row["sprint_state"]).lower() in {"future", "active"}
+    ticket_editor_df = df.copy()
+    ticket_editor_df["in_selected_sprint"] = (
+        ticket_editor_df["sprint_id"].fillna(-1).astype(str) == str(selected_row["sprint_id"])
+    )
+    ticket_editor_df["include"] = ticket_editor_df["in_selected_sprint"]
+    ticket_editor_df = ticket_editor_df[
+        ["include", "key", "summary", "assignee", "status", "original_estimate", "logged_time"]
+    ].sort_values(["include", "assignee", "key"], ascending=[False, True, True])
+
+    st.markdown("##### Sprint Tickets")
+    st.caption("Check tickets to preview keeping them in or moving them into the selected sprint. Uncheck them to preview sending them to backlog.")
+    edited_tickets = st.data_editor(
+        ticket_editor_df,
+        use_container_width=True,
+        hide_index=True,
+        disabled=(not editable) or ["key", "summary", "assignee", "status", "original_estimate", "logged_time"],
+        column_config={
+            "include": st.column_config.CheckboxColumn("In Sprint"),
+            "key": "Key",
+            "summary": "Summary",
+            "assignee": "Assignee",
+            "status": "Status",
+            "original_estimate": "Estimate",
+            "logged_time": "Logged",
+        },
+        key=f"sprint_editor_{selected_row['sprint_id']}",
+    )
+
+    desired_in_sprint = set(edited_tickets.loc[edited_tickets["include"], "key"].tolist())
+    current_in_sprint = set(df.loc[df["sprint_id"].fillna(-1).astype(str) == str(selected_row["sprint_id"]), "key"].tolist())
+    to_add = sorted(desired_in_sprint - current_in_sprint)
+    to_backlog = sorted(current_in_sprint - desired_in_sprint)
+    preview_scoped = df[df["key"].isin(desired_in_sprint)].copy()
+    all_sprint_tickets = df[df["sprint_name"].notna()].copy()
+
+    workload_status_options = sorted(
+        pd.Index(pd.concat([preview_scoped["status"], all_sprint_tickets["status"]]).dropna().unique()).tolist()
+    )
+    default_workload_statuses = [status for status in ["To Do", "In Progress"] if status in workload_status_options]
+    if not default_workload_statuses:
+        default_workload_statuses = workload_status_options
+
+    if not editable:
+        st.info("Sprint membership editing is only available for future or active sprints.")
+    else:
+        st.caption("`Apply sprint selection` writes the current checkboxes to Jira.")
+
+    if not is_ml_sprint:
+        st.warning(
+            f"Sprint editing is restricted to **ML Sprint** boards. "
+            f"'{selected_row['sprint_name']}' cannot be modified from this dashboard."
+        )
+
+    apply_sprint_selection = st.button(
+        f"Apply sprint selection ({len(to_add)} add, {len(to_backlog)} backlog)",
+        disabled=(not editable) or (not is_ml_sprint) or (not to_add and not to_backlog),
+        type="primary",
+        key=f"apply_sprint_{selected_row['sprint_id']}",
+    )
+
+    if apply_sprint_selection:
+        client = JiraClient.from_yaml(
+            creds_path="~/.creds/vinovoss.yml",
+            profile_name="ML-TEAM-MANAGEMENT",
+        )
+        with st.spinner("Updating sprint membership..."):
+            try:
+                if to_add:
+                    client.add_issues_to_sprint(selected_row["sprint_id"], to_add)
+                if to_backlog:
+                    client.move_issues_to_backlog(to_backlog)
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Failed to update sprint membership: {exc}")
+            else:
+                parts: list[str] = []
+                if to_add:
+                    parts.append(f"added {len(to_add)}")
+                if to_backlog:
+                    parts.append(f"moved {len(to_backlog)} to backlog")
+                st.success("Sprint membership updated: " + ", ".join(parts))
+                st.cache_data.clear()
+                st.rerun()
+
+    calc_col1, calc_col2 = st.columns([2, 3])
+    with calc_col1:
+        workload_statuses = st.multiselect(
+            "Statuses counted in hours",
+            options=workload_status_options,
+            default=default_workload_statuses,
+            help="Use this to focus sprint effort on work that still needs attention.",
+            key=f"workload_statuses_{selected_row['sprint_id']}",
+        )
+    with calc_col2:
+        st.caption("Hour totals and the assignee workload table use the selected statuses. `Tickets in sprint` stays as the full selected-sprint count.")
+
+    if workload_statuses:
+        preview_workload = preview_scoped[preview_scoped["status"].isin(workload_statuses)].copy()
+        all_sprint_workload = all_sprint_tickets[all_sprint_tickets["status"].isin(workload_statuses)].copy()
+    else:
+        preview_workload = preview_scoped.iloc[0:0].copy()
+        all_sprint_workload = all_sprint_tickets.iloc[0:0].copy()
+
     c1, c2, c3 = st.columns(3)
-    c1.metric("Tickets in sprint", len(scoped))
-    c2.metric("Carry-overs (from prev. sprints)", len(carry_over))
-    c3.metric(
+    c1.metric("Tickets in sprint", len(preview_scoped))
+    c2.metric(
         "Total estimated (sprint)",
-        _fmt_seconds(scoped["original_estimate_sec"].fillna(0).sum()),
+        _fmt_seconds(preview_workload["original_estimate_sec"].fillna(0).sum()),
+    )
+    c3.metric(
+        "Grand Total",
+        _fmt_seconds(all_sprint_workload["original_estimate_sec"].fillna(0).sum()),
     )
 
     # Per-assignee breakdown
     st.markdown("##### Capacity per Assignee")
     agg = (
-        scoped.groupby("assignee")
+        preview_workload.groupby("assignee")
         .agg(
             tickets=("key", "count"),
-            carry_overs=("carry_over_count", lambda x: (x > 0).sum()),
             estimated_sec=("original_estimate_sec", "sum"),
             logged_sec=("time_spent_sec", "sum"),
         )
@@ -128,22 +248,12 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
     agg["Total Estimated"] = agg["estimated_sec"].apply(_fmt_seconds)
     agg["Total Logged"] = agg["logged_sec"].apply(_fmt_seconds)
     agg["Remaining"] = (agg["estimated_sec"] - agg["logged_sec"]).clip(lower=0).apply(_fmt_seconds)
-    agg = agg.rename(columns={"assignee": "Assignee", "tickets": "Tickets", "carry_overs": "Carry-overs"})
+    agg = agg.rename(columns={"assignee": "Assignee", "tickets": "Tickets"})
     st.dataframe(
-        agg[["Assignee", "Tickets", "Carry-overs", "Total Estimated", "Total Logged", "Remaining"]],
+        agg[["Assignee", "Tickets", "Total Estimated", "Total Logged", "Remaining"]],
         use_container_width=True,
         hide_index=True,
     )
-
-    if not carry_over.empty:
-        with st.expander(f"Carry-over tickets ({len(carry_over)})", expanded=False):
-            co_cols = ["key", "summary", "assignee", "status", "carry_over_count", "original_estimate", "logged_time"]
-            available = [c for c in co_cols if c in carry_over.columns]
-            st.dataframe(
-                carry_over[available].rename(columns={"carry_over_count": "+Sprints", "original_estimate": "Estimate", "logged_time": "Logged"}),
-                use_container_width=True,
-                hide_index=True,
-            )
 
 
 _PRIORITY_BUCKET_MAP = {
@@ -342,6 +452,7 @@ def main() -> None:
             jql=jql,
             max_results=int(max_results),
             page_size=int(page_size),
+            schema_version=FETCH_SCHEMA_VERSION,
         )
     except JiraConfigError as exc:
         st.error(f"Configuration error: {exc}")
