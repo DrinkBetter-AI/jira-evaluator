@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from jira_client import DEFAULT_FIELDS, JiraClient, JiraConfigError
@@ -56,54 +58,72 @@ def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority") -> None:
         st.info("No data available for staleness bubble chart.")
         return
 
+    plot_df = df.copy()
+
+    # Assign a numeric Y position per status so we can add jitter around it.
+    # Fixed order bottom (0) → top (n).
+    STATUS_ORDER = [
+        "Backlog",
+        "DISCUSSION NEEDED",
+        "To Do",
+        "In Progress",
+        "IN DEV ENV",
+        "Review in Staging",
+        "Code Review",
+        "Ready for Production",
+    ]
+    statuses = plot_df["status"].fillna("Unknown")
+    # Any status not in the fixed list gets appended at the top.
+    extra = [s for s in statuses.unique() if s not in STATUS_ORDER]
+    full_order = STATUS_ORDER + extra
+    status_to_y = {s: i for i, s in enumerate(full_order)}
+    rng = np.random.default_rng(seed=42)
+    plot_df["y_jitter"] = (
+        statuses.map(status_to_y).astype(float)
+        + rng.uniform(-0.35, 0.35, size=len(plot_df))
+    )
+    plot_df["status_label"] = statuses
+
+    # Normalise bubble size so smallest is still visible.
+    age = plot_df["ticket_age_days"].clip(lower=1)
+    plot_df["bubble_size"] = ((age - age.min()) / (age.max() - age.min() + 1e-9) * 28 + 6).round(1)
+
     fig = px.scatter(
-        df,
+        plot_df,
         x="idle_days",
-        y="status",
-        size="ticket_age_days",
+        y="y_jitter",
+        size="bubble_size",
         color=color_by,
-        hover_data={
-            "key": True,
-            "summary": True,
-            "assignee": True,
-            "status": True,
-            "priority": True,
-            "ticket_age_days": ":.1f",
-            "idle_days": ":.1f",
-            "risk_score": ":.1f",
-        },
+        custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days"],
         title="Staleness vs Workflow Status",
-        labels={"idle_days": "Idle Days", "status": "Status", "ticket_age_days": "Ticket Age (days)"},
+        labels={"idle_days": "Idle Days", "y_jitter": "Status"},
+        size_max=34,
+        opacity=0.3,
     )
-    fig.update_layout(height=520)
+
+    fig.update_traces(
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "%{customdata[1]}<br>"
+            "Assignee: %{customdata[2]}<br>"
+            "Status: %{customdata[3]}<br>"
+            "Priority: %{customdata[4]}<br>"
+            "Age: %{customdata[5]:.1f} days<br>"
+            "Idle: %{customdata[6]:.1f} days"
+            "<extra></extra>"
+        )
+    )
+
+    # Replace numeric Y ticks with status labels.
+    fig.update_yaxes(
+        tickmode="array",
+        tickvals=list(status_to_y.values()),
+        ticktext=list(status_to_y.keys()),
+        title="Status",
+    )
+    fig.update_layout(height=560)
     st.plotly_chart(fig, use_container_width=True)
 
-
-def _render_heatmap(df: pd.DataFrame) -> None:
-    if df.empty:
-        st.info("No data available for status x idle heatmap.")
-        return
-
-    grouped = (
-        df.groupby(["status", "idle_bucket"], dropna=False)
-        .size()
-        .reset_index(name="ticket_count")
-    )
-
-    grouped["idle_bucket"] = grouped["idle_bucket"].fillna("Unknown")
-
-    fig = px.density_heatmap(
-        grouped,
-        x="idle_bucket",
-        y="status",
-        z="ticket_count",
-        histfunc="sum",
-        color_continuous_scale="YlOrRd",
-        title="Status x Idle Age Heatmap",
-        labels={"idle_bucket": "Idle Bucket", "status": "Status", "ticket_count": "Ticket Count"},
-    )
-    fig.update_layout(height=520)
-    st.plotly_chart(fig, use_container_width=True)
 
 
 def _render_zombie_table(df: pd.DataFrame) -> None:
@@ -143,8 +163,6 @@ def main() -> None:
         q_col1, q_col2 = st.columns([3, 1])
         with q_col1:
             jql = st.text_area("JQL", value=DEFAULT_JQL, height=110)
-            creds_path = st.text_input("Credentials file", value="~/.creds/vinovoss.yml")
-            profile_name = st.text_input("Jira profile", value="ML-TEAM-MANAGEMENT")
             selected_core_team = st.multiselect(
                 "Team members (check/uncheck)",
                 options=CORE_TEAM_MEMBERS,
@@ -161,8 +179,8 @@ def main() -> None:
 
     try:
         raw_df = fetch_tickets(
-            creds_path=creds_path,
-            profile_name=profile_name,
+            creds_path="~/.creds/vinovoss.yml",
+            profile_name="ML-TEAM-MANAGEMENT",
             jql=jql,
             max_results=int(max_results),
             page_size=int(page_size),
@@ -217,11 +235,7 @@ def main() -> None:
 
     _render_metrics(filtered)
 
-    c1, c2 = st.columns(2)
-    with c1:
-        _render_bubble_chart(filtered, color_by=color_by)
-    with c2:
-        _render_heatmap(filtered)
+    _render_bubble_chart(filtered, color_by=color_by)
 
     _render_zombie_table(filtered)
 
