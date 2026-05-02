@@ -265,12 +265,22 @@ def _render_sprint_capacity(df: pd.DataFrame, status_source_df: pd.DataFrame | N
         .fillna(0.0)
     )
 
-    workload_status_options = sorted(
-        pd.Index(status_all_sprint_tickets["status"].dropna().unique()).tolist()
-    )
-    default_workload_statuses = [status for status in ["To Do", "In Progress"] if status in workload_status_options]
-    if not default_workload_statuses:
-        default_workload_statuses = workload_status_options
+    canonical_status_defaults = ["To Do", "In Progress"]
+    discovered_statuses = pd.Index(status_all_sprint_tickets["status"].dropna().unique()).tolist()
+    remaining_statuses = sorted([s for s in discovered_statuses if s not in canonical_status_defaults])
+    workload_status_options = canonical_status_defaults + remaining_statuses
+    default_workload_statuses = canonical_status_defaults.copy()
+
+    workload_statuses_key = f"workload_statuses_{selected_row['sprint_id']}"
+    existing_workload_statuses = st.session_state.get(workload_statuses_key)
+    if not isinstance(existing_workload_statuses, list):
+        st.session_state[workload_statuses_key] = default_workload_statuses
+    else:
+        normalized_existing = [s for s in existing_workload_statuses if s in workload_status_options]
+        if not normalized_existing:
+            st.session_state[workload_statuses_key] = default_workload_statuses
+        elif normalized_existing != existing_workload_statuses:
+            st.session_state[workload_statuses_key] = normalized_existing
 
     if not editable:
         st.info("Sprint membership editing is only available for future or active sprints.")
@@ -363,7 +373,7 @@ def _render_sprint_capacity(df: pd.DataFrame, status_source_df: pd.DataFrame | N
             options=workload_status_options,
             default=default_workload_statuses,
             help="Use this to focus sprint effort on work that still needs attention.",
-            key=f"workload_statuses_{selected_row['sprint_id']}",
+            key=workload_statuses_key,
         )
     with calc_col2:
         st.caption("Hour totals and the assignee workload table use the selected statuses. `Tickets in sprint` stays as the full selected-sprint count.")
