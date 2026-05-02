@@ -283,6 +283,7 @@ def main() -> None:
         "status_category",
         "priority",
         "assignee",
+        "reporter",
         "ticket_age_days",
         "idle_days",
         "created",
