@@ -54,6 +54,12 @@ def fetch_all_priorities(creds_path: str, profile_name: str) -> list[str]:
     return client.get_all_priorities()
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_all_users(creds_path: str, profile_name: str) -> list[dict[str, str]]:
+    client = JiraClient.from_yaml(creds_path=creds_path, profile_name=profile_name)
+    return client.get_all_users()
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_available_transition_statuses(
     creds_path: str,
@@ -204,19 +210,38 @@ def _render_sprint_capacity(
     ].sort_values(["include", "assignee", "key"], ascending=[False, True, True])
 
     # display_editor_df is only used for what the user sees — bubble click narrows rows here only.
+    is_bubble_filtered = False
     if selected_ticket_key:
         selected_mask = ticket_editor_df["key"].astype(str) == str(selected_ticket_key)
-        display_editor_df = ticket_editor_df[selected_mask].copy() if selected_mask.any() else ticket_editor_df
+        if selected_mask.any():
+            display_editor_df = ticket_editor_df[selected_mask].copy()
+            is_bubble_filtered = True
+        else:
+            display_editor_df = ticket_editor_df
     else:
         display_editor_df = ticket_editor_df
 
-    st.markdown("##### Sprint Tickets")
+    sprint_header_col, sprint_action_col = st.columns([6, 1])
+    with sprint_header_col:
+        st.markdown("##### Sprint Tickets")
+    with sprint_action_col:
+        if is_bubble_filtered:
+            if st.button("Restore table", key=f"restore_table_{selected_row['sprint_id']}"):
+                st.session_state["restore_sprint_ticket_table"] = True
+                st.rerun()
     st.caption("Check tickets to preview keeping them in or moving them into the selected sprint. Uncheck them to preview sending them to backlog.")
     editor_key = f"sprint_editor_{selected_row['sprint_id']}"
     editor_version_key = f"{editor_key}_version"
     if editor_version_key not in st.session_state:
         st.session_state[editor_version_key] = 0
     editor_widget_key = f"{editor_key}_{st.session_state[editor_version_key]}"
+    editor_seed_key = f"{editor_key}_seed_df"
+
+    if editor_seed_key in st.session_state:
+        seed_df = st.session_state.pop(editor_seed_key)
+        if isinstance(seed_df, pd.DataFrame):
+            display_editor_df = seed_df.copy()
+
     visible_keys = tuple(sorted(display_editor_df["key"].dropna().astype(str).unique().tolist()))
     current_statuses = sorted(display_editor_df["status"].dropna().astype(str).str.strip().unique().tolist())
     try:
@@ -232,6 +257,42 @@ def _render_sprint_capacity(
         _all_priorities = fetch_all_priorities("~/.creds/vinovoss.yml", "ML-TEAM-MANAGEMENT")
     except Exception:
         _all_priorities = ["Highest", "Urgent", "High", "Normal", "Medium", "Low", "Lowest"]
+
+    try:
+        all_users = fetch_all_users("~/.creds/vinovoss.yml", "ML-TEAM-MANAGEMENT")
+    except Exception:
+        all_users = []
+
+    jira_assignee_names = {
+        str(user.get("display_name", "")).strip()
+        for user in all_users
+        if str(user.get("display_name", "")).strip()
+    }
+    assignee_options = sorted(
+        set(ticket_editor_df["assignee"].dropna().astype(str).str.strip().unique().tolist())
+        | jira_assignee_names
+        | {"Unassigned"}
+    )
+
+    assignee_name_to_account_id = {
+        str(user.get("display_name", "")).strip(): str(user.get("account_id", "")).strip()
+        for user in all_users
+        if str(user.get("display_name", "")).strip() and str(user.get("account_id", "")).strip()
+    }
+    assignee_name_to_account_id.update(
+        (
+            df[["assignee", "assignee_account_id"]]
+            .dropna(subset=["assignee", "assignee_account_id"])
+            .drop_duplicates(subset=["assignee"])
+            .assign(
+                assignee=lambda frame: frame["assignee"].astype(str).str.strip(),
+                assignee_account_id=lambda frame: frame["assignee_account_id"].astype(str).str.strip(),
+            )
+            .set_index("assignee")["assignee_account_id"]
+            .to_dict()
+        )
+    )
+
     edited_tickets = st.data_editor(
         display_editor_df,
         use_container_width=True,
@@ -264,10 +325,7 @@ def _render_sprint_capacity(
             ),
             "assignee": st.column_config.SelectboxColumn(
                 "Assignee",
-                options=sorted(
-                    set(ticket_editor_df["assignee"].dropna().astype(str).str.strip().unique().tolist())
-                    | {"Unassigned"}
-                ),
+                options=assignee_options,
                 help="Change assignee — applied to Jira on Apply sprint selection",
             ),
             "original_estimate": st.column_config.TextColumn(
@@ -412,14 +470,42 @@ def _render_sprint_capacity(
             ]
         ]
 
-        def _highlight_row(_: pd.Series) -> list[str]:
-            return ["background-color: rgba(255, 165, 0, 0.13); font-weight: 600;"] * len(changed_preview.columns)
-
-        st.dataframe(
-            changed_preview.style.apply(_highlight_row, axis=1),
+        reset_actions_df = changed_preview.copy()
+        reset_actions_df.insert(0, "reset", False)
+        reset_actions = st.data_editor(
+            reset_actions_df,
             use_container_width=True,
             hide_index=True,
+            disabled=[col for col in reset_actions_df.columns if col != "reset"],
+            column_config={
+                "reset": st.column_config.CheckboxColumn(
+                    "Reset",
+                    help="Tick one or more rows to reset only those pending edits",
+                )
+            },
+            key=f"pending_reset_actions_{selected_row['sprint_id']}_{st.session_state[editor_version_key]}",
         )
+
+        rows_to_reset = reset_actions.loc[reset_actions["reset"], "key"].astype(str).tolist()
+        if rows_to_reset:
+            updated_display_editor_df = edited_tickets.copy()
+            for row_key in rows_to_reset:
+                base_row = ticket_editor_df[ticket_editor_df["key"].astype(str) == row_key]
+                if base_row.empty:
+                    continue
+                row0 = base_row.iloc[0]
+                reset_mask = updated_display_editor_df["key"].astype(str) == row_key
+                if not reset_mask.any():
+                    continue
+                updated_display_editor_df.loc[reset_mask, "include"] = bool(row0["include"])
+                updated_display_editor_df.loc[reset_mask, "status"] = row0["status"]
+                updated_display_editor_df.loc[reset_mask, "priority"] = row0["priority"]
+                updated_display_editor_df.loc[reset_mask, "assignee"] = row0["assignee"]
+                updated_display_editor_df.loc[reset_mask, "original_estimate"] = row0["original_estimate"]
+
+            st.session_state[editor_seed_key] = updated_display_editor_df
+            st.session_state[editor_version_key] = int(st.session_state.get(editor_version_key, 0)) + 1
+            st.rerun()
 
     preview_scoped = df[df["key"].isin(desired_in_sprint)].copy()
     all_sprint_tickets = df[df["sprint_name"].notna()].copy()
@@ -571,14 +657,6 @@ def _render_sprint_capacity(
                 for key, err in priority_failed.items():
                     st.error(f"Priority update failed for {key}: {err}")
 
-            assignee_name_to_account_id = (
-                df[["assignee", "assignee_account_id"]]
-                .dropna(subset=["assignee", "assignee_account_id"])
-                .drop_duplicates(subset=["assignee"])
-                .set_index("assignee")["assignee_account_id"]
-                .astype(str)
-                .to_dict()
-            )
             assignee_success = 0
             assignee_failed: dict[str, str] = {}
             for key, new_assignee in assignee_updates.items():
@@ -650,6 +728,11 @@ def _render_sprint_capacity(
 
     # Per-assignee breakdown
     st.markdown("##### Capacity per Assignee")
+    show_logged_details = st.checkbox(
+        "Display Logged Time",
+        value=False,
+        key=f"show_logged_details_{selected_row['sprint_id']}",
+    )
     agg = (
         preview_workload.groupby("assignee_live")
         .agg(
@@ -663,8 +746,11 @@ def _render_sprint_capacity(
     agg["Total Logged"] = agg["logged_sec"].apply(_fmt_seconds)
     agg["Remaining"] = (agg["estimated_sec"] - agg["logged_sec"]).clip(lower=0).apply(_fmt_seconds)
     agg = agg.rename(columns={"assignee_live": "Assignee", "tickets": "Tickets"})
+    capacity_columns = ["Assignee", "Tickets", "Total Estimated"]
+    if show_logged_details:
+        capacity_columns.extend(["Total Logged", "Remaining"])
     st.dataframe(
-        agg[["Assignee", "Tickets", "Total Estimated", "Total Logged", "Remaining"]],
+        agg[capacity_columns],
         use_container_width=True,
         hide_index=True,
     )
@@ -682,7 +768,12 @@ _PRIORITY_BUCKET_MAP = {
 _BUCKET_COLORS = {"Normal": "#2ECC71", "High": "#F5A623", "Urgent": "#E74C3C"}
 
 
-def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority", agg_priority: bool = False) -> str | None:
+def _render_bubble_chart(
+    df: pd.DataFrame,
+    color_by: str = "priority",
+    agg_priority: bool = False,
+    chart_key: str = "bubble_chart",
+) -> str | None:
     if df.empty:
         st.info("No data available for staleness bubble chart.")
         return None
@@ -768,7 +859,7 @@ def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority", agg_prior
         title="Status",
     )
     fig.update_layout(height=560)
-    event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key="bubble_chart")
+    event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key=chart_key)
     points = (event or {}).get("selection", {}).get("points", [])
     if points:
         return str(points[0].get("customdata", [None])[0])
@@ -904,14 +995,28 @@ def main() -> None:
 
     _render_metrics(filtered)
 
+    restore_requested = bool(st.session_state.pop("restore_sprint_ticket_table", False))
+    bubble_chart_version = int(st.session_state.get("bubble_chart_version", 0))
+    if restore_requested:
+        bubble_chart_version += 1
+        st.session_state["bubble_chart_version"] = bubble_chart_version
+
     agg_priority = st.checkbox(
         "Aggregate Priorities (Normal / High / Urgent)",
         value=False,
         help="Buckets: Normal = None/Low/Normal · High = High · Urgent = Highest/Urgent",
     )
-    selected_key = _render_bubble_chart(filtered, color_by=color_by, agg_priority=agg_priority)
+    selected_key = _render_bubble_chart(
+        filtered,
+        color_by=color_by,
+        agg_priority=agg_priority,
+        chart_key=f"bubble_chart_{bubble_chart_version}",
+    )
 
-    active_sprint_ticket_key = selected_key if selected_key and selected_key in filtered["key"].values else None
+    if restore_requested:
+        active_sprint_ticket_key = None
+    else:
+        active_sprint_ticket_key = selected_key if selected_key and selected_key in filtered["key"].values else None
 
     st.divider()
     st.subheader("Sprint Capacity")

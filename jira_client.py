@@ -404,6 +404,53 @@ class JiraClient:
         items = payload.get("values", payload) if isinstance(payload, dict) else payload
         return [p["name"] for p in items if p.get("name")]
 
+    def get_all_users(self, page_size: int = 1000) -> list[dict[str, str]]:
+        """Return Jira users with display names and account ids."""
+        url = f"{self.base_url}/rest/api/3/users/search"
+        start_at = 0
+        users: list[dict[str, str]] = []
+
+        with self._session() as session:
+            while True:
+                response = session.get(
+                    url,
+                    params={
+                        "query": "",
+                        "startAt": start_at,
+                        "maxResults": page_size,
+                    },
+                    timeout=30,
+                )
+                if response.status_code >= 400:
+                    raise RuntimeError(
+                        f"Failed to fetch users ({response.status_code}): {response.text[:300]}"
+                    )
+
+                batch = response.json() or []
+                if not isinstance(batch, list) or not batch:
+                    break
+
+                for user in batch:
+                    account_id = str(user.get("accountId") or "").strip()
+                    display_name = str(user.get("displayName") or "").strip()
+                    if account_id and display_name:
+                        users.append(
+                            {
+                                "account_id": account_id,
+                                "display_name": display_name,
+                            }
+                        )
+
+                if len(batch) < page_size:
+                    break
+                start_at += page_size
+
+        dedup: dict[tuple[str, str], dict[str, str]] = {}
+        for user in users:
+            key = (user["account_id"], user["display_name"])
+            dedup[key] = user
+        return list(dedup.values())
+
     def _issues_to_dataframe(self, issues: list[dict[str, Any]]) -> pd.DataFrame:
         rows: list[dict[str, Any]] = []
         for issue in issues:
