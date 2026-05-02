@@ -228,6 +228,35 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
             continue
         estimate_updates[str(key)] = new_value
 
+    changed_keys = set(to_add) | set(to_backlog) | set(estimate_updates.keys())
+    if changed_keys:
+        st.caption("Pending row changes (highlighted)")
+        changed_preview = edited_tickets[edited_tickets["key"].astype(str).isin(changed_keys)].copy()
+
+        def _change_type(key: str) -> str:
+            parts: list[str] = []
+            if key in to_add:
+                parts.append("Add to sprint")
+            if key in to_backlog:
+                parts.append("Move to backlog")
+            if key in estimate_updates:
+                parts.append("Estimate edited")
+            return " + ".join(parts)
+
+        changed_preview["change_type"] = changed_preview["key"].astype(str).map(_change_type)
+        changed_preview = changed_preview[
+            ["change_type", "include", "key", "summary", "assignee", "status", "estimate_edit", "logged_time", "issue_type"]
+        ]
+
+        def _highlight_row(_: pd.Series) -> list[str]:
+            return ["background-color: rgba(255, 165, 0, 0.13); font-weight: 600;"] * len(changed_preview.columns)
+
+        st.dataframe(
+            changed_preview.style.apply(_highlight_row, axis=1),
+            use_container_width=True,
+            hide_index=True,
+        )
+
     preview_scoped = df[df["key"].isin(desired_in_sprint)].copy()
     all_sprint_tickets = df[df["sprint_name"].notna()].copy()
     preview_scoped["estimate_seconds_live"] = (
