@@ -166,6 +166,11 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
 
     st.markdown("##### Sprint Tickets")
     st.caption("Check tickets to preview keeping them in or moving them into the selected sprint. Uncheck them to preview sending them to backlog.")
+    editor_key = f"sprint_editor_{selected_row['sprint_id']}"
+    editor_version_key = f"{editor_key}_version"
+    if editor_version_key not in st.session_state:
+        st.session_state[editor_version_key] = 0
+    editor_widget_key = f"{editor_key}_{st.session_state[editor_version_key]}"
     edited_tickets = st.data_editor(
         ticket_editor_df,
         use_container_width=True,
@@ -184,11 +189,15 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
             "logged_time": "Logged",
             "issue_type": "Type",
         },
-        key=f"sprint_editor_{selected_row['sprint_id']}",
+        key=editor_widget_key,
     )
 
-    desired_in_sprint = set(edited_tickets.loc[edited_tickets["include"], "key"].tolist())
-    current_in_sprint = set(df.loc[df["sprint_id"].fillna(-1).astype(str) == str(selected_row["sprint_id"]), "key"].tolist())
+    desired_in_sprint = set(edited_tickets.loc[edited_tickets["include"], "key"].astype(str).tolist())
+    # Compare against only the tickets shown in Sprint Tickets to avoid hidden-row drift
+    # (e.g., excluded Epic rows creating phantom backlog deltas).
+    current_in_sprint = set(
+        ticket_editor_df.loc[ticket_editor_df["include"], "key"].astype(str).tolist()
+    )
     to_add = sorted(desired_in_sprint - current_in_sprint)
     to_backlog = sorted(current_in_sprint - desired_in_sprint)
 
@@ -261,12 +270,25 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
             "live totals keep previous values for those rows."
         )
 
-    apply_sprint_selection = st.button(
-        f"Apply sprint selection ({len(to_add)} add, {len(to_backlog)} backlog, {len(estimate_updates)} estimates)",
-        disabled=(not editable) or (not is_ml_sprint) or (not to_add and not to_backlog and not estimate_updates),
-        type="primary",
-        key=f"apply_sprint_{selected_row['sprint_id']}",
-    )
+    action_col1, action_col2 = st.columns([4, 1])
+    with action_col1:
+        apply_sprint_selection = st.button(
+            f"Apply sprint selection ({len(to_add)} add, {len(to_backlog)} backlog, {len(estimate_updates)} estimates)",
+            disabled=(not editable) or (not is_ml_sprint) or (not to_add and not to_backlog and not estimate_updates),
+            type="primary",
+            key=f"apply_sprint_{selected_row['sprint_id']}",
+        )
+    with action_col2:
+        reset_sprint_changes = st.button(
+            "Reset changes",
+            disabled=(not editable) or (not is_ml_sprint),
+            key=f"reset_sprint_{selected_row['sprint_id']}",
+            help="Discard unsaved checkbox/estimate edits in Sprint Tickets.",
+        )
+
+    if reset_sprint_changes:
+        st.session_state[editor_version_key] = int(st.session_state.get(editor_version_key, 0)) + 1
+        st.rerun()
 
     if apply_sprint_selection:
         client = JiraClient.from_yaml(
@@ -363,15 +385,15 @@ def _render_sprint_capacity(df: pd.DataFrame) -> None:
 
 
 _PRIORITY_BUCKET_MAP = {
-    "low": "Low",
-    "lowest": "Low",
-    "normal": "Low",
-    "medium": "Low",
+    "low": "Normal",
+    "lowest": "Normal",
+    "normal": "Normal",
+    "medium": "Normal",
     "high": "High",
     "highest": "Urgent",
     "urgent": "Urgent",
 }
-_BUCKET_COLORS = {"Low": "#2ECC71", "High": "#F5A623", "Urgent": "#E74C3C"}
+_BUCKET_COLORS = {"Normal": "#2ECC71", "High": "#F5A623", "Urgent": "#E74C3C"}
 
 
 def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority", agg_priority: bool = False) -> None:
@@ -410,7 +432,7 @@ def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority", agg_prior
         plot_df["priority_bucket"] = (
             plot_df["priority"].fillna("none").astype(str).str.strip().str.lower()
             .map(_PRIORITY_BUCKET_MAP)
-            .fillna("Low")
+            .fillna("Normal")
         )
         fig = px.scatter(
             plot_df,
@@ -419,7 +441,7 @@ def _render_bubble_chart(df: pd.DataFrame, color_by: str = "priority", agg_prior
             size="bubble_size",
             color="priority_bucket",
             color_discrete_map=_BUCKET_COLORS,
-            category_orders={"priority_bucket": ["Low", "High", "Urgent"]},
+            category_orders={"priority_bucket": ["Normal", "High", "Urgent"]},
             custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days"],
             title="Staleness vs Workflow Status (Aggregated Priority)",
             labels={"idle_days": "Idle Days", "y_jitter": "Status", "priority_bucket": "Priority"},
