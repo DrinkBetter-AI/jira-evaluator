@@ -86,11 +86,44 @@ def _render_metrics(df: pd.DataFrame) -> None:
     max_idle = float(df["idle_days"].max()) if total_open else 0.0
     oldest = float(df["ticket_age_days"].max()) if total_open else 0.0
 
+    in_progress = 0
+    if "workflow_stage" in df.columns and total_open:
+        in_progress = int(df["workflow_stage"].fillna("").astype(str).eq("In Progress").sum())
+
+    estimated_tickets = 0
+    if "estimate_seconds" in df.columns and total_open:
+        estimated_tickets = int(pd.to_numeric(df["estimate_seconds"], errors="coerce").fillna(0).gt(0).sum())
+    elif "original_estimate" in df.columns and total_open:
+        estimate_text = df["original_estimate"].fillna("").astype(str).str.strip()
+        estimated_tickets = int(estimate_text.ne("").sum())
+    estimate_coverage_pct = (estimated_tickets / total_open * 100.0) if total_open else 0.0
+
+    _LATE_STAGE_STATUSES = {"IN DEV ENV", "Review in Staging", "Ready for Production"}
+    _STALE_THRESHOLD_DAYS = 6
+    stale_late_stage = 0
+    if "status" in df.columns and "idle_days" in df.columns and total_open:
+        stale_late_stage = int(
+            (
+                df["status"].fillna("").astype(str).isin(_LATE_STAGE_STATUSES)
+                & (df["idle_days"] > _STALE_THRESHOLD_DAYS)
+            ).sum()
+        )
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total Open Tickets", total_open)
     m2.metric("Average Idle Days", f"{avg_idle:.1f}")
     m3.metric("Max Idle Days", f"{max_idle:.1f}")
     m4.metric("Oldest Ticket Age", f"{oldest:.1f}")
+
+    n1, n2, n3, n4 = st.columns(4)
+    n1.metric("In Progress", in_progress)
+    n2.metric("Estimate Coverage", f"{estimate_coverage_pct:.0f}%")
+    n3.metric(
+        "Stale in Late Stage",
+        stale_late_stage,
+        help="Tickets in IN DEV ENV, Review in Staging, or Ready for Production idle for >6 days",
+    )
+    n4.metric("—", "—")
 
 
 def _fmt_seconds(secs: float) -> str:
@@ -181,6 +214,15 @@ def _render_sprint_capacity(
 
     editable = str(selected_row["sprint_state"]).lower() in {"future", "active"}
     ticket_editor_df = df.copy()
+
+    # Capture epics before filtering them out so we can show them in a separate table.
+    _all_epics = ticket_editor_df[
+        ticket_editor_df["issue_type"].fillna("").astype(str).str.strip().str.lower() == "epic"
+    ].copy()
+    epic_sprint_df = _all_epics[
+        _all_epics["sprint_id"].fillna(-1).astype(str) == str(selected_row["sprint_id"])
+    ].copy()
+
     ticket_editor_df = ticket_editor_df[
         ticket_editor_df["issue_type"].fillna("").astype(str).str.strip().str.lower() != "epic"
     ].copy()
@@ -686,6 +728,43 @@ def _render_sprint_capacity(
             if had_success:
                 st.cache_data.clear()
                 st.rerun()
+
+    # ---- Epics in Sprint ----
+    epic_display_cols = [
+        c for c in [
+            "key", "summary", "status", "priority", "assignee",
+            "original_estimate", "reporter", "logged_time", "completion_pct",
+            "ticket_age_days", "idle_days", "created", "updated",
+        ]
+        if c in epic_sprint_df.columns
+    ]
+    with st.expander(
+        f"Epics in Sprint ({len(epic_sprint_df)})",
+        expanded=not epic_sprint_df.empty,
+    ):
+        if epic_sprint_df.empty:
+            st.caption("No epics are currently assigned to this sprint.")
+        else:
+            st.dataframe(
+                epic_sprint_df[epic_display_cols].sort_values(
+                    ["assignee", "key"], ascending=[True, True]
+                ),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "key": st.column_config.TextColumn("Key"),
+                    "summary": st.column_config.TextColumn("Summary"),
+                    "status": st.column_config.TextColumn("Status"),
+                    "priority": st.column_config.TextColumn("Priority"),
+                    "assignee": st.column_config.TextColumn("Assignee"),
+                    "original_estimate": st.column_config.TextColumn("Estimate"),
+                    "reporter": st.column_config.TextColumn("Reporter"),
+                    "logged_time": st.column_config.TextColumn("Logged"),
+                    "completion_pct": st.column_config.NumberColumn("Done %", format="%.0f%%"),
+                    "ticket_age_days": st.column_config.NumberColumn("Age (days)", format="%.1f"),
+                    "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
+                },
+            )
 
     calc_col1, calc_col2 = st.columns([2, 3])
     with calc_col1:
