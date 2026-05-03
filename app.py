@@ -86,10 +86,6 @@ def _render_metrics(df: pd.DataFrame) -> None:
     max_idle = float(df["idle_days"].max()) if total_open else 0.0
     oldest = float(df["ticket_age_days"].max()) if total_open else 0.0
 
-    in_progress = 0
-    if "workflow_stage" in df.columns and total_open:
-        in_progress = int(df["workflow_stage"].fillna("").astype(str).eq("In Progress").sum())
-
     estimated_tickets = 0
     if "estimate_seconds" in df.columns and total_open:
         estimated_tickets = int(pd.to_numeric(df["estimate_seconds"], errors="coerce").fillna(0).gt(0).sum())
@@ -115,15 +111,17 @@ def _render_metrics(df: pd.DataFrame) -> None:
     m3.metric("Max Idle Days", f"{max_idle:.1f}")
     m4.metric("Oldest Ticket Age", f"{oldest:.1f}")
 
-    n1, n2, n3, n4 = st.columns(4)
-    n1.metric("In Progress", in_progress)
-    n2.metric("Estimate Coverage", f"{estimate_coverage_pct:.0f}%")
-    n3.metric(
+    n1, n2, n3 = st.columns(3)
+    n1.metric("Estimate Coverage", f"{estimate_coverage_pct:.0f}%")
+    n2.metric(
         "Stale in Late Stage",
         stale_late_stage,
         help="Tickets in IN DEV ENV, Review in Staging, or Ready for Production idle for >6 days",
     )
-    n4.metric("—", "—")
+    n3.metric("—", "—")
+
+    if "status" in df.columns and total_open:
+        _render_status_pills(df["status"])
 
 
 def _fmt_seconds(secs: float) -> str:
@@ -271,7 +269,6 @@ def _render_sprint_capacity(
             if st.button("Restore table", key=f"restore_table_{selected_row['sprint_id']}"):
                 st.session_state["restore_sprint_ticket_table"] = True
                 st.rerun()
-    st.caption("Check tickets to preview keeping them in or moving them into the selected sprint. Uncheck them to preview sending them to backlog.")
     editor_key = f"sprint_editor_{selected_row['sprint_id']}"
     editor_version_key = f"{editor_key}_version"
     if editor_version_key not in st.session_state:
@@ -799,11 +796,16 @@ def _render_sprint_capacity(
     c2.metric(
         "Total estimated (sprint)",
         _fmt_seconds(preview_workload["estimate_seconds_live"].fillna(0).sum()),
+        help="Sum of estimates for In Sprint ✅ tickets matching the selected statuses and assignee filter.",
     )
     c3.metric(
-        "Grand Total",
-        _fmt_seconds(all_sprint_workload["estimate_seconds_live"].fillna(0).sum()),
+        "Grand Total (in sprint)",
+        _fmt_seconds(preview_scoped["estimate_seconds_live"].fillna(0).sum()),
+        help="Sum of estimates for all In Sprint ✅ tickets regardless of status filter.",
     )
+
+    # ---- Status breakdown pills (In Sprint tickets) ----
+    _render_status_pills(preview_scoped["status_live"])
 
     # Per-assignee breakdown
     st.markdown("##### Capacity per Assignee")
@@ -833,6 +835,43 @@ def _render_sprint_capacity(
         use_container_width=True,
         hide_index=True,
     )
+
+
+_STAGE_COLORS: dict[str, tuple[str, str]] = {
+    # (background, text)
+    "Backlog":               ("#2a2a3d", "#8888aa"),
+    "DISCUSSION NEEDED":     ("#3d2a2a", "#cc8888"),
+    "To Do":                 ("#1e3a5f", "#6aaad4"),
+    "In Progress":           ("#1a3d2b", "#5cba82"),
+    "IN DEV ENV":            ("#1e3a5f", "#58a6e6"),
+    "Code Review":           ("#2e2a3d", "#9b88cc"),
+    "Review in Staging":     ("#3d3520", "#c8a840"),
+    "Ready for Production":  ("#1a3d1e", "#4ccc5a"),
+    "Review":                ("#3d2a1a", "#d4834a"),
+}
+_DEFAULT_PILL: tuple[str, str] = ("#2a2a2a", "#aaaaaa")
+
+
+def _render_status_pills(status_series: pd.Series) -> None:
+    """Render a compact row of color-coded status pills with ticket counts."""
+    counts = status_series.fillna("Unknown").value_counts().sort_index()
+    if counts.empty:
+        return
+    pills_html = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 4px 0;">'
+    for status, count in counts.items():
+        bg, fg = _STAGE_COLORS.get(str(status), _DEFAULT_PILL)
+        pills_html += (
+            f'<span style="'
+            f'background:{bg};color:{fg};'
+            f'border-radius:6px;padding:4px 10px;'
+            f'font-size:0.78rem;font-weight:600;white-space:nowrap;'
+            f'border:1px solid {fg}22;'
+            f'">'
+            f'{status} <span style="opacity:0.75;font-weight:400;">({count})</span>'
+            f'</span>'
+        )
+    pills_html += "</div>"
+    st.markdown(pills_html, unsafe_allow_html=True)
 
 
 _PRIORITY_BUCKET_MAP = {
@@ -884,6 +923,11 @@ def _render_bubble_chart(
     age = plot_df["ticket_age_days"].clip(lower=1)
     plot_df["bubble_size"] = ((age - age.min()) / (age.max() - age.min() + 1e-9) * 31 + 3).round(1)
 
+    plot_df["marker_symbol"] = (
+        plot_df["issue_type"].fillna("").astype(str).str.strip().str.lower()
+        .map(lambda t: "triangle-up" if t == "epic" else "circle")
+    )
+
     if agg_priority and color_by == "priority":
         plot_df["priority_bucket"] = (
             plot_df["priority"].fillna("none").astype(str).str.strip().str.lower()
@@ -896,11 +940,13 @@ def _render_bubble_chart(
             y="y_jitter",
             size="bubble_size",
             color="priority_bucket",
+            symbol="marker_symbol",
+            symbol_map={"circle": "circle", "triangle-up": "triangle-up"},
             color_discrete_map=_BUCKET_COLORS,
             category_orders={"priority_bucket": ["Normal", "High", "Urgent"]},
-            custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days"],
-            title="Staleness vs Workflow Status (Aggregated Priority)",
-            labels={"idle_days": "Idle Days", "y_jitter": "Status", "priority_bucket": "Priority"},
+            custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days", "issue_type"],
+            # title="Staleness vs Workflow Status (Aggregated Priority)",
+            labels={"idle_days": "Idle Days", "y_jitter": "Status", "priority_bucket": "Priority", "marker_symbol": "Shape"},
             size_max=34,
             opacity=0.3,
         )
@@ -911,9 +957,11 @@ def _render_bubble_chart(
             y="y_jitter",
             size="bubble_size",
             color=color_by,
-            custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days"],
+            symbol="marker_symbol",
+            symbol_map={"circle": "circle", "triangle-up": "triangle-up"},
+            custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days", "issue_type"],
             title="Staleness vs Workflow Status",
-            labels={"idle_days": "Idle Days", "y_jitter": "Status"},
+            labels={"idle_days": "Idle Days", "y_jitter": "Status", "marker_symbol": "Shape"},
             size_max=34,
             opacity=0.3,
         )
@@ -926,7 +974,8 @@ def _render_bubble_chart(
             "Status: %{customdata[3]}<br>"
             "Priority: %{customdata[4]}<br>"
             "Age: %{customdata[5]:.1f} days<br>"
-            "Idle: %{customdata[6]:.1f} days"
+            "Idle: %{customdata[6]:.1f} days<br>"
+            "Type: %{customdata[7]}"
             "<extra></extra>"
         )
     )
