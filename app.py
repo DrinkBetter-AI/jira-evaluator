@@ -24,6 +24,7 @@ ORDER BY updated ASC"""
 
 FETCH_SCHEMA_VERSION = 2
 JIRA_BROWSE_BASE = "https://vinovoss.atlassian.net/browse"
+JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
 
 
 def _jira_ticket_url(key: str) -> str:
@@ -340,13 +341,31 @@ def _render_sprint_capacity(
 
     # Create display dataframe with URL column for LinkColumn
     display_df_for_editor = display_editor_df.copy()
-    display_df_for_editor.insert(1, "jira_key_link", display_df_for_editor["key"].apply(_jira_ticket_url))
+    display_df_for_editor.insert(1, "jira_key_link", display_df_for_editor["key"].apply(_jira_ticket_url))  # Full URL in position 1
     display_df_for_editor = display_df_for_editor.drop(columns=["key"])
+    visible_editor_columns = [
+        "include",
+        "jira_key_link",
+        "summary",
+        "status",
+        "priority",
+        "assignee",
+        "original_estimate",
+        "reporter",
+        "logged_time",
+        "completion_pct",
+        "ticket_age_days",
+        "idle_days",
+        "created",
+        "updated",
+        "issue_type",
+    ]
     
     edited_output = st.data_editor(
         display_df_for_editor,
         use_container_width=True,
         hide_index=True,
+        column_order=visible_editor_columns,
         disabled=(not editable) or (not is_ml_sprint) or [
             "jira_key_link",
             "summary",
@@ -363,6 +382,7 @@ def _render_sprint_capacity(
             "include": st.column_config.CheckboxColumn("In Sprint"),
             "jira_key_link": st.column_config.LinkColumn(
                 "Key",
+                display_text=JIRA_KEY_DISPLAY_PATTERN,
             ),
             "summary": "Summary",
             "status": st.column_config.SelectboxColumn(
@@ -749,7 +769,7 @@ def _render_sprint_capacity(
         c for c in [
             "key", "summary", "status", "priority", "assignee",
             "original_estimate", "reporter", "logged_time", "completion_pct",
-            "ticket_age_days", "idle_days", "created", "updated",
+            "ticket_age_days", "idle_days", "created", "updated", "issue_type",
         ]
         if c in epic_sprint_df.columns
     ]
@@ -760,14 +780,36 @@ def _render_sprint_capacity(
         if epic_sprint_df.empty:
             st.caption("No epics are currently assigned to this sprint.")
         else:
+            # Create display dataframe with linked key column in the correct position
+            epic_df_display = epic_sprint_df[epic_display_cols].sort_values(["assignee", "key"], ascending=[True, True]).copy()
+            epic_df_display["key_url"] = epic_df_display["key"].apply(_jira_ticket_url)
+            epic_df_display = epic_df_display.drop(columns=["key"])
+            visible_epic_columns = [
+                "key_url",
+                "summary",
+                "status",
+                "priority",
+                "assignee",
+                "original_estimate",
+                "reporter",
+                "logged_time",
+                "completion_pct",
+                "ticket_age_days",
+                "idle_days",
+                "created",
+                "updated",
+                "issue_type",
+            ]
             st.dataframe(
-                epic_sprint_df.assign(
-                    key_link=epic_sprint_df["key"].apply(_jira_ticket_url)
-                )[epic_display_cols + ["key_link"]].drop(columns=["key"]).rename(columns={"key_link": "key"}),
+                epic_df_display,
                 use_container_width=True,
                 hide_index=True,
+                column_order=visible_epic_columns,
                 column_config={
-                    "key": st.column_config.LinkColumn("Key"),
+                    "key_url": st.column_config.LinkColumn(
+                        "Key",
+                        display_text=JIRA_KEY_DISPLAY_PATTERN,
+                    ),
                     "summary": st.column_config.TextColumn("Summary"),
                     "status": st.column_config.TextColumn("Status"),
                     "priority": st.column_config.TextColumn("Priority"),
@@ -778,6 +820,9 @@ def _render_sprint_capacity(
                     "completion_pct": st.column_config.NumberColumn("Done %", format="%.0f%%"),
                     "ticket_age_days": st.column_config.NumberColumn("Age (days)", format="%.1f"),
                     "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
+                    "created": st.column_config.TextColumn("Created at"),
+                    "updated": st.column_config.TextColumn("Updated at"),
+                    "issue_type": st.column_config.TextColumn("Type"),
                 },
             )
 
@@ -955,13 +1000,11 @@ def _render_bubble_chart(
             y="y_jitter",
             size="bubble_size",
             color="priority_bucket",
-            symbol="marker_symbol",
-            symbol_map={"circle": "circle", "triangle-up": "triangle-up"},
             color_discrete_map=_BUCKET_COLORS,
             category_orders={"priority_bucket": ["Normal", "High", "Urgent"]},
             custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days", "issue_type"],
             # title="Staleness vs Workflow Status (Aggregated Priority)",
-            labels={"idle_days": "Idle Days", "y_jitter": "Status", "priority_bucket": "Priority", "marker_symbol": "Shape"},
+            labels={"idle_days": "Idle Days", "y_jitter": "Status", "priority_bucket": "Priority"},
             size_max=34,
             opacity=0.3,
         )
@@ -972,14 +1015,21 @@ def _render_bubble_chart(
             y="y_jitter",
             size="bubble_size",
             color=color_by,
-            symbol="marker_symbol",
-            symbol_map={"circle": "circle", "triangle-up": "triangle-up"},
             custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days", "issue_type"],
             title="Staleness vs Workflow Status",
-            labels={"idle_days": "Idle Days", "y_jitter": "Status", "marker_symbol": "Shape"},
+            labels={"idle_days": "Idle Days", "y_jitter": "Status"},
             size_max=34,
             opacity=0.3,
         )
+
+    for trace in fig.data:
+        custom_rows = getattr(trace, "customdata", None)
+        if custom_rows is None:
+            continue
+        trace.marker.symbol = [
+            "triangle-up" if str(row[7]).strip().lower() == "epic" else "circle"
+            for row in custom_rows
+        ]
 
     fig.update_traces(
         hovertemplate=(
