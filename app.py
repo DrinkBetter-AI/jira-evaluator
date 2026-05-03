@@ -23,6 +23,12 @@ DEFAULT_JQL = """statusCategory != Done
 ORDER BY updated ASC"""
 
 FETCH_SCHEMA_VERSION = 2
+JIRA_BROWSE_BASE = "https://vinovoss.atlassian.net/browse"
+
+
+def _jira_ticket_url(key: str) -> str:
+    """Generate a Jira ticket URL from its key."""
+    return f"{JIRA_BROWSE_BASE}/{str(key).strip()}"
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -332,12 +338,17 @@ def _render_sprint_capacity(
         )
     )
 
-    edited_tickets = st.data_editor(
-        display_editor_df,
+    # Create display dataframe with URL column for LinkColumn
+    display_df_for_editor = display_editor_df.copy()
+    display_df_for_editor.insert(1, "jira_key_link", display_df_for_editor["key"].apply(_jira_ticket_url))
+    display_df_for_editor = display_df_for_editor.drop(columns=["key"])
+    
+    edited_output = st.data_editor(
+        display_df_for_editor,
         use_container_width=True,
         hide_index=True,
         disabled=(not editable) or (not is_ml_sprint) or [
-            "key",
+            "jira_key_link",
             "summary",
             "reporter",
             "logged_time",
@@ -350,7 +361,9 @@ def _render_sprint_capacity(
         ],
         column_config={
             "include": st.column_config.CheckboxColumn("In Sprint"),
-            "key": "Key",
+            "jira_key_link": st.column_config.LinkColumn(
+                "Key",
+            ),
             "summary": "Summary",
             "status": st.column_config.SelectboxColumn(
                 "Status",
@@ -382,6 +395,11 @@ def _render_sprint_capacity(
         },
         key=editor_widget_key,
     )
+
+    # Restore key column from jira_key_link (extract key from URL)
+    edited_tickets = edited_output.copy()
+    edited_tickets["key"] = edited_tickets["jira_key_link"].apply(lambda url: url.split("/")[-1])
+    edited_tickets = edited_tickets.drop(columns=["jira_key_link"])
 
     # Build edit dicts directly from the data_editor output (edited_tickets) for the displayed rows,
     # then fall back to ticket_editor_df originals for any rows hidden by bubble-click filtering.
@@ -743,13 +761,13 @@ def _render_sprint_capacity(
             st.caption("No epics are currently assigned to this sprint.")
         else:
             st.dataframe(
-                epic_sprint_df[epic_display_cols].sort_values(
-                    ["assignee", "key"], ascending=[True, True]
-                ),
+                epic_sprint_df.assign(
+                    key_link=epic_sprint_df["key"].apply(_jira_ticket_url)
+                )[epic_display_cols + ["key_link"]].drop(columns=["key"]).rename(columns={"key_link": "key"}),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "key": st.column_config.TextColumn("Key"),
+                    "key": st.column_config.LinkColumn("Key"),
                     "summary": st.column_config.TextColumn("Summary"),
                     "status": st.column_config.TextColumn("Status"),
                     "priority": st.column_config.TextColumn("Priority"),
@@ -764,16 +782,13 @@ def _render_sprint_capacity(
             )
 
     calc_col1, calc_col2 = st.columns([2, 3])
-    with calc_col1:
-        workload_statuses = st.multiselect(
-            "Statuses counted in hours",
-            options=workload_status_options,
-            default=default_workload_statuses,
-            help="Use this to focus sprint effort on work that still needs attention.",
-            key=workload_statuses_key,
-        )
-    with calc_col2:
-        st.caption("Hour totals and the assignee workload table use the selected statuses. `Tickets in sprint` stays as the full selected-sprint count.")
+    workload_statuses = st.multiselect(
+        "Statuses counted in hours",
+        options=workload_status_options,
+        default=default_workload_statuses,
+        help="Use this to focus sprint effort on work that still needs attention.",
+        key=workload_statuses_key,
+    )
 
     if workload_statuses:
         preview_workload = preview_scoped[preview_scoped["status_live"].isin(workload_statuses)].copy()
