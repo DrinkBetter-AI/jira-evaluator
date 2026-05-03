@@ -23,6 +23,13 @@ DEFAULT_JQL = """statusCategory != Done
 ORDER BY updated ASC"""
 
 FETCH_SCHEMA_VERSION = 2
+JIRA_BROWSE_BASE = "https://vinovoss.atlassian.net/browse"
+JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
+
+
+def _jira_ticket_url(key: str) -> str:
+    """Generate a Jira ticket URL from its key."""
+    return f"{JIRA_BROWSE_BASE}/{str(key).strip()}"
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -86,11 +93,42 @@ def _render_metrics(df: pd.DataFrame) -> None:
     max_idle = float(df["idle_days"].max()) if total_open else 0.0
     oldest = float(df["ticket_age_days"].max()) if total_open else 0.0
 
+    estimated_tickets = 0
+    if "estimate_seconds" in df.columns and total_open:
+        estimated_tickets = int(pd.to_numeric(df["estimate_seconds"], errors="coerce").fillna(0).gt(0).sum())
+    elif "original_estimate" in df.columns and total_open:
+        estimate_text = df["original_estimate"].fillna("").astype(str).str.strip()
+        estimated_tickets = int(estimate_text.ne("").sum())
+    estimate_coverage_pct = (estimated_tickets / total_open * 100.0) if total_open else 0.0
+
+    _LATE_STAGE_STATUSES = {"IN DEV ENV", "Review in Staging", "Ready for Production"}
+    _STALE_THRESHOLD_DAYS = 6
+    stale_late_stage = 0
+    if "status" in df.columns and "idle_days" in df.columns and total_open:
+        stale_late_stage = int(
+            (
+                df["status"].fillna("").astype(str).isin(_LATE_STAGE_STATUSES)
+                & (df["idle_days"] > _STALE_THRESHOLD_DAYS)
+            ).sum()
+        )
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total Open Tickets", total_open)
     m2.metric("Average Idle Days", f"{avg_idle:.1f}")
     m3.metric("Max Idle Days", f"{max_idle:.1f}")
     m4.metric("Oldest Ticket Age", f"{oldest:.1f}")
+
+    n1, n2, n3 = st.columns(3)
+    n1.metric("Estimate Coverage", f"{estimate_coverage_pct:.0f}%")
+    n2.metric(
+        "Stale in Late Stage",
+        stale_late_stage,
+        help="Tickets in IN DEV ENV, Review in Staging, or Ready for Production idle for >6 days",
+    )
+    n3.metric("—", "—")
+
+    if "status" in df.columns and total_open:
+        _render_status_pills(df["status"])
 
 
 def _fmt_seconds(secs: float) -> str:
@@ -181,6 +219,15 @@ def _render_sprint_capacity(
 
     editable = str(selected_row["sprint_state"]).lower() in {"future", "active"}
     ticket_editor_df = df.copy()
+
+    # Capture epics before filtering them out so we can show them in a separate table.
+    _all_epics = ticket_editor_df[
+        ticket_editor_df["issue_type"].fillna("").astype(str).str.strip().str.lower() == "epic"
+    ].copy()
+    epic_sprint_df = _all_epics[
+        _all_epics["sprint_id"].fillna(-1).astype(str) == str(selected_row["sprint_id"])
+    ].copy()
+
     ticket_editor_df = ticket_editor_df[
         ticket_editor_df["issue_type"].fillna("").astype(str).str.strip().str.lower() != "epic"
     ].copy()
@@ -229,7 +276,6 @@ def _render_sprint_capacity(
             if st.button("Restore table", key=f"restore_table_{selected_row['sprint_id']}"):
                 st.session_state["restore_sprint_ticket_table"] = True
                 st.rerun()
-    st.caption("Check tickets to preview keeping them in or moving them into the selected sprint. Uncheck them to preview sending them to backlog.")
     editor_key = f"sprint_editor_{selected_row['sprint_id']}"
     editor_version_key = f"{editor_key}_version"
     if editor_version_key not in st.session_state:
@@ -293,12 +339,35 @@ def _render_sprint_capacity(
         )
     )
 
-    edited_tickets = st.data_editor(
-        display_editor_df,
+    # Create display dataframe with URL column for LinkColumn
+    display_df_for_editor = display_editor_df.copy()
+    display_df_for_editor.insert(1, "jira_key_link", display_df_for_editor["key"].apply(_jira_ticket_url))  # Full URL in position 1
+    display_df_for_editor = display_df_for_editor.drop(columns=["key"])
+    visible_editor_columns = [
+        "include",
+        "jira_key_link",
+        "summary",
+        "status",
+        "priority",
+        "assignee",
+        "original_estimate",
+        "reporter",
+        "logged_time",
+        "completion_pct",
+        "ticket_age_days",
+        "idle_days",
+        "created",
+        "updated",
+        "issue_type",
+    ]
+    
+    edited_output = st.data_editor(
+        display_df_for_editor,
         use_container_width=True,
         hide_index=True,
+        column_order=visible_editor_columns,
         disabled=(not editable) or (not is_ml_sprint) or [
-            "key",
+            "jira_key_link",
             "summary",
             "reporter",
             "logged_time",
@@ -311,7 +380,10 @@ def _render_sprint_capacity(
         ],
         column_config={
             "include": st.column_config.CheckboxColumn("In Sprint"),
-            "key": "Key",
+            "jira_key_link": st.column_config.LinkColumn(
+                "Key",
+                display_text=JIRA_KEY_DISPLAY_PATTERN,
+            ),
             "summary": "Summary",
             "status": st.column_config.SelectboxColumn(
                 "Status",
@@ -343,6 +415,11 @@ def _render_sprint_capacity(
         },
         key=editor_widget_key,
     )
+
+    # Restore key column from jira_key_link (extract key from URL)
+    edited_tickets = edited_output.copy()
+    edited_tickets["key"] = edited_tickets["jira_key_link"].apply(lambda url: url.split("/")[-1])
+    edited_tickets = edited_tickets.drop(columns=["jira_key_link"])
 
     # Build edit dicts directly from the data_editor output (edited_tickets) for the displayed rows,
     # then fall back to ticket_editor_df originals for any rows hidden by bubble-click filtering.
@@ -687,17 +764,76 @@ def _render_sprint_capacity(
                 st.cache_data.clear()
                 st.rerun()
 
+    # ---- Epics in Sprint ----
+    epic_display_cols = [
+        c for c in [
+            "key", "summary", "status", "priority", "assignee",
+            "original_estimate", "reporter", "logged_time", "completion_pct",
+            "ticket_age_days", "idle_days", "created", "updated", "issue_type",
+        ]
+        if c in epic_sprint_df.columns
+    ]
+    with st.expander(
+        f"Epics in Sprint ({len(epic_sprint_df)})",
+        expanded=not epic_sprint_df.empty,
+    ):
+        if epic_sprint_df.empty:
+            st.caption("No epics are currently assigned to this sprint.")
+        else:
+            # Create display dataframe with linked key column in the correct position
+            epic_df_display = epic_sprint_df[epic_display_cols].sort_values(["assignee", "key"], ascending=[True, True]).copy()
+            epic_df_display["key_url"] = epic_df_display["key"].apply(_jira_ticket_url)
+            epic_df_display = epic_df_display.drop(columns=["key"])
+            visible_epic_columns = [
+                "key_url",
+                "summary",
+                "status",
+                "priority",
+                "assignee",
+                "original_estimate",
+                "reporter",
+                "logged_time",
+                "completion_pct",
+                "ticket_age_days",
+                "idle_days",
+                "created",
+                "updated",
+                "issue_type",
+            ]
+            st.dataframe(
+                epic_df_display,
+                use_container_width=True,
+                hide_index=True,
+                column_order=visible_epic_columns,
+                column_config={
+                    "key_url": st.column_config.LinkColumn(
+                        "Key",
+                        display_text=JIRA_KEY_DISPLAY_PATTERN,
+                    ),
+                    "summary": st.column_config.TextColumn("Summary"),
+                    "status": st.column_config.TextColumn("Status"),
+                    "priority": st.column_config.TextColumn("Priority"),
+                    "assignee": st.column_config.TextColumn("Assignee"),
+                    "original_estimate": st.column_config.TextColumn("Estimate"),
+                    "reporter": st.column_config.TextColumn("Reporter"),
+                    "logged_time": st.column_config.TextColumn("Logged"),
+                    "completion_pct": st.column_config.NumberColumn("Done %", format="%.0f%%"),
+                    "ticket_age_days": st.column_config.NumberColumn("Age (days)", format="%.1f"),
+                    "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
+                    "created": st.column_config.TextColumn("Created at"),
+                    "updated": st.column_config.TextColumn("Updated at"),
+                    "issue_type": st.column_config.TextColumn("Type"),
+                },
+            )
+
     calc_col1, calc_col2 = st.columns([2, 3])
-    with calc_col1:
-        workload_statuses = st.multiselect(
-            "Statuses counted in hours",
-            options=workload_status_options,
-            default=default_workload_statuses,
-            help="Use this to focus sprint effort on work that still needs attention.",
-            key=workload_statuses_key,
-        )
-    with calc_col2:
-        st.caption("Hour totals and the assignee workload table use the selected statuses. `Tickets in sprint` stays as the full selected-sprint count.")
+    workload_statuses = st.multiselect(
+        "Statuses counted in hours",
+        options=workload_status_options,
+        default=default_workload_statuses,
+        help="Use this to focus sprint effort on work that still needs attention.",
+        key=workload_statuses_key,
+    )
 
     if workload_statuses:
         preview_workload = preview_scoped[preview_scoped["status_live"].isin(workload_statuses)].copy()
@@ -720,11 +856,16 @@ def _render_sprint_capacity(
     c2.metric(
         "Total estimated (sprint)",
         _fmt_seconds(preview_workload["estimate_seconds_live"].fillna(0).sum()),
+        help="Sum of estimates for In Sprint ✅ tickets matching the selected statuses and assignee filter.",
     )
     c3.metric(
-        "Grand Total",
-        _fmt_seconds(all_sprint_workload["estimate_seconds_live"].fillna(0).sum()),
+        "Grand Total (in sprint)",
+        _fmt_seconds(preview_scoped["estimate_seconds_live"].fillna(0).sum()),
+        help="Sum of estimates for all In Sprint ✅ tickets regardless of status filter.",
     )
+
+    # ---- Status breakdown pills (In Sprint tickets) ----
+    _render_status_pills(preview_scoped["status_live"])
 
     # Per-assignee breakdown
     st.markdown("##### Capacity per Assignee")
@@ -754,6 +895,43 @@ def _render_sprint_capacity(
         use_container_width=True,
         hide_index=True,
     )
+
+
+_STAGE_COLORS: dict[str, tuple[str, str]] = {
+    # (background, text)
+    "Backlog":               ("#2a2a3d", "#8888aa"),
+    "DISCUSSION NEEDED":     ("#3d2a2a", "#cc8888"),
+    "To Do":                 ("#1e3a5f", "#6aaad4"),
+    "In Progress":           ("#1a3d2b", "#5cba82"),
+    "IN DEV ENV":            ("#1e3a5f", "#58a6e6"),
+    "Code Review":           ("#2e2a3d", "#9b88cc"),
+    "Review in Staging":     ("#3d3520", "#c8a840"),
+    "Ready for Production":  ("#1a3d1e", "#4ccc5a"),
+    "Review":                ("#3d2a1a", "#d4834a"),
+}
+_DEFAULT_PILL: tuple[str, str] = ("#2a2a2a", "#aaaaaa")
+
+
+def _render_status_pills(status_series: pd.Series) -> None:
+    """Render a compact row of color-coded status pills with ticket counts."""
+    counts = status_series.fillna("Unknown").value_counts().sort_index()
+    if counts.empty:
+        return
+    pills_html = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 4px 0;">'
+    for status, count in counts.items():
+        bg, fg = _STAGE_COLORS.get(str(status), _DEFAULT_PILL)
+        pills_html += (
+            f'<span style="'
+            f'background:{bg};color:{fg};'
+            f'border-radius:6px;padding:4px 10px;'
+            f'font-size:0.78rem;font-weight:600;white-space:nowrap;'
+            f'border:1px solid {fg}22;'
+            f'">'
+            f'{status} <span style="opacity:0.75;font-weight:400;">({count})</span>'
+            f'</span>'
+        )
+    pills_html += "</div>"
+    st.markdown(pills_html, unsafe_allow_html=True)
 
 
 _PRIORITY_BUCKET_MAP = {
@@ -805,6 +983,11 @@ def _render_bubble_chart(
     age = plot_df["ticket_age_days"].clip(lower=1)
     plot_df["bubble_size"] = ((age - age.min()) / (age.max() - age.min() + 1e-9) * 31 + 3).round(1)
 
+    plot_df["marker_symbol"] = (
+        plot_df["issue_type"].fillna("").astype(str).str.strip().str.lower()
+        .map(lambda t: "triangle-up" if t == "epic" else "circle")
+    )
+
     if agg_priority and color_by == "priority":
         plot_df["priority_bucket"] = (
             plot_df["priority"].fillna("none").astype(str).str.strip().str.lower()
@@ -819,8 +1002,8 @@ def _render_bubble_chart(
             color="priority_bucket",
             color_discrete_map=_BUCKET_COLORS,
             category_orders={"priority_bucket": ["Normal", "High", "Urgent"]},
-            custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days"],
-            title="Staleness vs Workflow Status (Aggregated Priority)",
+            custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days", "issue_type"],
+            # title="Staleness vs Workflow Status (Aggregated Priority)",
             labels={"idle_days": "Idle Days", "y_jitter": "Status", "priority_bucket": "Priority"},
             size_max=34,
             opacity=0.3,
@@ -832,12 +1015,21 @@ def _render_bubble_chart(
             y="y_jitter",
             size="bubble_size",
             color=color_by,
-            custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days"],
+            custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days", "issue_type"],
             title="Staleness vs Workflow Status",
             labels={"idle_days": "Idle Days", "y_jitter": "Status"},
             size_max=34,
             opacity=0.3,
         )
+
+    for trace in fig.data:
+        custom_rows = getattr(trace, "customdata", None)
+        if custom_rows is None:
+            continue
+        trace.marker.symbol = [
+            "triangle-up" if str(row[7]).strip().lower() == "epic" else "circle"
+            for row in custom_rows
+        ]
 
     fig.update_traces(
         hovertemplate=(
@@ -847,7 +1039,8 @@ def _render_bubble_chart(
             "Status: %{customdata[3]}<br>"
             "Priority: %{customdata[4]}<br>"
             "Age: %{customdata[5]:.1f} days<br>"
-            "Idle: %{customdata[6]:.1f} days"
+            "Idle: %{customdata[6]:.1f} days<br>"
+            "Type: %{customdata[7]}"
             "<extra></extra>"
         )
     )
