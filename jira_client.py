@@ -1,0 +1,527 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
+
+import pandas as pd
+import requests
+import yaml
+
+
+DEFAULT_FIELDS = [
+    "summary",
+    "status",
+    "priority",
+    "assignee",
+    "reporter",
+    "created",
+    "updated",
+    "duedate",
+    "issuetype",
+    "labels",
+    "resolution",
+    "statuscategorychangedate",
+    "timetracking",
+    "customfield_10020",
+]
+
+
+class JiraConfigError(ValueError):
+    """Raised when Jira config is missing or invalid."""
+
+
+def _first_non_empty(mapping: dict[str, Any], keys: Iterable[str]) -> Any:
+    for key in keys:
+        value = mapping.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _normalize_base_url(base_url: str) -> str:
+    cleaned = base_url.strip().rstrip("/")
+    if cleaned.startswith("http://") or cleaned.startswith("https://"):
+        return cleaned
+    return f"https://{cleaned}"
+
+
+def load_jira_profile(
+    creds_path: str | Path = "~/.creds/vinovoss.yml",
+    profile_name: str = "ML-TEAM-MANAGEMENT",
+) -> dict[str, str]:
+    path = Path(creds_path).expanduser()
+    if not path.exists():
+        raise JiraConfigError(f"Credentials file not found: {path}")
+
+    with path.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+
+    jira_section = data.get("Jira")
+    if not isinstance(jira_section, dict):
+        raise JiraConfigError("Missing 'Jira' section in credentials file.")
+
+    profile = jira_section.get(profile_name)
+    if not isinstance(profile, dict):
+        available = ", ".join(jira_section.keys()) or "none"
+        raise JiraConfigError(
+            f"Jira profile '{profile_name}' not found. Available profiles: {available}"
+        )
+
+    base_url = _first_non_empty(profile, ["base_url", "url", "domain", "host"])
+    email = _first_non_empty(profile, ["email", "username", "user"])
+    api_token = _first_non_empty(profile, ["api_token", "token", "password", "apiKey"])
+
+    if not base_url or not email or not api_token:
+        raise JiraConfigError(
+            "Jira profile is missing one of required values: base URL, email, API token."
+        )
+
+    return {
+        "base_url": _normalize_base_url(str(base_url)),
+        "email": str(email),
+        "api_token": str(api_token),
+    }
+
+
+@dataclass
+class JiraClient:
+    base_url: str
+    email: str
+    api_token: str
+
+    @classmethod
+    def from_yaml(
+        cls,
+        creds_path: str | Path = "~/.creds/vinovoss.yml",
+        profile_name: str = "ML-TEAM-MANAGEMENT",
+    ) -> "JiraClient":
+        cfg = load_jira_profile(creds_path=creds_path, profile_name=profile_name)
+        return cls(**cfg)
+
+    def _session(self) -> requests.Session:
+        session = requests.Session()
+        session.auth = (self.email, self.api_token)
+        session.headers.update({"Accept": "application/json"})
+        return session
+
+    def search_issues(
+        self,
+        jql: str,
+        fields: list[str] | None = None,
+        max_results: int = 1000,
+        page_size: int = 100,
+    ) -> pd.DataFrame:
+        fields = fields or DEFAULT_FIELDS
+        issues: list[dict[str, Any]] = []
+        seen_issue_keys: set[str] = set()
+
+        search_url = f"{self.base_url}/rest/api/3/search/jql"
+        legacy_search_url = f"{self.base_url}/rest/api/3/search"
+
+        with self._session() as session:
+            use_new_api = True
+            next_page_token: str | None = None
+            start_at = 0
+            total = None
+            seen_page_signatures: set[tuple[Any, ...]] = set()
+
+            while True:
+                remaining = max_results - len(issues)
+                if remaining <= 0:
+                    break
+
+                batch_size = min(page_size, remaining)
+                if use_new_api:
+                    params = {
+                        "jql": jql,
+                        "fields": ",".join(fields),
+                        "maxResults": batch_size,
+                    }
+                    if next_page_token:
+                        params["nextPageToken"] = next_page_token
+                    response = session.get(search_url, params=params, timeout=30)
+
+                    # If the tenant doesn't support the new endpoint shape, fallback.
+                    if response.status_code in {404, 405, 410}:
+                        use_new_api = False
+                        continue
+                else:
+                    params = {
+                        "jql": jql,
+                        "fields": ",".join(fields),
+                        "startAt": start_at,
+                        "maxResults": batch_size,
+                    }
+                    response = session.get(legacy_search_url, params=params, timeout=30)
+
+                if response.status_code >= 400:
+                    details = response.text[:500]
+                    raise RuntimeError(
+                        f"Jira search failed ({response.status_code}): {details}"
+                    )
+
+                payload = response.json()
+                batch = payload.get("issues", [])
+
+                if not batch:
+                    break
+
+                for issue in batch:
+                    issue_key = issue.get("key")
+                    if issue_key and issue_key in seen_issue_keys:
+                        continue
+                    if issue_key:
+                        seen_issue_keys.add(issue_key)
+                    issues.append(issue)
+
+                if use_new_api:
+                    signature = (
+                        batch[0].get("key"),
+                        batch[-1].get("key"),
+                        len(batch),
+                        payload.get("nextPageToken"),
+                    )
+                    if signature in seen_page_signatures:
+                        break
+                    seen_page_signatures.add(signature)
+
+                    next_page_token = payload.get("nextPageToken")
+                    if not next_page_token:
+                        break
+                else:
+                    total = payload.get("total", total)
+                    start_at += len(batch)
+
+                    if total is not None and start_at >= total:
+                        break
+                    if total is None and len(batch) < batch_size:
+                        break
+
+        return self._issues_to_dataframe(issues)
+
+    def update_issue(self, key: str, fields: dict[str, Any]) -> None:
+        """Update arbitrary fields on a single Jira issue."""
+        url = f"{self.base_url}/rest/api/3/issue/{key}"
+        with self._session() as session:
+            session.headers["Content-Type"] = "application/json"
+            response = session.put(url, json={"fields": fields}, timeout=30)
+        if response.status_code not in {200, 204}:
+            raise RuntimeError(
+                f"Failed to update {key} ({response.status_code}): {response.text[:300]}"
+            )
+
+    def add_issues_to_sprint(self, sprint_id: int | str, issue_keys: list[str]) -> None:
+        """Add issues to a Jira sprint via the Agile API."""
+        if not issue_keys:
+            return
+
+        url = f"{self.base_url}/rest/agile/1.0/sprint/{sprint_id}/issue"
+        payload = {"issues": issue_keys}
+        with self._session() as session:
+            session.headers["Content-Type"] = "application/json"
+            response = session.post(url, json=payload, timeout=30)
+
+        if response.status_code not in {200, 201, 204}:
+            raise RuntimeError(
+                f"Failed to add issues to sprint {sprint_id} ({response.status_code}): {response.text[:300]}"
+            )
+
+    def move_issues_to_backlog(self, issue_keys: list[str]) -> None:
+        """Move issues out of their current non-closed sprint and back to backlog."""
+        if not issue_keys:
+            return
+
+        url = f"{self.base_url}/rest/agile/1.0/backlog/issue"
+        payload = {"issues": issue_keys}
+        with self._session() as session:
+            session.headers["Content-Type"] = "application/json"
+            response = session.post(url, json=payload, timeout=30)
+
+        if response.status_code not in {200, 201, 204}:
+            raise RuntimeError(
+                f"Failed to move issues to backlog ({response.status_code}): {response.text[:300]}"
+            )
+
+    def get_issue(self, key: str, fields: list[str] | None = None) -> dict[str, Any]:
+        """Fetch a Jira issue payload for a key."""
+        url = f"{self.base_url}/rest/api/3/issue/{key}"
+        params: dict[str, str] = {}
+        if fields:
+            params["fields"] = ",".join(fields)
+
+        with self._session() as session:
+            response = session.get(url, params=params, timeout=30)
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Failed to fetch issue {key} ({response.status_code}): {response.text[:300]}"
+            )
+        return response.json() or {}
+
+    def get_issue_snapshot(self, key: str) -> dict[str, Any]:
+        """Return a compact live snapshot used for audit/revert."""
+        issue = self.get_issue(key, fields=["summary", "status", "priority", "updated"])
+        fields = issue.get("fields") or {}
+        priority = fields.get("priority") or {}
+        status = fields.get("status") or {}
+        return {
+            "key": key,
+            "summary": fields.get("summary"),
+            "status": status.get("name"),
+            "priority": priority.get("name"),
+            "priority_id": priority.get("id"),
+            "updated": fields.get("updated"),
+        }
+
+    def set_priority(self, key: str, priority_name: str) -> None:
+        self.update_issue(key, {"priority": {"name": priority_name}})
+
+    def set_priority_by_id(self, key: str, priority_id: str) -> None:
+        self.update_issue(key, {"priority": {"id": priority_id}})
+
+    def bulk_update_priority(
+        self,
+        keys: list[str],
+        priority_name: str,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Set priority on each ticket in keys.
+        Returns (succeeded_keys, {key: error_message}) for failed ones.
+        """
+        succeeded: list[str] = []
+        failed: dict[str, str] = {}
+        for key in keys:
+            try:
+                self.set_priority(key, priority_name)
+                succeeded.append(key)
+            except Exception as exc:  # noqa: BLE001
+                failed[key] = str(exc)
+        return succeeded, failed
+
+    def get_issue_transitions(self, key: str) -> list[dict[str, str]]:
+        """Return available transitions for a Jira issue key."""
+        url = f"{self.base_url}/rest/api/3/issue/{key}/transitions"
+        with self._session() as session:
+            response = session.get(url, timeout=30)
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Failed to fetch transitions for {key} ({response.status_code}): {response.text[:300]}"
+            )
+
+        payload = response.json() or {}
+        transitions = payload.get("transitions", [])
+        return [
+            {
+                "id": str(t.get("id", "")),
+                "name": str(t.get("name", "")),
+                "to_status": str((t.get("to") or {}).get("name", "")),
+            }
+            for t in transitions
+            if t.get("id")
+        ]
+
+    def transition_issue(self, key: str, transition_id: str) -> None:
+        """Transition a Jira issue using a transition id."""
+        url = f"{self.base_url}/rest/api/3/issue/{key}/transitions"
+        with self._session() as session:
+            session.headers["Content-Type"] = "application/json"
+            response = session.post(
+                url,
+                json={"transition": {"id": transition_id}},
+                timeout=30,
+            )
+
+        if response.status_code not in {200, 204}:
+            raise RuntimeError(
+                f"Failed to transition {key} ({response.status_code}): {response.text[:300]}"
+            )
+
+    def transition_issue_to_status(self, key: str, to_status_name: str) -> None:
+        """Transition a Jira issue to a target status name when valid."""
+        target = to_status_name.strip().lower()
+        transitions = self.get_issue_transitions(key)
+        matched = next(
+            (t for t in transitions if t.get("to_status", "").strip().lower() == target),
+            None,
+        )
+        if not matched:
+            available = ", ".join(
+                sorted({t.get("to_status", "") for t in transitions if t.get("to_status")})
+            )
+            raise RuntimeError(
+                "No valid transition to target status. "
+                + (f"Available: {available}" if available else "No transitions available")
+            )
+        self.transition_issue(key, matched["id"])
+
+    def bulk_transition_status(
+        self,
+        keys: list[str],
+        to_status_name: str,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Transition each ticket to the given target status when possible.
+        Returns (succeeded_keys, {key: error_message}) for failed ones.
+        """
+        target = to_status_name.strip().lower()
+        succeeded: list[str] = []
+        failed: dict[str, str] = {}
+
+        for key in keys:
+            try:
+                self.transition_issue_to_status(key, target)
+                succeeded.append(key)
+            except Exception as exc:  # noqa: BLE001
+                failed[key] = str(exc)
+
+        return succeeded, failed
+
+    def get_all_statuses(self) -> list[str]:
+        """Return all status names configured in this Jira instance."""
+        url = f"{self.base_url}/rest/api/3/status"
+        with self._session() as session:
+            response = session.get(url, timeout=30)
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Failed to fetch statuses ({response.status_code}): {response.text[:300]}"
+            )
+        return sorted({s["name"] for s in response.json() if s.get("name")})
+
+    def get_all_priorities(self) -> list[str]:
+        """Return all priority names configured in this Jira instance."""
+        url = f"{self.base_url}/rest/api/3/priority/search"
+        with self._session() as session:
+            response = session.get(url, timeout=30)
+        if response.status_code >= 400:
+            url = f"{self.base_url}/rest/api/3/priority"
+            with self._session() as session2:
+                response = session2.get(url, timeout=30)
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Failed to fetch priorities ({response.status_code}): {response.text[:300]}"
+            )
+        payload = response.json()
+        items = payload.get("values", payload) if isinstance(payload, dict) else payload
+        return [p["name"] for p in items if p.get("name")]
+
+    def get_all_users(self, page_size: int = 1000) -> list[dict[str, str]]:
+        """Return Jira users with display names and account ids."""
+        url = f"{self.base_url}/rest/api/3/users/search"
+        start_at = 0
+        users: list[dict[str, str]] = []
+
+        with self._session() as session:
+            while True:
+                response = session.get(
+                    url,
+                    params={
+                        "query": "",
+                        "startAt": start_at,
+                        "maxResults": page_size,
+                    },
+                    timeout=30,
+                )
+                if response.status_code >= 400:
+                    raise RuntimeError(
+                        f"Failed to fetch users ({response.status_code}): {response.text[:300]}"
+                    )
+
+                batch = response.json() or []
+                if not isinstance(batch, list) or not batch:
+                    break
+
+                for user in batch:
+                    account_id = str(user.get("accountId") or "").strip()
+                    display_name = str(user.get("displayName") or "").strip()
+                    if account_id and display_name:
+                        users.append(
+                            {
+                                "account_id": account_id,
+                                "display_name": display_name,
+                            }
+                        )
+
+                if len(batch) < page_size:
+                    break
+                start_at += page_size
+
+        dedup: dict[tuple[str, str], dict[str, str]] = {}
+        for user in users:
+            key = (user["account_id"], user["display_name"])
+            dedup[key] = user
+        return list(dedup.values())
+
+    def _issues_to_dataframe(self, issues: list[dict[str, Any]]) -> pd.DataFrame:
+        rows: list[dict[str, Any]] = []
+        for issue in issues:
+            fields = issue.get("fields") or {}
+            status = fields.get("status") or {}
+            status_category = status.get("statusCategory") or {}
+
+            assignee = fields.get("assignee") or {}
+            reporter = fields.get("reporter") or {}
+            priority = fields.get("priority") or {}
+            issue_type = fields.get("issuetype") or {}
+            resolution = fields.get("resolution") or {}
+            timetracking = fields.get("timetracking") or {}
+            time_spent_sec = timetracking.get("timeSpentSeconds") or 0
+            orig_est_sec = timetracking.get("originalEstimateSeconds") or 0
+            completion_pct = round(time_spent_sec / orig_est_sec * 100, 1) if orig_est_sec > 0 else None
+
+            # Parse sprint info from customfield_10020 (array of sprint objects).
+            sprints_raw = fields.get("customfield_10020") or []
+            future_sprints: list[dict[str, Any]] = []
+            active_sprints: list[dict[str, Any]] = []
+            closed_sprints: list[dict[str, Any]] = []
+            for sp in sprints_raw:
+                if not isinstance(sp, dict):
+                    continue
+                state = (sp.get("state") or "").lower()
+                if state == "future":
+                    future_sprints.append(sp)
+                elif state == "active":
+                    active_sprints.append(sp)
+                elif state == "closed":
+                    closed_sprints.append(sp)
+
+            chosen_sprint = (future_sprints or active_sprints or closed_sprints or [None])[-1]
+            sprint_name = chosen_sprint.get("name") if chosen_sprint else None
+            sprint_state = chosen_sprint.get("state") if chosen_sprint else None
+            sprint_id = chosen_sprint.get("id") if chosen_sprint else None
+            sprint_board_id = chosen_sprint.get("boardId") if chosen_sprint else None
+
+            # Carry-over means the ticket is currently planned/in-flight and was also present in prior closed sprints.
+            carry_over_count = len(closed_sprints) if (future_sprints or active_sprints) else 0
+
+            rows.append(
+                {
+                    "key": issue.get("key"),
+                    "summary": fields.get("summary"),
+                    "status": status.get("name"),
+                    "status_category": status_category.get("name"),
+                    "priority": priority.get("name"),
+                    "assignee": assignee.get("displayName") or assignee.get("accountId") or "Unassigned",
+                    "assignee_account_id": assignee.get("accountId"),
+                    "reporter": reporter.get("displayName") or reporter.get("accountId"),
+                    "created": fields.get("created"),
+                    "updated": fields.get("updated"),
+                    "due_date": fields.get("duedate"),
+                    "issue_type": issue_type.get("name"),
+                    "labels": ", ".join(fields.get("labels", [])),
+                    "resolution": resolution.get("name"),
+                    "status_category_changed_date": fields.get("statuscategorychangedate"),
+                    "original_estimate": timetracking.get("originalEstimate"),
+                    "logged_time": timetracking.get("timeSpent"),
+                    "completion_pct": completion_pct,
+                    "original_estimate_sec": orig_est_sec,
+                    "time_spent_sec": time_spent_sec,
+                    "sprint_id": sprint_id,
+                    "sprint_name": sprint_name,
+                    "sprint_state": sprint_state,
+                    "sprint_board_id": sprint_board_id,
+                    "carry_over_count": carry_over_count,
+                    "ticket_url": f"{self.base_url}/browse/{issue.get('key')}",
+                }
+            )
+
+        return pd.DataFrame(rows)
