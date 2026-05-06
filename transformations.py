@@ -42,12 +42,18 @@ def add_ticket_health_fields(
 
     out["created"] = _to_utc(out.get("created"))
     out["updated"] = _to_utc(out.get("updated"))
+    if "last_meaningful_activity" in out.columns:
+        out["last_meaningful_activity"] = _to_utc(out.get("last_meaningful_activity"))
+    else:
+        out["last_meaningful_activity"] = pd.NaT
     out["status_category_changed_date"] = _to_utc(out.get("status_category_changed_date"))
     out["due_date"] = _to_utc(out.get("due_date"))
 
+    activity_anchor = out["last_meaningful_activity"].fillna(out["updated"])
+
     now = pd.Timestamp.now(tz="UTC")
     out["ticket_age_days"] = (now - out["created"]).dt.total_seconds().div(86400).clip(lower=0)
-    out["idle_days"] = (now - out["updated"]).dt.total_seconds().div(86400).clip(lower=0)
+    out["idle_days"] = (now - activity_anchor).dt.total_seconds().div(86400).clip(lower=0)
 
     out["ticket_age_days"] = out["ticket_age_days"].fillna(0).round(1)
     out["idle_days"] = out["idle_days"].fillna(0).round(1)

@@ -22,7 +22,7 @@ from transformations import add_ticket_health_fields
 DEFAULT_JQL = """statusCategory != Done
 ORDER BY updated ASC"""
 
-FETCH_SCHEMA_VERSION = 2
+FETCH_SCHEMA_VERSION = 3
 JIRA_BROWSE_BASE = "https://vinovoss.atlassian.net/browse"
 JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
 
@@ -48,6 +48,7 @@ def fetch_tickets(
         fields=DEFAULT_FIELDS,
         max_results=max_results,
         page_size=page_size,
+        expand="changelog",
     )
     for col in ["sprint_id", "sprint_name", "sprint_state", "sprint_board_id"]:  # noqa: E501
         if col not in result.columns:

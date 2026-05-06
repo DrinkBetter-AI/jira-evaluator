@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any, Iterable
 
 import pandas as pd
@@ -25,6 +26,61 @@ DEFAULT_FIELDS = [
     "timetracking",
     "customfield_10020",
 ]
+
+_ML_SPRINT_NAME_RE = re.compile(r"^ML\s+Sprint\s+\d+$", re.IGNORECASE)
+
+
+def _is_ml_sprint_name(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return bool(_ML_SPRINT_NAME_RE.match(text))
+
+
+def _is_ignored_sprint_rollover_item(item: dict[str, Any]) -> bool:
+    """Return True when a changelog item is only ML sprint rollover (X -> X+1 style)."""
+    field_name = str(item.get("field") or "").strip().lower()
+    if field_name not in {"sprint", "customfield_10020"}:
+        return False
+
+    from_value = item.get("fromString")
+    to_value = item.get("toString")
+    return _is_ml_sprint_name(from_value) and _is_ml_sprint_name(to_value)
+
+
+def _extract_last_meaningful_activity(issue: dict[str, Any]) -> Any:
+    """Pick the latest changelog timestamp that reflects meaningful activity.
+
+    Ignored activity: sprint rollover between ML sprints (both from/to are ML Sprint names).
+    Kept activity: all other changes, including None -> ML Sprint assignment.
+    """
+    changelog = issue.get("changelog") or {}
+    histories = changelog.get("histories") or []
+    if not isinstance(histories, list):
+        return None
+
+    meaningful_timestamps: list[Any] = []
+    for history in histories:
+        if not isinstance(history, dict):
+            continue
+        items = history.get("items") or []
+        if not isinstance(items, list) or not items:
+            continue
+
+        has_meaningful_item = any(
+            isinstance(item, dict) and not _is_ignored_sprint_rollover_item(item)
+            for item in items
+        )
+        if not has_meaningful_item:
+            continue
+
+        created = history.get("created")
+        if created:
+            meaningful_timestamps.append(created)
+
+    if not meaningful_timestamps:
+        return None
+    return max(meaningful_timestamps)
 
 
 class JiraConfigError(ValueError):
@@ -111,6 +167,7 @@ class JiraClient:
         fields: list[str] | None = None,
         max_results: int = 1000,
         page_size: int = 100,
+        expand: str | None = None,
     ) -> pd.DataFrame:
         fields = fields or DEFAULT_FIELDS
         issues: list[dict[str, Any]] = []
@@ -138,6 +195,8 @@ class JiraClient:
                         "fields": ",".join(fields),
                         "maxResults": batch_size,
                     }
+                    if expand:
+                        params["expand"] = expand
                     if next_page_token:
                         params["nextPageToken"] = next_page_token
                     response = session.get(search_url, params=params, timeout=30)
@@ -153,6 +212,8 @@ class JiraClient:
                         "startAt": start_at,
                         "maxResults": batch_size,
                     }
+                    if expand:
+                        params["expand"] = expand
                     response = session.get(legacy_search_url, params=params, timeout=30)
 
                 if response.status_code >= 400:
@@ -492,6 +553,7 @@ class JiraClient:
 
             # Carry-over means the ticket is currently planned/in-flight and was also present in prior closed sprints.
             carry_over_count = len(closed_sprints) if (future_sprints or active_sprints) else 0
+            last_meaningful_activity = _extract_last_meaningful_activity(issue)
 
             rows.append(
                 {
@@ -505,6 +567,7 @@ class JiraClient:
                     "reporter": reporter.get("displayName") or reporter.get("accountId"),
                     "created": fields.get("created"),
                     "updated": fields.get("updated"),
+                    "last_meaningful_activity": last_meaningful_activity,
                     "due_date": fields.get("duedate"),
                     "issue_type": issue_type.get("name"),
                     "labels": ", ".join(fields.get("labels", [])),
