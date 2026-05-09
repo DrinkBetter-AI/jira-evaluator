@@ -87,6 +87,21 @@ class JiraConfigError(ValueError):
     """Raised when Jira config is missing or invalid."""
 
 
+def _coerce_sprint_id(sprint_id: int | str) -> str:
+    """Normalize sprint IDs so Agile API paths always use integer-like IDs."""
+    text = str(sprint_id).strip()
+    if not text:
+        raise ValueError("Sprint ID is missing.")
+
+    if re.fullmatch(r"\d+\.0+", text):
+        text = text.split(".", 1)[0]
+
+    if not re.fullmatch(r"\d+", text):
+        raise ValueError(f"Invalid sprint ID '{sprint_id}'. Expected a numeric ID.")
+
+    return text
+
+
 def _first_non_empty(mapping: dict[str, Any], keys: Iterable[str]) -> Any:
     for key in keys:
         value = mapping.get(key)
@@ -277,7 +292,8 @@ class JiraClient:
         if not issue_keys:
             return
 
-        url = f"{self.base_url}/rest/agile/1.0/sprint/{sprint_id}/issue"
+        normalized_sprint_id = _coerce_sprint_id(sprint_id)
+        url = f"{self.base_url}/rest/agile/1.0/sprint/{normalized_sprint_id}/issue"
         payload = {"issues": issue_keys}
         with self._session() as session:
             session.headers["Content-Type"] = "application/json"
@@ -285,7 +301,7 @@ class JiraClient:
 
         if response.status_code not in {200, 201, 204}:
             raise RuntimeError(
-                f"Failed to add issues to sprint {sprint_id} ({response.status_code}): {response.text[:300]}"
+                f"Failed to add issues to sprint {normalized_sprint_id} ({response.status_code}): {response.text[:300]}"
             )
 
     def move_issues_to_backlog(self, issue_keys: list[str]) -> None:

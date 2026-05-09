@@ -32,6 +32,27 @@ def _jira_ticket_url(key: str) -> str:
     return f"{JIRA_BROWSE_BASE}/{str(key).strip()}"
 
 
+def _normalize_sprint_id(value: object) -> str | None:
+    """Convert sprint IDs to canonical string form (e.g. 2693.0 -> 2693)."""
+    if value is None or pd.isna(value):
+        return None
+
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+
+    if isinstance(value, (float, np.floating)):
+        if not np.isfinite(value):
+            return None
+        return str(int(value)) if float(value).is_integer() else str(value).strip()
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d+\.0+", text):
+        return text.split(".", 1)[0]
+    return text
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_tickets(
     creds_path: str,
@@ -208,6 +229,11 @@ def _render_sprint_capacity(
     default_idx = 0
     selected_label = st.selectbox("Sprint", options=sprint_labels, index=default_idx)
     selected_row = sprint_options_df.loc[sprint_options_df["sprint_label"] == selected_label].iloc[0]
+    selected_sprint_id = _normalize_sprint_id(selected_row["sprint_id"])
+    if not selected_sprint_id:
+        st.error("Selected sprint has no valid sprint ID; cannot apply sprint membership changes.")
+        return
+    selected_sprint_key = selected_sprint_id
 
     scoped = target_df[
         (target_df["sprint_name"] == selected_row["sprint_name"])
@@ -226,14 +252,14 @@ def _render_sprint_capacity(
         ticket_editor_df["issue_type"].fillna("").astype(str).str.strip().str.lower() == "epic"
     ].copy()
     epic_sprint_df = _all_epics[
-        _all_epics["sprint_id"].fillna(-1).astype(str) == str(selected_row["sprint_id"])
+        _all_epics["sprint_id"].map(_normalize_sprint_id) == selected_sprint_id
     ].copy()
 
     ticket_editor_df = ticket_editor_df[
         ticket_editor_df["issue_type"].fillna("").astype(str).str.strip().str.lower() != "epic"
     ].copy()
     ticket_editor_df["in_selected_sprint"] = (
-        ticket_editor_df["sprint_id"].fillna(-1).astype(str) == str(selected_row["sprint_id"])
+        ticket_editor_df["sprint_id"].map(_normalize_sprint_id) == selected_sprint_id
     )
     ticket_editor_df["include"] = ticket_editor_df["in_selected_sprint"]
     sprint_ticket_columns = [
@@ -273,10 +299,10 @@ def _render_sprint_capacity(
         st.markdown("##### Sprint Tickets")
     with sprint_action_col:
         if is_bubble_filtered:
-            if st.button("Restore table", key=f"restore_table_{selected_row['sprint_id']}"):
+            if st.button("Restore table", key=f"restore_table_{selected_sprint_key}"):
                 st.session_state["restore_sprint_ticket_table"] = True
                 st.rerun()
-    editor_key = f"sprint_editor_{selected_row['sprint_id']}"
+    editor_key = f"sprint_editor_{selected_sprint_key}"
     editor_version_key = f"{editor_key}_version"
     if editor_version_key not in st.session_state:
         st.session_state[editor_version_key] = 0
@@ -602,7 +628,6 @@ def _render_sprint_capacity(
                 "reporter",
                 "original_estimate",
                 "logged_time",
-                "completion_pct",
                 "ticket_age_days",
                 "idle_days",
                 "created",
@@ -624,7 +649,7 @@ def _render_sprint_capacity(
                     help="Tick one or more rows to reset only those pending edits",
                 )
             },
-            key=f"pending_reset_actions_{selected_row['sprint_id']}_{st.session_state[editor_version_key]}",
+            key=f"pending_reset_actions_{selected_sprint_key}_{st.session_state[editor_version_key]}",
         )
 
         rows_to_reset = reset_actions.loc[reset_actions["reset"], "key"].astype(str).tolist()
@@ -678,7 +703,7 @@ def _render_sprint_capacity(
     workload_status_options = canonical_status_defaults + remaining_statuses
     default_workload_statuses = canonical_status_defaults.copy()
 
-    workload_statuses_key = f"workload_statuses_{selected_row['sprint_id']}"
+    workload_statuses_key = f"workload_statuses_{selected_sprint_key}"
     existing_workload_statuses = st.session_state.get(workload_statuses_key)
     if not isinstance(existing_workload_statuses, list):
         st.session_state[workload_statuses_key] = default_workload_statuses
@@ -718,13 +743,13 @@ def _render_sprint_capacity(
 
             disabled=(not editable) or (not is_ml_sprint) or (not to_add and not to_backlog and not estimate_updates and not status_updates and not priority_updates and not assignee_updates),
             type="primary",
-            key=f"apply_sprint_{selected_row['sprint_id']}",
+            key=f"apply_sprint_{selected_sprint_key}",
         )
     with action_col2:
         reset_sprint_changes = st.button(
             "Reset changes",
             disabled=(not editable) or (not is_ml_sprint),
-            key=f"reset_sprint_{selected_row['sprint_id']}",
+            key=f"reset_sprint_{selected_sprint_key}",
             help="Discard unsaved sprint-ticket edits in Sprint Tickets.",
         )
 
@@ -742,7 +767,7 @@ def _render_sprint_capacity(
             had_success = False
             try:
                 if to_add:
-                    client.add_issues_to_sprint(selected_row["sprint_id"], to_add)
+                    client.add_issues_to_sprint(selected_sprint_id, to_add)
                     parts.append(f"added {len(to_add)}")
                     had_success = True
                 if to_backlog:
@@ -935,7 +960,7 @@ def _render_sprint_capacity(
     show_logged_details = st.checkbox(
         "Display Logged Time",
         value=False,
-        key=f"show_logged_details_{selected_row['sprint_id']}",
+        key=f"show_logged_details_{selected_sprint_key}",
     )
     agg = (
         preview_workload.groupby("assignee_live")
