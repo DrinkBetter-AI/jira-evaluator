@@ -364,7 +364,7 @@ def _render_sprint_capacity(
     
     edited_output = st.data_editor(
         display_df_for_editor,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_order=visible_editor_columns,
         disabled=(not editable) or (not is_ml_sprint) or [
@@ -552,7 +552,7 @@ def _render_sprint_capacity(
         reset_actions_df.insert(0, "reset", False)
         reset_actions = st.data_editor(
             reset_actions_df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             disabled=[col for col in reset_actions_df.columns if col != "reset"],
             column_config={
@@ -803,7 +803,7 @@ def _render_sprint_capacity(
             ]
             st.dataframe(
                 epic_df_display,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_order=visible_epic_columns,
                 column_config={
@@ -831,7 +831,6 @@ def _render_sprint_capacity(
     workload_statuses = st.multiselect(
         "Statuses counted in hours",
         options=workload_status_options,
-        default=default_workload_statuses,
         help="Use this to focus sprint effort on work that still needs attention.",
         key=workload_statuses_key,
     )
@@ -893,7 +892,7 @@ def _render_sprint_capacity(
         capacity_columns.extend(["Total Logged", "Remaining"])
     st.dataframe(
         agg[capacity_columns],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -1053,7 +1052,7 @@ def _render_bubble_chart(
         title="Status",
     )
     fig.update_layout(height=560)
-    event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key=chart_key)
+    event = st.plotly_chart(fig, width="stretch", on_select="rerun", key=chart_key)
     points = (event or {}).get("selection", {}).get("points", [])
     if points:
         return str(points[0].get("customdata", [None])[0])
@@ -1326,7 +1325,7 @@ def main() -> None:
     if not operations:
         st.info("No write operations have been logged yet.")
     else:
-        st.dataframe(pd.DataFrame(summarize_operations(operations)), use_container_width=True)
+        st.dataframe(pd.DataFrame(summarize_operations(operations)), width="stretch")
 
         op_options = {
             (
