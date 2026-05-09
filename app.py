@@ -281,13 +281,81 @@ def _render_sprint_capacity(
     editor_version_key = f"{editor_key}_version"
     if editor_version_key not in st.session_state:
         st.session_state[editor_version_key] = 0
-    editor_widget_key = f"{editor_key}_{st.session_state[editor_version_key]}"
+    editor_widget_key_base = f"{editor_key}_{st.session_state[editor_version_key]}"
     editor_seed_key = f"{editor_key}_seed_df"
 
     if editor_seed_key in st.session_state:
         seed_df = st.session_state.pop(editor_seed_key)
         if isinstance(seed_df, pd.DataFrame):
             display_editor_df = seed_df.copy()
+
+    # Optional multi-column sorting for Sprint Tickets (up to 4 levels).
+    sort_label_by_col = {
+        "include": "In Sprint",
+        "key": "Key",
+        "summary": "Summary",
+        "status": "Status",
+        "priority": "Priority",
+        "assignee": "Assignee",
+        "original_estimate": "Original Estimate",
+        "reporter": "Reporter",
+        "logged_time": "Logged",
+        "completion_pct": "Completion %",
+        "ticket_age_days": "Age (days)",
+        "idle_days": "Idle (days)",
+        "created": "Created at",
+        "updated": "Updated at",
+        "issue_type": "Type",
+    }
+    sortable_columns = [c for c in sprint_ticket_columns if c in display_editor_df.columns]
+    sort_col_options = ["(none)"] + sortable_columns
+
+    st.caption("Sort Sprint Tickets (up to 4 columns)")
+    sort_ui_cols = st.columns(4)
+
+    default_sort_spec = [
+        ("include", "desc"),
+        ("assignee", "asc"),
+        ("key", "asc"),
+        ("(none)", "asc"),
+    ]
+
+    selected_sort_cols: list[str] = []
+    selected_sort_dirs: list[str] = []
+    for idx in range(4):
+        level = idx + 1
+        default_col, default_dir = default_sort_spec[idx]
+        with sort_ui_cols[idx]:
+            selected_col = st.selectbox(
+                f"Sort {level}",
+                options=sort_col_options,
+                index=sort_col_options.index(default_col) if default_col in sort_col_options else 0,
+                format_func=lambda c: "(none)" if c == "(none)" else sort_label_by_col.get(c, c),
+                key=f"{editor_key}_sort_col_{level}",
+            )
+            selected_dir = st.selectbox(
+                f"Dir {level}",
+                options=["asc", "desc"],
+                index=0 if default_dir == "asc" else 1,
+                key=f"{editor_key}_sort_dir_{level}",
+            )
+
+        if selected_col != "(none)" and selected_col not in selected_sort_cols:
+            selected_sort_cols.append(selected_col)
+            selected_sort_dirs.append(selected_dir)
+
+    if selected_sort_cols:
+        display_editor_df = display_editor_df.sort_values(
+            by=selected_sort_cols,
+            ascending=[d == "asc" for d in selected_sort_dirs],
+            kind="mergesort",
+        )
+
+    # Ensure sort changes remount the editor, otherwise Streamlit may keep prior row order/state.
+    sort_signature = "__".join(
+        f"{col}:{direction}" for col, direction in zip(selected_sort_cols, selected_sort_dirs)
+    ) or "none"
+    editor_widget_key = f"{editor_widget_key_base}_{sort_signature}"
 
     visible_keys = tuple(sorted(display_editor_df["key"].dropna().astype(str).unique().tolist()))
     current_statuses = sorted(display_editor_df["status"].dropna().astype(str).str.strip().unique().tolist())
