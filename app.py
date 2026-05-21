@@ -32,6 +32,27 @@ def _jira_ticket_url(key: str) -> str:
     return f"{JIRA_BROWSE_BASE}/{str(key).strip()}"
 
 
+def _normalize_sprint_id(value: object) -> str | None:
+    """Convert sprint IDs to canonical string form (e.g. 2693.0 -> 2693)."""
+    if value is None or pd.isna(value):
+        return None
+
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+
+    if isinstance(value, (float, np.floating)):
+        if not np.isfinite(value):
+            return None
+        return str(int(value)) if float(value).is_integer() else str(value).strip()
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d+\.0+", text):
+        return text.split(".", 1)[0]
+    return text
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_tickets(
     creds_path: str,
@@ -88,28 +109,37 @@ def fetch_available_transition_statuses(
     return sorted(available)
 
 
-def _render_metrics(df: pd.DataFrame) -> None:
-    total_open = int(len(df))
-    avg_idle = float(df["idle_days"].mean()) if total_open else 0.0
-    max_idle = float(df["idle_days"].max()) if total_open else 0.0
-    oldest = float(df["ticket_age_days"].max()) if total_open else 0.0
+def _metrics_df(df: pd.DataFrame, include_backlogs: bool) -> pd.DataFrame:
+    if include_backlogs or "status" not in df.columns:
+        return df
+    return df[df["status"].fillna("").astype(str) != "Backlog"]
+
+
+def _render_metrics(df: pd.DataFrame, include_backlogs: bool = False) -> None:
+    metrics_df = _metrics_df(df, include_backlogs)
+    total_open = int(len(metrics_df))
+    avg_idle = float(metrics_df["idle_days"].mean()) if total_open else 0.0
+    max_idle = float(metrics_df["idle_days"].max()) if total_open else 0.0
+    oldest = float(metrics_df["ticket_age_days"].max()) if total_open else 0.0
 
     estimated_tickets = 0
-    if "estimate_seconds" in df.columns and total_open:
-        estimated_tickets = int(pd.to_numeric(df["estimate_seconds"], errors="coerce").fillna(0).gt(0).sum())
-    elif "original_estimate" in df.columns and total_open:
-        estimate_text = df["original_estimate"].fillna("").astype(str).str.strip()
+    if "estimate_seconds" in metrics_df.columns and total_open:
+        estimated_tickets = int(
+            pd.to_numeric(metrics_df["estimate_seconds"], errors="coerce").fillna(0).gt(0).sum()
+        )
+    elif "original_estimate" in metrics_df.columns and total_open:
+        estimate_text = metrics_df["original_estimate"].fillna("").astype(str).str.strip()
         estimated_tickets = int(estimate_text.ne("").sum())
     estimate_coverage_pct = (estimated_tickets / total_open * 100.0) if total_open else 0.0
 
     _LATE_STAGE_STATUSES = {"IN DEV ENV", "Review in Staging", "Ready for Production"}
     _STALE_THRESHOLD_DAYS = 6
     stale_late_stage = 0
-    if "status" in df.columns and "idle_days" in df.columns and total_open:
+    if "status" in metrics_df.columns and "idle_days" in metrics_df.columns and total_open:
         stale_late_stage = int(
             (
-                df["status"].fillna("").astype(str).isin(_LATE_STAGE_STATUSES)
-                & (df["idle_days"] > _STALE_THRESHOLD_DAYS)
+                metrics_df["status"].fillna("").astype(str).isin(_LATE_STAGE_STATUSES)
+                & (metrics_df["idle_days"] > _STALE_THRESHOLD_DAYS)
             ).sum()
         )
 
@@ -128,8 +158,8 @@ def _render_metrics(df: pd.DataFrame) -> None:
     )
     n3.metric("—", "—")
 
-    if "status" in df.columns and total_open:
-        _render_status_pills(df["status"])
+    if "status" in metrics_df.columns and total_open:
+        _render_status_pills(metrics_df["status"])
 
 
 def _fmt_seconds(secs: float) -> str:
@@ -208,6 +238,11 @@ def _render_sprint_capacity(
     default_idx = 0
     selected_label = st.selectbox("Sprint", options=sprint_labels, index=default_idx)
     selected_row = sprint_options_df.loc[sprint_options_df["sprint_label"] == selected_label].iloc[0]
+    selected_sprint_id = _normalize_sprint_id(selected_row["sprint_id"])
+    if not selected_sprint_id:
+        st.error("Selected sprint has no valid sprint ID; cannot apply sprint membership changes.")
+        return
+    selected_sprint_key = selected_sprint_id
 
     scoped = target_df[
         (target_df["sprint_name"] == selected_row["sprint_name"])
@@ -226,14 +261,14 @@ def _render_sprint_capacity(
         ticket_editor_df["issue_type"].fillna("").astype(str).str.strip().str.lower() == "epic"
     ].copy()
     epic_sprint_df = _all_epics[
-        _all_epics["sprint_id"].fillna(-1).astype(str) == str(selected_row["sprint_id"])
+        _all_epics["sprint_id"].map(_normalize_sprint_id) == selected_sprint_id
     ].copy()
 
     ticket_editor_df = ticket_editor_df[
         ticket_editor_df["issue_type"].fillna("").astype(str).str.strip().str.lower() != "epic"
     ].copy()
     ticket_editor_df["in_selected_sprint"] = (
-        ticket_editor_df["sprint_id"].fillna(-1).astype(str) == str(selected_row["sprint_id"])
+        ticket_editor_df["sprint_id"].map(_normalize_sprint_id) == selected_sprint_id
     )
     ticket_editor_df["include"] = ticket_editor_df["in_selected_sprint"]
     sprint_ticket_columns = [
@@ -246,7 +281,6 @@ def _render_sprint_capacity(
         "original_estimate",
         "reporter",
         "logged_time",
-        "completion_pct",
         "ticket_age_days",
         "idle_days",
         "created",
@@ -274,20 +308,87 @@ def _render_sprint_capacity(
         st.markdown("##### Sprint Tickets")
     with sprint_action_col:
         if is_bubble_filtered:
-            if st.button("Restore table", key=f"restore_table_{selected_row['sprint_id']}"):
+            if st.button("Restore table", key=f"restore_table_{selected_sprint_key}"):
                 st.session_state["restore_sprint_ticket_table"] = True
                 st.rerun()
-    editor_key = f"sprint_editor_{selected_row['sprint_id']}"
+    editor_key = f"sprint_editor_{selected_sprint_key}"
     editor_version_key = f"{editor_key}_version"
     if editor_version_key not in st.session_state:
         st.session_state[editor_version_key] = 0
-    editor_widget_key = f"{editor_key}_{st.session_state[editor_version_key]}"
+    editor_widget_key_base = f"{editor_key}_{st.session_state[editor_version_key]}"
     editor_seed_key = f"{editor_key}_seed_df"
 
     if editor_seed_key in st.session_state:
         seed_df = st.session_state.pop(editor_seed_key)
         if isinstance(seed_df, pd.DataFrame):
             display_editor_df = seed_df.copy()
+
+    # Optional multi-column sorting for Sprint Tickets (up to 4 levels).
+    sort_label_by_col = {
+        "include": "In Sprint",
+        "key": "Key",
+        "summary": "Summary",
+        "status": "Status",
+        "priority": "Priority",
+        "assignee": "Assignee",
+        "original_estimate": "Original Estimate",
+        "reporter": "Reporter",
+        "logged_time": "Logged",
+        "ticket_age_days": "Age (days)",
+        "idle_days": "Idle (days)",
+        "created": "Created at",
+        "updated": "Updated at",
+        "issue_type": "Type",
+    }
+    sortable_columns = [c for c in sprint_ticket_columns if c in display_editor_df.columns]
+    sort_col_options = ["(none)"] + sortable_columns
+
+    st.caption("Sort Sprint Tickets (up to 4 columns)")
+    sort_ui_cols = st.columns(4)
+
+    default_sort_spec = [
+        ("include", "desc"),
+        ("assignee", "asc"),
+        ("key", "asc"),
+        ("(none)", "asc"),
+    ]
+
+    selected_sort_cols: list[str] = []
+    selected_sort_dirs: list[str] = []
+    for idx in range(4):
+        level = idx + 1
+        default_col, default_dir = default_sort_spec[idx]
+        with sort_ui_cols[idx]:
+            selected_col = st.selectbox(
+                f"Sort {level}",
+                options=sort_col_options,
+                index=sort_col_options.index(default_col) if default_col in sort_col_options else 0,
+                format_func=lambda c: "(none)" if c == "(none)" else sort_label_by_col.get(c, c),
+                key=f"{editor_key}_sort_col_{level}",
+            )
+            selected_dir = st.selectbox(
+                f"Dir {level}",
+                options=["asc", "desc"],
+                index=0 if default_dir == "asc" else 1,
+                key=f"{editor_key}_sort_dir_{level}",
+            )
+
+        if selected_col != "(none)" and selected_col not in selected_sort_cols:
+            selected_sort_cols.append(selected_col)
+            selected_sort_dirs.append(selected_dir)
+
+    if selected_sort_cols:
+        display_editor_df = display_editor_df.sort_values(
+            by=selected_sort_cols,
+            ascending=[d == "asc" for d in selected_sort_dirs],
+            kind="mergesort",
+        )
+
+    # Ensure sort changes remount the editor, otherwise Streamlit may keep prior row order/state.
+    sort_signature = "__".join(
+        f"{col}:{direction}" for col, direction in zip(selected_sort_cols, selected_sort_dirs)
+    ) or "none"
+    editor_widget_key = f"{editor_widget_key_base}_{sort_signature}"
 
     visible_keys = tuple(sorted(display_editor_df["key"].dropna().astype(str).unique().tolist()))
     current_statuses = sorted(display_editor_df["status"].dropna().astype(str).str.strip().unique().tolist())
@@ -354,7 +455,6 @@ def _render_sprint_capacity(
         "original_estimate",
         "reporter",
         "logged_time",
-        "completion_pct",
         "ticket_age_days",
         "idle_days",
         "created",
@@ -364,7 +464,7 @@ def _render_sprint_capacity(
     
     edited_output = st.data_editor(
         display_df_for_editor,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_order=visible_editor_columns,
         disabled=(not editable) or (not is_ml_sprint) or [
@@ -372,7 +472,6 @@ def _render_sprint_capacity(
             "summary",
             "reporter",
             "logged_time",
-            "completion_pct",
             "ticket_age_days",
             "idle_days",
             "created",
@@ -407,7 +506,6 @@ def _render_sprint_capacity(
             ),
             "reporter": "Reporter",
             "logged_time": "Logged",
-            "completion_pct": "Completion %",
             "ticket_age_days": "Age (days)",
             "idle_days": "Idle (days)",
             "created": "Created at",
@@ -539,7 +637,6 @@ def _render_sprint_capacity(
                 "reporter",
                 "original_estimate",
                 "logged_time",
-                "completion_pct",
                 "ticket_age_days",
                 "idle_days",
                 "created",
@@ -552,7 +649,7 @@ def _render_sprint_capacity(
         reset_actions_df.insert(0, "reset", False)
         reset_actions = st.data_editor(
             reset_actions_df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             disabled=[col for col in reset_actions_df.columns if col != "reset"],
             column_config={
@@ -561,7 +658,7 @@ def _render_sprint_capacity(
                     help="Tick one or more rows to reset only those pending edits",
                 )
             },
-            key=f"pending_reset_actions_{selected_row['sprint_id']}_{st.session_state[editor_version_key]}",
+            key=f"pending_reset_actions_{selected_sprint_key}_{st.session_state[editor_version_key]}",
         )
 
         rows_to_reset = reset_actions.loc[reset_actions["reset"], "key"].astype(str).tolist()
@@ -615,7 +712,7 @@ def _render_sprint_capacity(
     workload_status_options = canonical_status_defaults + remaining_statuses
     default_workload_statuses = canonical_status_defaults.copy()
 
-    workload_statuses_key = f"workload_statuses_{selected_row['sprint_id']}"
+    workload_statuses_key = f"workload_statuses_{selected_sprint_key}"
     existing_workload_statuses = st.session_state.get(workload_statuses_key)
     if not isinstance(existing_workload_statuses, list):
         st.session_state[workload_statuses_key] = default_workload_statuses
@@ -655,13 +752,13 @@ def _render_sprint_capacity(
 
             disabled=(not editable) or (not is_ml_sprint) or (not to_add and not to_backlog and not estimate_updates and not status_updates and not priority_updates and not assignee_updates),
             type="primary",
-            key=f"apply_sprint_{selected_row['sprint_id']}",
+            key=f"apply_sprint_{selected_sprint_key}",
         )
     with action_col2:
         reset_sprint_changes = st.button(
             "Reset changes",
             disabled=(not editable) or (not is_ml_sprint),
-            key=f"reset_sprint_{selected_row['sprint_id']}",
+            key=f"reset_sprint_{selected_sprint_key}",
             help="Discard unsaved sprint-ticket edits in Sprint Tickets.",
         )
 
@@ -679,7 +776,7 @@ def _render_sprint_capacity(
             had_success = False
             try:
                 if to_add:
-                    client.add_issues_to_sprint(selected_row["sprint_id"], to_add)
+                    client.add_issues_to_sprint(selected_sprint_id, to_add)
                     parts.append(f"added {len(to_add)}")
                     had_success = True
                 if to_backlog:
@@ -763,6 +860,8 @@ def _render_sprint_capacity(
                 st.success("Update completed: " + ", ".join(parts))
             if had_success:
                 st.cache_data.clear()
+                st.session_state.pop(editor_seed_key, None)
+                st.session_state[editor_version_key] = int(st.session_state.get(editor_version_key, 0)) + 1
                 st.rerun()
 
     # ---- Epics in Sprint ----
@@ -803,7 +902,7 @@ def _render_sprint_capacity(
             ]
             st.dataframe(
                 epic_df_display,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_order=visible_epic_columns,
                 column_config={
@@ -831,7 +930,6 @@ def _render_sprint_capacity(
     workload_statuses = st.multiselect(
         "Statuses counted in hours",
         options=workload_status_options,
-        default=default_workload_statuses,
         help="Use this to focus sprint effort on work that still needs attention.",
         key=workload_statuses_key,
     )
@@ -873,7 +971,7 @@ def _render_sprint_capacity(
     show_logged_details = st.checkbox(
         "Display Logged Time",
         value=False,
-        key=f"show_logged_details_{selected_row['sprint_id']}",
+        key=f"show_logged_details_{selected_sprint_key}",
     )
     agg = (
         preview_workload.groupby("assignee_live")
@@ -893,7 +991,7 @@ def _render_sprint_capacity(
         capacity_columns.extend(["Total Logged", "Remaining"])
     st.dataframe(
         agg[capacity_columns],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -1053,7 +1151,7 @@ def _render_bubble_chart(
         title="Status",
     )
     fig.update_layout(height=560)
-    event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key=chart_key)
+    event = st.plotly_chart(fig, width="stretch", on_select="rerun", key=chart_key)
     points = (event or {}).get("selection", {}).get("points", [])
     if points:
         return str(points[0].get("customdata", [None])[0])
@@ -1176,6 +1274,7 @@ def main() -> None:
     min_age = f5.slider("Min ticket age", min_value=0, max_value=365, value=0)
 
     color_by = st.radio("Bubble color", options=["priority", "assignee"], horizontal=True)
+    include_backlogs = st.checkbox("Include Backlogs", value=False)
 
     filtered = df.copy()
     if selected_assignees:
@@ -1187,7 +1286,7 @@ def main() -> None:
 
     filtered = filtered[(filtered["idle_days"] >= min_idle) & (filtered["ticket_age_days"] >= min_age)]
 
-    _render_metrics(filtered)
+    _render_metrics(filtered, include_backlogs=include_backlogs)
 
     restore_requested = bool(st.session_state.pop("restore_sprint_ticket_table", False))
     bubble_chart_version = int(st.session_state.get("bubble_chart_version", 0))
@@ -1326,7 +1425,7 @@ def main() -> None:
     if not operations:
         st.info("No write operations have been logged yet.")
     else:
-        st.dataframe(pd.DataFrame(summarize_operations(operations)), use_container_width=True)
+        st.dataframe(pd.DataFrame(summarize_operations(operations)), width="stretch")
 
         op_options = {
             (
