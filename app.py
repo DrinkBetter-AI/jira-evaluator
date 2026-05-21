@@ -860,6 +860,8 @@ def _render_sprint_capacity(
                 st.success("Update completed: " + ", ".join(parts))
             if had_success:
                 st.cache_data.clear()
+                st.session_state.pop(editor_seed_key, None)
+                st.session_state[editor_version_key] = int(st.session_state.get(editor_version_key, 0)) + 1
                 st.rerun()
 
     # ---- Epics in Sprint ----
