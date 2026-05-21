@@ -109,28 +109,37 @@ def fetch_available_transition_statuses(
     return sorted(available)
 
 
-def _render_metrics(df: pd.DataFrame) -> None:
-    total_open = int(len(df))
-    avg_idle = float(df["idle_days"].mean()) if total_open else 0.0
-    max_idle = float(df["idle_days"].max()) if total_open else 0.0
-    oldest = float(df["ticket_age_days"].max()) if total_open else 0.0
+def _metrics_df(df: pd.DataFrame, include_backlogs: bool) -> pd.DataFrame:
+    if include_backlogs or "status" not in df.columns:
+        return df
+    return df[df["status"].fillna("").astype(str) != "Backlog"]
+
+
+def _render_metrics(df: pd.DataFrame, include_backlogs: bool = False) -> None:
+    metrics_df = _metrics_df(df, include_backlogs)
+    total_open = int(len(metrics_df))
+    avg_idle = float(metrics_df["idle_days"].mean()) if total_open else 0.0
+    max_idle = float(metrics_df["idle_days"].max()) if total_open else 0.0
+    oldest = float(metrics_df["ticket_age_days"].max()) if total_open else 0.0
 
     estimated_tickets = 0
-    if "estimate_seconds" in df.columns and total_open:
-        estimated_tickets = int(pd.to_numeric(df["estimate_seconds"], errors="coerce").fillna(0).gt(0).sum())
-    elif "original_estimate" in df.columns and total_open:
-        estimate_text = df["original_estimate"].fillna("").astype(str).str.strip()
+    if "estimate_seconds" in metrics_df.columns and total_open:
+        estimated_tickets = int(
+            pd.to_numeric(metrics_df["estimate_seconds"], errors="coerce").fillna(0).gt(0).sum()
+        )
+    elif "original_estimate" in metrics_df.columns and total_open:
+        estimate_text = metrics_df["original_estimate"].fillna("").astype(str).str.strip()
         estimated_tickets = int(estimate_text.ne("").sum())
     estimate_coverage_pct = (estimated_tickets / total_open * 100.0) if total_open else 0.0
 
     _LATE_STAGE_STATUSES = {"IN DEV ENV", "Review in Staging", "Ready for Production"}
     _STALE_THRESHOLD_DAYS = 6
     stale_late_stage = 0
-    if "status" in df.columns and "idle_days" in df.columns and total_open:
+    if "status" in metrics_df.columns and "idle_days" in metrics_df.columns and total_open:
         stale_late_stage = int(
             (
-                df["status"].fillna("").astype(str).isin(_LATE_STAGE_STATUSES)
-                & (df["idle_days"] > _STALE_THRESHOLD_DAYS)
+                metrics_df["status"].fillna("").astype(str).isin(_LATE_STAGE_STATUSES)
+                & (metrics_df["idle_days"] > _STALE_THRESHOLD_DAYS)
             ).sum()
         )
 
@@ -149,8 +158,8 @@ def _render_metrics(df: pd.DataFrame) -> None:
     )
     n3.metric("—", "—")
 
-    if "status" in df.columns and total_open:
-        _render_status_pills(df["status"])
+    if "status" in metrics_df.columns and total_open:
+        _render_status_pills(metrics_df["status"])
 
 
 def _fmt_seconds(secs: float) -> str:
@@ -1263,6 +1272,7 @@ def main() -> None:
     min_age = f5.slider("Min ticket age", min_value=0, max_value=365, value=0)
 
     color_by = st.radio("Bubble color", options=["priority", "assignee"], horizontal=True)
+    include_backlogs = st.checkbox("Include Backlogs", value=False)
 
     filtered = df.copy()
     if selected_assignees:
@@ -1274,7 +1284,7 @@ def main() -> None:
 
     filtered = filtered[(filtered["idle_days"] >= min_idle) & (filtered["ticket_age_days"] >= min_age)]
 
-    _render_metrics(filtered)
+    _render_metrics(filtered, include_backlogs=include_backlogs)
 
     restore_requested = bool(st.session_state.pop("restore_sprint_ticket_table", False))
     bubble_chart_version = int(st.session_state.get("bubble_chart_version", 0))
