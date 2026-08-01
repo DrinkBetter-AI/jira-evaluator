@@ -46,7 +46,8 @@ SCOPE_TEAM = "Team"
 SCOPE_INDIVIDUAL = "Individual"
 
 FETCH_SCHEMA_VERSION = 3
-JIRA_BROWSE_BASE = os.getenv("JIRA_BROWSE_BASE", "https://vinovoss.atlassian.net/browse")
+JIRA_SITE_URL = os.getenv("JIRA_BASE_URL", "https://vinovoss.atlassian.net").strip().rstrip("/")
+JIRA_BROWSE_BASE = os.getenv("JIRA_BROWSE_BASE", f"{JIRA_SITE_URL}/browse")
 JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
 
 

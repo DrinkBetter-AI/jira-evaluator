@@ -34,7 +34,7 @@ profile when they are not all set.
 | `JIRA_PROFILE` | no | `ML-TEAM-MANAGEMENT` | Profile name inside the YAML file |
 | `JIRA_DASHBOARD_JQL` | no | `statusCategory != Done ORDER BY updated ASC` | Ticket scope the dashboard loads |
 | `JIRA_TEAM_MEMBERS` | no | `Tam,Shivanand,Mehdi Ordikhani` | Comma-separated defaults for the Team scope |
-| `JIRA_BROWSE_BASE` | no | `https://vinovoss.atlassian.net/browse` | Base URL for ticket hyperlinks |
+| `JIRA_BROWSE_BASE` | no | `<JIRA_BASE_URL>/browse` | Base URL for ticket hyperlinks |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
 env mode; otherwise the YAML profile is used:
