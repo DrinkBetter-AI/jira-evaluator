@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 
 import numpy as np
@@ -15,15 +16,37 @@ from change_audit import (
     new_operation_record,
     summarize_operations,
 )
-from jira_client import DEFAULT_FIELDS, JiraClient, JiraConfigError
+from jira_client import (
+    DEFAULT_CREDS_PATH,
+    DEFAULT_FIELDS,
+    DEFAULT_PROFILE_NAME,
+    JiraClient,
+    JiraConfigError,
+)
+from prioritization import add_priority_score, assignee_rollup
 from transformations import add_ticket_health_fields
 
 
 DEFAULT_JQL = """statusCategory != Done
 ORDER BY updated ASC"""
 
+# Credentials resolve from JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN when set,
+# otherwise from this YAML profile. See README.md.
+CREDS_PATH = os.getenv("JIRA_CREDS_PATH", DEFAULT_CREDS_PATH)
+PROFILE_NAME = os.getenv("JIRA_PROFILE", DEFAULT_PROFILE_NAME)
+JQL = os.getenv("JIRA_DASHBOARD_JQL", DEFAULT_JQL)
+ORG_TEAM_MEMBERS = [
+    name.strip()
+    for name in os.getenv("JIRA_TEAM_MEMBERS", "Tam,Shivanand,Mehdi Ordikhani").split(",")
+    if name.strip()
+]
+
+SCOPE_ORG = "Organization"
+SCOPE_TEAM = "Team"
+SCOPE_INDIVIDUAL = "Individual"
+
 FETCH_SCHEMA_VERSION = 3
-JIRA_BROWSE_BASE = "https://vinovoss.atlassian.net/browse"
+JIRA_BROWSE_BASE = os.getenv("JIRA_BROWSE_BASE", "https://vinovoss.atlassian.net/browse")
 JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
 
 
@@ -160,6 +183,125 @@ def _render_metrics(df: pd.DataFrame, include_backlogs: bool = False) -> None:
 
     if "status" in metrics_df.columns and total_open:
         _render_status_pills(metrics_df["status"])
+
+
+def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str]:
+    """Return the assignees to filter on for the selected scope.
+
+    An empty list means "no assignee filter" (organization-wide).
+    """
+    if scope == SCOPE_ORG:
+        st.caption(f"Organization-wide view across {len(assignees)} assignee(s).")
+        return []
+
+    if scope == SCOPE_TEAM:
+        defaults = [name for name in ORG_TEAM_MEMBERS if name in assignees]
+        return st.multiselect("Team members", options=assignees, default=defaults)
+
+    if not assignees:
+        return []
+    default_individual = next((name for name in ORG_TEAM_MEMBERS if name in assignees), assignees[0])
+    selected = st.selectbox(
+        "Assignee",
+        options=assignees,
+        index=assignees.index(default_individual),
+    )
+    return [selected]
+
+
+def _render_scope_breakdown(df: pd.DataFrame, scope: str, include_backlogs: bool) -> None:
+    """Render the per-assignee roll-up that backs org-wide and individual views."""
+    scoped = _metrics_df(df, include_backlogs)
+    rollup = assignee_rollup(scoped)
+
+    st.subheader("Assignee Breakdown")
+    if rollup.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    if scope == SCOPE_INDIVIDUAL and len(rollup) == 1:
+        row = rollup.iloc[0]
+        st.markdown(f"**{row['assignee']}**")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Open Tickets", int(row["open_tickets"]))
+        c2.metric("Avg Priority Score", f"{row['avg_priority_score']:.1f}")
+        c3.metric("Idle 15d+", int(row["stale_15d_plus"]))
+        c4.metric("Unprioritized", int(row["unprioritized"]))
+        return
+
+    st.dataframe(
+        rollup,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "assignee": st.column_config.TextColumn("Assignee"),
+            "open_tickets": st.column_config.NumberColumn("Open"),
+            "avg_priority_score": st.column_config.NumberColumn("Avg Score", format="%.1f"),
+            "top_priority_score": st.column_config.NumberColumn("Top Score", format="%.1f"),
+            "avg_idle_days": st.column_config.NumberColumn("Avg Idle (days)", format="%.1f"),
+            "max_idle_days": st.column_config.NumberColumn("Max Idle (days)", format="%.1f"),
+            "stale_15d_plus": st.column_config.NumberColumn("Idle 15d+"),
+            "unprioritized": st.column_config.NumberColumn("No Priority"),
+        },
+    )
+    st.bar_chart(rollup.set_index("assignee")["open_tickets"], height=260)
+
+
+def _render_priority_queue(df: pd.DataFrame, include_backlogs: bool) -> None:
+    """Rank tickets by the composite priority score so work can be picked top-down."""
+    scoped = _metrics_df(df, include_backlogs)
+
+    st.subheader("Prioritized Queue")
+    st.caption(
+        "Score (0-100) = Jira priority + idle time + ticket age + sprint carry-over "
+        "+ due-date urgency + late-stage staleness. See README.md."
+    )
+    if scoped.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    top_n = st.slider("Tickets to show", min_value=5, max_value=100, value=25, step=5)
+    queue = scoped.sort_values("priority_score", ascending=False).head(top_n).copy()
+    queue["key_url"] = queue["key"].map(_jira_ticket_url)
+
+    columns = [
+        "key_url",
+        "summary",
+        "assignee",
+        "status",
+        "priority",
+        "priority_score",
+        "priority_reasons",
+        "idle_days",
+        "ticket_age_days",
+    ]
+    st.dataframe(
+        queue[columns],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "key_url": st.column_config.LinkColumn("Key", display_text=JIRA_KEY_DISPLAY_PATTERN),
+            "summary": st.column_config.TextColumn("Summary"),
+            "assignee": st.column_config.TextColumn("Assignee"),
+            "status": st.column_config.TextColumn("Status"),
+            "priority": st.column_config.TextColumn("Jira Priority"),
+            "priority_score": st.column_config.ProgressColumn(
+                "Score",
+                format="%.1f",
+                min_value=0,
+                max_value=100,
+            ),
+            "priority_reasons": st.column_config.TextColumn("Why"),
+            "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
+            "ticket_age_days": st.column_config.NumberColumn("Age (days)", format="%.1f"),
+        },
+    )
+    st.download_button(
+        "Download prioritized queue (CSV)",
+        data=queue[columns[1:]].assign(key=queue["key"]).to_csv(index=False).encode("utf-8"),
+        file_name="jira_prioritized_queue.csv",
+        mime="text/csv",
+    )
 
 
 def _fmt_seconds(secs: float) -> str:
@@ -394,20 +536,20 @@ def _render_sprint_capacity(
     current_statuses = sorted(display_editor_df["status"].dropna().astype(str).str.strip().unique().tolist())
     try:
         transition_statuses = fetch_available_transition_statuses(
-            "~/.creds/vinovoss.yml",
-            "ML-TEAM-MANAGEMENT",
+            CREDS_PATH,
+            PROFILE_NAME,
             visible_keys,
         )
     except Exception:
         transition_statuses = []
     _all_statuses = sorted(set(current_statuses) | set(transition_statuses))
     try:
-        _all_priorities = fetch_all_priorities("~/.creds/vinovoss.yml", "ML-TEAM-MANAGEMENT")
+        _all_priorities = fetch_all_priorities(CREDS_PATH, PROFILE_NAME)
     except Exception:
         _all_priorities = ["Highest", "Urgent", "High", "Normal", "Medium", "Low", "Lowest"]
 
     try:
-        all_users = fetch_all_users("~/.creds/vinovoss.yml", "ML-TEAM-MANAGEMENT")
+        all_users = fetch_all_users(CREDS_PATH, PROFILE_NAME)
     except Exception:
         all_users = []
 
@@ -768,8 +910,8 @@ def _render_sprint_capacity(
 
     if apply_sprint_selection:
         client = JiraClient.from_yaml(
-            creds_path="~/.creds/vinovoss.yml",
-            profile_name="ML-TEAM-MANAGEMENT",
+            creds_path=CREDS_PATH,
+            profile_name=PROFILE_NAME,
         )
         with st.spinner("Updating sprint membership..."):
             parts: list[str] = []
@@ -1233,14 +1375,14 @@ def main() -> None:
     if refresh_clicked:
         st.cache_data.clear()
 
-    jql = DEFAULT_JQL
+    jql = JQL
     max_results = 1000
     page_size = 100
 
     try:
         raw_df = fetch_tickets(
-            creds_path="~/.creds/vinovoss.yml",
-            profile_name="ML-TEAM-MANAGEMENT",
+            creds_path=CREDS_PATH,
+            profile_name=PROFILE_NAME,
             jql=jql,
             max_results=max_results,
             page_size=page_size,
@@ -1257,17 +1399,27 @@ def main() -> None:
         st.warning("No tickets returned for the current JQL.")
         st.stop()
 
-    df = add_ticket_health_fields(raw_df)
+    df = add_priority_score(add_ticket_health_fields(raw_df))
+
+    st.subheader("Scope")
+    assignees = sorted(df["assignee"].dropna().unique().tolist())
+    scope = st.radio(
+        "View",
+        options=[SCOPE_ORG, SCOPE_TEAM, SCOPE_INDIVIDUAL],
+        horizontal=True,
+        help=(
+            "Organization shows every assignee in the JQL scope; "
+            "Team pre-selects the configured team members; "
+            "Individual focuses on a single assignee."
+        ),
+    )
+    selected_assignees = _resolve_scope_assignees(scope, assignees)
 
     st.subheader("Filters")
-    f1, f2, f3, f4, f5 = st.columns(5)
-    assignees = sorted(df["assignee"].dropna().unique().tolist())
+    f2, f3, f4, f5 = st.columns(4)
     statuses = sorted(df["status"].dropna().unique().tolist())
     priorities = sorted(df["priority"].dropna().unique().tolist())
 
-    ML_TEAM_MEMBERS = ["Tam", "Shivanand", "Mehdi Ordikhani"]
-    default_assignees = [m for m in ML_TEAM_MEMBERS if m in assignees]
-    selected_assignees = f1.multiselect("Assignee", options=assignees, default=default_assignees)
     selected_statuses = f2.multiselect("Status", options=statuses, default=[])
     selected_priorities = f3.multiselect("Priority", options=priorities, default=[])
     min_idle = f4.slider("Min idle days", min_value=0, max_value=180, value=0)
@@ -1287,6 +1439,12 @@ def main() -> None:
     filtered = filtered[(filtered["idle_days"] >= min_idle) & (filtered["ticket_age_days"] >= min_age)]
 
     _render_metrics(filtered, include_backlogs=include_backlogs)
+
+    st.divider()
+    _render_scope_breakdown(filtered, scope=scope, include_backlogs=include_backlogs)
+
+    st.divider()
+    _render_priority_queue(filtered, include_backlogs=include_backlogs)
 
     restore_requested = bool(st.session_state.pop("restore_sprint_ticket_table", False))
     bubble_chart_version = int(st.session_state.get("bubble_chart_version", 0))
@@ -1388,8 +1546,8 @@ def main() -> None:
 
     if apply_suggestion and selected_keys:
         client = JiraClient.from_yaml(
-            creds_path="~/.creds/vinovoss.yml",
-            profile_name="ML-TEAM-MANAGEMENT",
+            creds_path=CREDS_PATH,
+            profile_name=PROFILE_NAME,
         )
         with st.spinner(f"Updating {len(selected_keys)} tickets..."):
             if action_type == "Set None-priority tickets":
@@ -1451,8 +1609,8 @@ def main() -> None:
 
             if revert_clicked:
                 client = JiraClient.from_yaml(
-                    creds_path="~/.creds/vinovoss.yml",
-                    profile_name="ML-TEAM-MANAGEMENT",
+                    creds_path=CREDS_PATH,
+                    profile_name=PROFILE_NAME,
                 )
 
                 revert_succeeded: list[str] = []

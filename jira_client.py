@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 from typing import Any, Iterable
@@ -28,6 +29,9 @@ DEFAULT_FIELDS = [
 ]
 
 _ML_SPRINT_NAME_RE = re.compile(r"^ML\s+Sprint\s+\d+$", re.IGNORECASE)
+
+DEFAULT_CREDS_PATH = "~/.creds/vinovoss.yml"
+DEFAULT_PROFILE_NAME = "ML-TEAM-MANAGEMENT"
 
 
 def _is_ml_sprint_name(value: Any) -> bool:
@@ -117,9 +121,26 @@ def _normalize_base_url(base_url: str) -> str:
     return f"https://{cleaned}"
 
 
+def load_jira_env() -> dict[str, str] | None:
+    """Read Jira credentials from the environment, or return None when unset.
+
+    Requires JIRA_BASE_URL, JIRA_EMAIL and JIRA_API_TOKEN to all be present.
+    """
+    base_url = os.getenv("JIRA_BASE_URL", "").strip()
+    email = os.getenv("JIRA_EMAIL", "").strip()
+    api_token = os.getenv("JIRA_API_TOKEN", "").strip()
+    if not (base_url and email and api_token):
+        return None
+    return {
+        "base_url": _normalize_base_url(base_url),
+        "email": email,
+        "api_token": api_token,
+    }
+
+
 def load_jira_profile(
-    creds_path: str | Path = "~/.creds/vinovoss.yml",
-    profile_name: str = "ML-TEAM-MANAGEMENT",
+    creds_path: str | Path = DEFAULT_CREDS_PATH,
+    profile_name: str = DEFAULT_PROFILE_NAME,
 ) -> dict[str, str]:
     path = Path(creds_path).expanduser()
     if not path.exists():
@@ -164,10 +185,13 @@ class JiraClient:
     @classmethod
     def from_yaml(
         cls,
-        creds_path: str | Path = "~/.creds/vinovoss.yml",
-        profile_name: str = "ML-TEAM-MANAGEMENT",
+        creds_path: str | Path = DEFAULT_CREDS_PATH,
+        profile_name: str = DEFAULT_PROFILE_NAME,
     ) -> "JiraClient":
-        cfg = load_jira_profile(creds_path=creds_path, profile_name=profile_name)
+        """Build a client from environment variables, falling back to the YAML profile."""
+        cfg = load_jira_env()
+        if cfg is None:
+            cfg = load_jira_profile(creds_path=creds_path, profile_name=profile_name)
         return cls(**cfg)
 
     def _session(self) -> requests.Session:
