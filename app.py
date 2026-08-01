@@ -23,6 +23,7 @@ from jira_client import (
     JiraClient,
     JiraConfigError,
     normalize_base_url,
+    load_jira_env,
     load_jira_profile,
 )
 from prioritization import add_priority_score, assignee_rollup
@@ -57,14 +58,19 @@ BULK_ACTION_DEFAULT_LIMIT = 25
 
 
 def _default_browse_base() -> str:
-    """Derive the ticket link prefix from the configured Jira site."""
-    site_url = os.getenv("JIRA_BASE_URL", "").strip()
-    if not site_url:
+    """Derive the ticket link prefix from the site the client actually reads from.
+
+    Resolution mirrors JiraClient.from_yaml so links never point at a different
+    site than the data: the environment only wins when it carries full
+    credentials, otherwise the YAML profile does.
+    """
+    config = load_jira_env()
+    if config is None:
         try:
-            site_url = str(load_jira_profile(CREDS_PATH, PROFILE_NAME)["base_url"])
+            config = load_jira_profile(CREDS_PATH, PROFILE_NAME)
         except Exception:  # noqa: BLE001
-            site_url = "https://vinovoss.atlassian.net"
-    return f"{normalize_base_url(site_url)}/browse"
+            config = {"base_url": "https://vinovoss.atlassian.net"}
+    return f"{normalize_base_url(str(config['base_url']))}/browse"
 
 
 JIRA_BROWSE_BASE = os.getenv("JIRA_BROWSE_BASE", "").strip() or _default_browse_base()
@@ -1594,10 +1600,16 @@ def main() -> None:
                 target_status = st.selectbox("To status", options=to_options, index=0)
 
                 source_keys = sorted(filtered[filtered["status"] == source_status]["key"].tolist())
+                default_source_keys = source_keys[:BULK_ACTION_DEFAULT_LIMIT]
+                if len(source_keys) > len(default_source_keys):
+                    st.caption(
+                        f"Only the first {BULK_ACTION_DEFAULT_LIMIT} are pre-selected; "
+                        "add more explicitly if you mean to update them."
+                    )
                 selected_keys = st.multiselect(
                     "Tickets to update",
                     options=source_keys,
-                    default=source_keys,
+                    default=default_source_keys,
                     help="Only tickets currently in the selected source status are listed.",
                 )
                 target_label = f"status '{source_status}' -> '{target_status}'"
