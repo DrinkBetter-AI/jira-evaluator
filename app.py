@@ -185,20 +185,25 @@ def _render_metrics(df: pd.DataFrame, include_backlogs: bool = False) -> None:
         _render_status_pills(metrics_df["status"])
 
 
-def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str]:
+def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | None:
     """Return the assignees to filter on for the selected scope.
 
-    An empty list means "no assignee filter" (organization-wide).
+    None means "no assignee filter" (organization-wide); a list, including an
+    empty one, is an explicit selection.
     """
     if scope == SCOPE_ORG:
         st.caption(f"Organization-wide view across {len(assignees)} assignee(s).")
-        return []
+        return None
 
     if scope == SCOPE_TEAM:
         defaults = [name for name in ORG_TEAM_MEMBERS if name in assignees]
-        return st.multiselect("Team members", options=assignees, default=defaults)
+        selected = st.multiselect("Team members", options=assignees, default=defaults)
+        if not selected:
+            st.warning("No team members selected - showing no tickets.")
+        return selected
 
     if not assignees:
+        st.warning("No assignees available in the current data.")
         return []
     default_individual = next((name for name in ORG_TEAM_MEMBERS if name in assignees), assignees[0])
     selected = st.selectbox(
@@ -1429,7 +1434,7 @@ def main() -> None:
     include_backlogs = st.checkbox("Include Backlogs", value=False)
 
     filtered = df.copy()
-    if selected_assignees:
+    if selected_assignees is not None:
         filtered = filtered[filtered["assignee"].isin(selected_assignees)]
     if selected_statuses:
         filtered = filtered[filtered["status"].isin(selected_statuses)]
