@@ -1561,9 +1561,11 @@ def main() -> None:
         help="Default action keeps the first cleanup flow: None priority -> Normal.",
     )
 
-    status_options = sorted(filtered["status"].dropna().astype(str).unique().tolist())
-    normalized_priority = filtered["priority"].fillna("").astype(str).str.strip().str.lower()
-    none_priority_keys = sorted(filtered[normalized_priority.isin(["", "none"])]["key"].tolist())
+    # Bulk writes must not reach tickets the user has hidden with Include Backlogs.
+    action_df = _metrics_df(filtered, include_backlogs)
+    status_options = sorted(action_df["status"].dropna().astype(str).unique().tolist())
+    normalized_priority = action_df["priority"].fillna("").astype(str).str.strip().str.lower()
+    none_priority_keys = sorted(action_df[normalized_priority.isin(["", "none"])]["key"].tolist())
 
     with st.container(border=True):
         if action_type == "Set None-priority tickets":
@@ -1608,7 +1610,7 @@ def main() -> None:
                 to_options = [s for s in status_options if s != source_status] or status_options
                 target_status = st.selectbox("To status", options=to_options, index=0)
 
-                source_keys = sorted(filtered[filtered["status"] == source_status]["key"].tolist())
+                source_keys = sorted(action_df[action_df["status"] == source_status]["key"].tolist())
                 default_source_keys = source_keys[:BULK_ACTION_DEFAULT_LIMIT]
                 if len(source_keys) > len(default_source_keys):
                     st.caption(
