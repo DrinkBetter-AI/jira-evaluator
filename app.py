@@ -389,9 +389,9 @@ def _transition_sample_keys(editor_df: pd.DataFrame) -> tuple[str, ...]:
     """Pick the tickets to query transitions for, bounded by TRANSITION_LOOKUP_LIMIT.
 
     One request goes to Jira per key, so an org-wide table cannot query every row.
-    Sprint members come first because they are the ones being edited, then one
-    ticket per remaining status so the Status dropdown still offers the moves
-    reachable from statuses that no sprint member is currently in.
+    One ticket per status that no sprint member holds is reserved first, so the
+    Status dropdown keeps offering those moves even for a sprint large enough to
+    exhaust the budget on its own; sprint members fill whatever remains.
     """
     frame = editor_df.dropna(subset=["key"]).copy()
     if frame.empty:
@@ -404,16 +404,15 @@ def _transition_sample_keys(editor_df: pd.DataFrame) -> tuple[str, ...]:
         if "include" in frame.columns
         else pd.Series(True, index=frame.index)
     )
-    keys = sorted(frame.loc[in_sprint, "key"].unique().tolist())[:TRANSITION_LOOKUP_LIMIT]
+    sprint_statuses = set(frame.loc[in_sprint, "status"])
+    outside = frame.loc[~in_sprint & ~frame["status"].isin(sprint_statuses)]
+    reserved = [
+        sorted(group["key"].tolist())[0]
+        for _, group in outside.groupby("status", sort=True)
+    ][:TRANSITION_LOOKUP_LIMIT]
 
-    covered = set(frame.loc[frame["key"].isin(keys), "status"])
-    for status, group in frame.loc[~in_sprint].groupby("status", sort=True):
-        if len(keys) >= TRANSITION_LOOKUP_LIMIT:
-            break
-        if status in covered:
-            continue
-        keys.append(sorted(group["key"].tolist())[0])
-        covered.add(status)
+    budget = TRANSITION_LOOKUP_LIMIT - len(reserved)
+    keys = reserved + sorted(frame.loc[in_sprint, "key"].unique().tolist())[:budget]
 
     return tuple(sorted(set(keys)))
 
