@@ -55,6 +55,8 @@ JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
 TRANSITION_LOOKUP_LIMIT = 50
 # Upper bound on how many tickets a bulk write-back pre-selects.
 BULK_ACTION_DEFAULT_LIMIT = 25
+# Ceiling on tickets fetched per run; org-wide JQL can exceed the old fixed 1000.
+MAX_RESULTS = int(os.getenv("JIRA_MAX_RESULTS", "1000"))
 
 
 def _default_browse_base() -> str:
@@ -1440,7 +1442,7 @@ def main() -> None:
         st.cache_data.clear()
 
     jql = JQL
-    max_results = 1000
+    max_results = MAX_RESULTS
     page_size = 100
 
     try:
@@ -1462,6 +1464,13 @@ def main() -> None:
     if raw_df.empty:
         st.warning("No tickets returned for the current JQL.")
         st.stop()
+
+    if len(raw_df) >= max_results:
+        st.warning(
+            f"Showing the first {max_results} tickets of a larger result set - the JQL "
+            "orders by least recently updated, so newer tickets are missing. Narrow "
+            "JIRA_DASHBOARD_JQL or raise JIRA_MAX_RESULTS."
+        )
 
     df = add_priority_score(add_ticket_health_fields(raw_df))
 
