@@ -57,6 +57,12 @@ TRANSITION_LOOKUP_LIMIT = 50
 BULK_ACTION_DEFAULT_LIMIT = 25
 # Ceiling on tickets fetched per run; org-wide JQL can exceed the old fixed 1000.
 MAX_RESULTS = int(os.getenv("JIRA_MAX_RESULTS", "1000"))
+# Statuses hidden when "Include Backlogs" is off; projects name their backlog differently.
+BACKLOG_STATUSES = {
+    name.strip().lower()
+    for name in os.getenv("JIRA_BACKLOG_STATUSES", "Backlog").split(",")
+    if name.strip()
+}
 
 
 def _default_browse_base() -> str:
@@ -163,7 +169,8 @@ def fetch_available_transition_statuses(
 def _metrics_df(df: pd.DataFrame, include_backlogs: bool) -> pd.DataFrame:
     if include_backlogs or "status" not in df.columns:
         return df
-    return df[df["status"].fillna("").astype(str) != "Backlog"]
+    statuses = df["status"].fillna("").astype(str).str.strip().str.lower()
+    return df[~statuses.isin(BACKLOG_STATUSES)]
 
 
 def _render_metrics(df: pd.DataFrame, include_backlogs: bool = False) -> None:

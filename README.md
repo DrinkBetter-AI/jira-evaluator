@@ -35,6 +35,7 @@ profile when they are not all set.
 | `JIRA_DASHBOARD_JQL` | no | `statusCategory != Done ORDER BY updated ASC` | Ticket scope the dashboard loads |
 | `JIRA_TEAM_MEMBERS` | no | `Tam,Shivanand,Mehdi Ordikhani` | Comma-separated defaults for the Team scope |
 | `JIRA_MAX_RESULTS` | no | `1000` | Ceiling on tickets fetched per run; the dashboard warns when the result set is truncated |
+| `JIRA_BACKLOG_STATUSES` | no | `Backlog` | Comma-separated statuses hidden when *Include Backlogs* is off |
 | `JIRA_BROWSE_BASE` | no | `<resolved Jira site>/browse` | Base URL for ticket hyperlinks; defaults to the site the credentials resolve to |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
@@ -50,6 +51,36 @@ Jira:
 
 Widen `JIRA_DASHBOARD_JQL` to cover more than one project when you want a true
 organization-wide view, e.g. `project in (MB, ML) AND statusCategory != Done`.
+
+### Deploying to Cloud Run
+
+The `Dockerfile` runs Streamlit on the port Cloud Run injects. Deploy it privately
+and let Google sign-in gate access, so anyone on the Workspace domain can open the
+URL and nobody else can:
+
+```bash
+PROJECT=<gcp-project-id>
+REGION=us-central1
+
+# Store the Jira token once.
+printf '%s' '<atlassian-api-token>' | \
+  gcloud secrets create jira-api-token --data-file=- --project "$PROJECT"
+
+gcloud run deploy jira-dashboard \
+  --source . \
+  --project "$PROJECT" --region "$REGION" \
+  --no-allow-unauthenticated \
+  --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>" \
+  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest"
+
+# Let the whole Workspace domain in (requires IAP or domain-restricted sharing).
+gcloud run services add-iam-policy-binding jira-dashboard \
+  --project "$PROJECT" --region "$REGION" \
+  --member "domain:vinovoss.com" --role roles/run.invoker
+```
+
+The command prints the service URL. Streamlit keeps state per browser session, so
+the dashboard is safe to share: each viewer gets their own filters and selections.
 
 ## Dashboard layout
 
