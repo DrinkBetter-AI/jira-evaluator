@@ -22,6 +22,8 @@ from jira_client import (
     DEFAULT_PROFILE_NAME,
     JiraClient,
     JiraConfigError,
+    normalize_base_url,
+    load_jira_profile,
 )
 from prioritization import add_priority_score, assignee_rollup
 from transformations import add_ticket_health_fields
@@ -46,9 +48,26 @@ SCOPE_TEAM = "Team"
 SCOPE_INDIVIDUAL = "Individual"
 
 FETCH_SCHEMA_VERSION = 3
-JIRA_SITE_URL = os.getenv("JIRA_BASE_URL", "https://vinovoss.atlassian.net").strip().rstrip("/")
-JIRA_BROWSE_BASE = os.getenv("JIRA_BROWSE_BASE", f"{JIRA_SITE_URL}/browse")
 JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
+
+# One Jira request per key, so bound how many the sprint editor asks about.
+TRANSITION_LOOKUP_LIMIT = 50
+# Upper bound on how many tickets a bulk write-back pre-selects.
+BULK_ACTION_DEFAULT_LIMIT = 25
+
+
+def _default_browse_base() -> str:
+    """Derive the ticket link prefix from the configured Jira site."""
+    site_url = os.getenv("JIRA_BASE_URL", "").strip()
+    if not site_url:
+        try:
+            site_url = str(load_jira_profile(CREDS_PATH, PROFILE_NAME)["base_url"])
+        except Exception:  # noqa: BLE001
+            site_url = "https://vinovoss.atlassian.net"
+    return f"{normalize_base_url(site_url)}/browse"
+
+
+JIRA_BROWSE_BASE = os.getenv("JIRA_BROWSE_BASE", "").strip() or _default_browse_base()
 
 
 def _jira_ticket_url(key: str) -> str:
@@ -538,7 +557,15 @@ def _render_sprint_capacity(
     ) or "none"
     editor_widget_key = f"{editor_widget_key_base}_{sort_signature}"
 
-    visible_keys = tuple(sorted(display_editor_df["key"].dropna().astype(str).unique().tolist()))
+    # Transitions cost one Jira request per key, so only ask about the sprint's own tickets.
+    transition_source = (
+        display_editor_df[display_editor_df["in_selected_sprint"]]
+        if "in_selected_sprint" in display_editor_df.columns
+        else display_editor_df
+    )
+    visible_keys = tuple(
+        sorted(transition_source["key"].dropna().astype(str).unique().tolist())[:TRANSITION_LOOKUP_LIMIT]
+    )
     current_statuses = sorted(display_editor_df["status"].dropna().astype(str).str.strip().unique().tolist())
     try:
         transition_statuses = fetch_available_transition_statuses(
@@ -1509,10 +1536,16 @@ def main() -> None:
                 suffix = " ..." if len(none_priority_keys) > 15 else ""
                 st.caption(f"Sample: {preview}{suffix}")
 
+            default_keys = none_priority_keys[:BULK_ACTION_DEFAULT_LIMIT]
+            if len(none_priority_keys) > len(default_keys):
+                st.caption(
+                    f"Only the first {BULK_ACTION_DEFAULT_LIMIT} are pre-selected; "
+                    "add more explicitly if you mean to update them."
+                )
             selected_keys = st.multiselect(
                 "Tickets to update",
                 options=none_priority_keys,
-                default=none_priority_keys,
+                default=default_keys,
                 help="Remove any tickets you do not want to update.",
             )
 

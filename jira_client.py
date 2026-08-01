@@ -114,7 +114,7 @@ def _first_non_empty(mapping: dict[str, Any], keys: Iterable[str]) -> Any:
     return None
 
 
-def _normalize_base_url(base_url: str) -> str:
+def normalize_base_url(base_url: str) -> str:
     cleaned = base_url.strip().rstrip("/")
     if cleaned.startswith("http://") or cleaned.startswith("https://"):
         return cleaned
@@ -132,7 +132,7 @@ def load_jira_env() -> dict[str, str] | None:
     if not (base_url and email and api_token):
         return None
     return {
-        "base_url": _normalize_base_url(base_url),
+        "base_url": normalize_base_url(base_url),
         "email": email,
         "api_token": api_token,
     }
@@ -170,7 +170,7 @@ def load_jira_profile(
         )
 
     return {
-        "base_url": _normalize_base_url(str(base_url)),
+        "base_url": normalize_base_url(str(base_url)),
         "email": str(email),
         "api_token": str(api_token),
     }
