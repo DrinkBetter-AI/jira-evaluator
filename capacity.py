@@ -17,6 +17,9 @@ OVER_COMMITTED = "Over-committed"
 AT_CAPACITY = "At capacity"
 HAS_ROOM = "Has room"
 UNKNOWN_AVAILABILITY = "Unknown"
+NO_AVAILABILITY = "No hours this sprint"
+UNALLOCATED = "Unallocated"
+UNASSIGNED = "Unassigned"
 
 # Utilization above this reads as over-committed rather than merely full.
 OVER_COMMITTED_RATIO = 1.0
@@ -61,9 +64,11 @@ def available_hours(weekly_hours: float, start: object, end: object) -> float:
     return round(weekly_hours / WORKING_DAYS_PER_WEEK * days, 1)
 
 
-def _status(committed: float, available: float) -> str:
+def _status(name: str, committed: float, available: float, declared: bool) -> str:
+    if name == UNASSIGNED:
+        return UNALLOCATED
     if available <= 0:
-        return UNKNOWN_AVAILABILITY
+        return NO_AVAILABILITY if declared else UNKNOWN_AVAILABILITY
     ratio = committed / available
     if ratio > OVER_COMMITTED_RATIO:
         return OVER_COMMITTED
@@ -107,12 +112,19 @@ def capacity_table(
                 "Available (h)": capacity,
                 "Utilization %": round(held / capacity * 100.0, 0) if capacity > 0 else None,
                 "Delta (h)": round(capacity - held, 1) if capacity > 0 else None,
-                "Status": _status(held, capacity),
+                "Status": _status(name, held, capacity, name in weekly_hours),
             }
         )
 
     table = pd.DataFrame(rows, columns=columns)
-    order = {OVER_COMMITTED: 0, AT_CAPACITY: 1, HAS_ROOM: 2, UNKNOWN_AVAILABILITY: 3}
+    order = {
+        OVER_COMMITTED: 0,
+        AT_CAPACITY: 1,
+        HAS_ROOM: 2,
+        NO_AVAILABILITY: 3,
+        UNALLOCATED: 4,
+        UNKNOWN_AVAILABILITY: 5,
+    }
     return (
         table.assign(_order=table["Status"].map(order))
         .sort_values(["_order", "Committed (h)"], ascending=[True, False])

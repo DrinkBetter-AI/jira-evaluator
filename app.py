@@ -1366,23 +1366,25 @@ def _render_sprint_capacity(
         hide_index=True,
     )
 
-    _render_hourly_capacity(preview_scoped, agg)
+    _render_hourly_capacity(scoped, preview_scoped)
 
 
 def _sprint_window(sprint_df: pd.DataFrame) -> tuple[object, object]:
-    """Start and end of the selected sprint, from whichever row carries them."""
-    window: list[object] = []
-    for column in ("sprint_start", "sprint_end"):
-        values = (
-            pd.to_datetime(sprint_df[column], errors="coerce", utc=True).dropna()
-            if column in sprint_df.columns
-            else pd.Series(dtype="datetime64[ns, UTC]")
-        )
-        window.append(values.iloc[0] if not values.empty else None)
-    return window[0], window[1]
+    """Start and end of a sprint, taken from a single row so they cannot mismatch."""
+    if not {"sprint_start", "sprint_end"}.issubset(sprint_df.columns):
+        return None, None
+    dated = sprint_df[sprint_df["sprint_start"].notna() & sprint_df["sprint_end"].notna()]
+    if dated.empty:
+        return None, None
+    row = dated.iloc[0]
+    start = pd.to_datetime(row["sprint_start"], errors="coerce", utc=True)
+    end = pd.to_datetime(row["sprint_end"], errors="coerce", utc=True)
+    if pd.isna(start) or pd.isna(end):
+        return None, None
+    return start, end
 
 
-def _render_hourly_capacity(sprint_df: pd.DataFrame, agg: pd.DataFrame) -> None:
+def _render_hourly_capacity(sprint_df: pd.DataFrame, in_sprint_df: pd.DataFrame) -> None:
     """Committed hours against each person's declared availability.
 
     Part-time and hourly engineers make raw committed totals unreadable, so the
@@ -1406,16 +1408,17 @@ def _render_hourly_capacity(sprint_df: pd.DataFrame, agg: pd.DataFrame) -> None:
         )
         return
 
-    if "estimated_sec" in agg.columns:
-        owners = agg["Assignee"].fillna("Unassigned").astype(str).str.strip()
+    if in_sprint_df.empty:
+        committed = pd.Series(dtype="float64")
+    else:
+        owners = in_sprint_df["assignee_live"].fillna("Unassigned").astype(str).str.strip()
         committed = (
-            agg["estimated_sec"]
+            pd.to_numeric(in_sprint_df["estimate_seconds_live"], errors="coerce")
+            .fillna(0.0)
             .div(3600.0)
             .groupby(owners.mask(owners.eq(""), "Unassigned"))
             .sum()
         )
-    else:
-        committed = pd.Series(dtype="float64")
     table = capacity_table(committed, WEEKLY_HOURS, start, end)
     if table.empty:
         st.caption("No assignees to report on for this sprint.")
@@ -1424,8 +1427,9 @@ def _render_hourly_capacity(sprint_df: pd.DataFrame, agg: pd.DataFrame) -> None:
     st.caption(
         f"{days:.0f} working day(s) in this sprint "
         f"({pd.Timestamp(start).date()} to {pd.Timestamp(end).date()}). "
-        "Utilization is committed / available; \"Unknown\" means no weekly hours "
-        "are declared for that person."
+        "Committed covers every ticket in the sprint, not just the statuses counted "
+        "in hours above. Utilization is committed / available; \"Unknown\" means no "
+        "weekly hours are declared for that person."
     )
     st.dataframe(
         table,
