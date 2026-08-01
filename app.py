@@ -370,6 +370,39 @@ def _parse_estimate_to_seconds(value: str) -> float | None:
     return total
 
 
+def _transition_sample_keys(editor_df: pd.DataFrame) -> tuple[str, ...]:
+    """Pick the tickets to query transitions for, bounded by TRANSITION_LOOKUP_LIMIT.
+
+    One request goes to Jira per key, so an org-wide table cannot query every row.
+    Sprint members come first because they are the ones being edited, then one
+    ticket per remaining status so the Status dropdown still offers the moves
+    reachable from statuses that no sprint member is currently in.
+    """
+    frame = editor_df.dropna(subset=["key"]).copy()
+    if frame.empty:
+        return ()
+    frame["key"] = frame["key"].astype(str)
+    frame["status"] = frame.get("status", "").fillna("").astype(str).str.strip()
+
+    in_sprint = (
+        frame["include"].fillna(False).astype(bool)
+        if "include" in frame.columns
+        else pd.Series(True, index=frame.index)
+    )
+    keys = sorted(frame.loc[in_sprint, "key"].unique().tolist())[:TRANSITION_LOOKUP_LIMIT]
+
+    covered = set(frame.loc[frame["key"].isin(keys), "status"])
+    for status, group in frame.loc[~in_sprint].groupby("status", sort=True):
+        if len(keys) >= TRANSITION_LOOKUP_LIMIT:
+            break
+        if status in covered:
+            continue
+        keys.append(sorted(group["key"].tolist())[0])
+        covered.add(status)
+
+    return tuple(sorted(set(keys)))
+
+
 def _render_sprint_capacity(
     df: pd.DataFrame,
     status_source_df: pd.DataFrame | None = None,
@@ -557,16 +590,7 @@ def _render_sprint_capacity(
     ) or "none"
     editor_widget_key = f"{editor_widget_key_base}_{sort_signature}"
 
-    # Transitions cost one Jira request per key, so only ask about the sprint's own tickets.
-    # `include` carries sprint membership and any edit the user has made to it.
-    transition_source = (
-        display_editor_df[display_editor_df["include"].fillna(False).astype(bool)]
-        if "include" in display_editor_df.columns
-        else display_editor_df
-    )
-    visible_keys = tuple(
-        sorted(transition_source["key"].dropna().astype(str).unique().tolist())[:TRANSITION_LOOKUP_LIMIT]
-    )
+    visible_keys = _transition_sample_keys(display_editor_df)
     current_statuses = sorted(display_editor_df["status"].dropna().astype(str).str.strip().unique().tolist())
     try:
         transition_statuses = fetch_available_transition_statuses(
