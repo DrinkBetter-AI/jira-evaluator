@@ -42,7 +42,8 @@ def _priority_weight(value: object) -> float:
 def _due_pressure(due_date: object, now: pd.Timestamp) -> float:
     if due_date is None or pd.isna(due_date):
         return 0.0
-    days_left = (pd.Timestamp(due_date) - now).total_seconds() / 86400.0
+    # Jira due dates are date-only, so compare whole days: due today is not yet late.
+    days_left = (pd.Timestamp(due_date).normalize() - now.normalize()).days
     if days_left < 0:
         return 20.0
     if days_left <= 3:
