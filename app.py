@@ -558,9 +558,10 @@ def _render_sprint_capacity(
     editor_widget_key = f"{editor_widget_key_base}_{sort_signature}"
 
     # Transitions cost one Jira request per key, so only ask about the sprint's own tickets.
+    # `include` carries sprint membership and any edit the user has made to it.
     transition_source = (
-        display_editor_df[display_editor_df["in_selected_sprint"]]
-        if "in_selected_sprint" in display_editor_df.columns
+        display_editor_df[display_editor_df["include"].fillna(False).astype(bool)]
+        if "include" in display_editor_df.columns
         else display_editor_df
     )
     visible_keys = tuple(
