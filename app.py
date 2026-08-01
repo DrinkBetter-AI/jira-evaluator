@@ -26,6 +26,13 @@ from jira_client import (
     load_jira_env,
     load_jira_profile,
 )
+from capacity import capacity_table, parse_weekly_hours, working_days
+from hygiene import (
+    DEFAULT_STALE_DAYS,
+    estimate_policy,
+    policy_compliance_by_owner,
+    stale_candidates,
+)
 from prioritization import add_priority_score, assignee_rollup
 from transformations import add_ticket_health_fields
 
@@ -48,7 +55,7 @@ SCOPE_ORG = "Organization"
 SCOPE_TEAM = "Team"
 SCOPE_INDIVIDUAL = "Individual"
 
-FETCH_SCHEMA_VERSION = 3
+FETCH_SCHEMA_VERSION = 4
 JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
 
 # One Jira request per key, so bound how many the sprint editor asks about.
@@ -63,6 +70,8 @@ BACKLOG_STATUSES = {
     for name in os.getenv("JIRA_BACKLOG_STATUSES", "Backlog").split(",")
     if name.strip()
 }
+# Weekly hours per person ("Tam=10,Shivanand=20"); Jira does not know who is part-time.
+WEEKLY_HOURS = parse_weekly_hours(os.getenv("JIRA_WEEKLY_HOURS", ""))
 
 
 def _default_browse_base() -> str:
@@ -128,7 +137,14 @@ def fetch_tickets(
         page_size=page_size,
         expand="changelog",
     )
-    for col in ["sprint_id", "sprint_name", "sprint_state", "sprint_board_id"]:  # noqa: E501
+    for col in [
+        "sprint_id",
+        "sprint_name",
+        "sprint_state",
+        "sprint_board_id",
+        "sprint_start",
+        "sprint_end",
+    ]:
         if col not in result.columns:
             result[col] = pd.NA
     return result
@@ -340,6 +356,147 @@ def _render_priority_queue(df: pd.DataFrame, include_backlogs: bool) -> None:
         "Download prioritized queue (CSV)",
         data=queue[columns[1:]].assign(key=queue["key"]).to_csv(index=False).encode("utf-8"),
         file_name="jira_prioritized_queue.csv",
+        mime="text/csv",
+    )
+
+
+def _render_estimate_policy(df: pd.DataFrame) -> None:
+    """Who is honouring "estimate it before it leaves Backlog"."""
+    st.subheader("Estimate Policy")
+    st.caption(
+        "Every ticket past Backlog is expected to carry an estimate. Backlog "
+        "statuses are exempt (configurable via JIRA_BACKLOG_STATUSES)."
+    )
+
+    scored = estimate_policy(df, BACKLOG_STATUSES)
+    in_scope = scored[scored["policy_applies"].fillna(False).astype(bool)] if not scored.empty else scored
+    if in_scope.empty:
+        st.info("No tickets past Backlog in the current scope.")
+        return
+
+    violations = in_scope[in_scope["policy_violation"].astype(bool)]
+    compliance_pct = (1 - len(violations) / len(in_scope)) * 100.0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Policy Compliance", f"{compliance_pct:.0f}%")
+    c2.metric("Missing Estimate", len(violations))
+    c3.metric("Estimated Work", f"{in_scope['estimate_hours'].sum():.0f}h")
+
+    rollup = policy_compliance_by_owner(scored)
+    if not rollup.empty:
+        st.dataframe(
+            rollup,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "assignee": st.column_config.TextColumn("Assignee"),
+                "past_backlog": st.column_config.NumberColumn("Past Backlog"),
+                "missing_estimate": st.column_config.NumberColumn("Missing Estimate"),
+                "compliance_pct": st.column_config.ProgressColumn(
+                    "Compliance",
+                    format="%.0f%%",
+                    min_value=0,
+                    max_value=100,
+                ),
+                "estimated_hours": st.column_config.NumberColumn("Estimated (h)", format="%.1f"),
+            },
+        )
+
+    if violations.empty:
+        st.success("Every ticket past Backlog has an estimate.")
+        return
+
+    offenders = violations.sort_values(["assignee", "key"]).copy()
+    offenders["key_url"] = offenders["key"].map(_jira_ticket_url)
+    with st.expander(f"Tickets missing an estimate ({len(offenders)})", expanded=False):
+        st.dataframe(
+            offenders[["key_url", "summary", "assignee", "status", "idle_days"]],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "key_url": st.column_config.LinkColumn("Key", display_text=JIRA_KEY_DISPLAY_PATTERN),
+                "summary": st.column_config.TextColumn("Summary"),
+                "assignee": st.column_config.TextColumn("Assignee"),
+                "status": st.column_config.TextColumn("Status"),
+                "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
+            },
+        )
+    st.download_button(
+        "Download missing-estimate tickets (CSV)",
+        data=offenders[["key", "summary", "assignee", "status", "idle_days"]]
+        .to_csv(index=False)
+        .encode("utf-8"),
+        file_name="jira_missing_estimates.csv",
+        mime="text/csv",
+    )
+
+
+def _render_stale_cleanup(df: pd.DataFrame) -> None:
+    """Old tickets ranked by how abandoned they look, so they can be cleared out."""
+    st.subheader("Stale & Abandoned")
+    st.caption(
+        "Tickets idle past the threshold, ranked by how many neglect signals they "
+        "carry. The top of this list is the safest to close or send back to Backlog. "
+        "Backlog tickets are always included here regardless of the Include Backlogs "
+        "filter - that is where rot accumulates."
+    )
+    if df.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    threshold = st.slider(
+        "Idle at least (days)",
+        min_value=30,
+        max_value=365,
+        value=DEFAULT_STALE_DAYS,
+        step=15,
+    )
+    candidates = stale_candidates(df, idle_days=threshold, backlog_statuses=BACKLOG_STATUSES)
+    if candidates.empty:
+        st.success(f"No ticket has been idle for {threshold}+ days.")
+        return
+
+    unassigned = candidates["stale_reasons"].str.contains("unassigned").sum()
+    never_started = candidates["stale_reasons"].str.contains("never started").sum()
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"Idle {threshold}d+", len(candidates))
+    c2.metric("Unassigned", int(unassigned))
+    c3.metric("Never Started", int(never_started))
+
+    display = candidates.copy()
+    display["key_url"] = display["key"].map(_jira_ticket_url)
+    st.dataframe(
+        display[
+            [
+                "key_url",
+                "summary",
+                "assignee",
+                "status",
+                "idle_days",
+                "ticket_age_days",
+                "stale_reasons",
+            ]
+        ],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "key_url": st.column_config.LinkColumn("Key", display_text=JIRA_KEY_DISPLAY_PATTERN),
+            "summary": st.column_config.TextColumn("Summary"),
+            "assignee": st.column_config.TextColumn("Assignee"),
+            "status": st.column_config.TextColumn("Status"),
+            "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
+            "ticket_age_days": st.column_config.NumberColumn("Age (days)", format="%.1f"),
+            "stale_reasons": st.column_config.TextColumn("Why it looks abandoned"),
+        },
+    )
+    st.download_button(
+        "Download stale tickets (CSV)",
+        data=display[
+            ["key", "summary", "assignee", "status", "idle_days", "ticket_age_days", "stale_reasons"]
+        ]
+        .to_csv(index=False)
+        .encode("utf-8"),
+        file_name="jira_stale_tickets.csv",
         mime="text/csv",
     )
 
@@ -1209,6 +1366,82 @@ def _render_sprint_capacity(
         hide_index=True,
     )
 
+    _render_hourly_capacity(preview_scoped, agg)
+
+
+def _sprint_window(sprint_df: pd.DataFrame) -> tuple[object, object]:
+    """Start and end of the selected sprint, from whichever row carries them."""
+    window: list[object] = []
+    for column in ("sprint_start", "sprint_end"):
+        values = (
+            pd.to_datetime(sprint_df[column], errors="coerce", utc=True).dropna()
+            if column in sprint_df.columns
+            else pd.Series(dtype="datetime64[ns, UTC]")
+        )
+        window.append(values.iloc[0] if not values.empty else None)
+    return window[0], window[1]
+
+
+def _render_hourly_capacity(sprint_df: pd.DataFrame, agg: pd.DataFrame) -> None:
+    """Committed hours against each person's declared availability.
+
+    Part-time and hourly engineers make raw committed totals unreadable, so the
+    hours per week come from JIRA_WEEKLY_HOURS and are spread across the
+    sprint's own working days.
+    """
+    st.markdown("##### Availability vs Commitment")
+    if not WEEKLY_HOURS:
+        st.caption(
+            "Set JIRA_WEEKLY_HOURS (e.g. \"Tam=10,Shivanand=20\") to compare committed "
+            "hours against what each person is actually available for."
+        )
+        return
+
+    start, end = _sprint_window(sprint_df)
+    days = working_days(start, end)
+    if not days:
+        st.caption(
+            "This sprint has no start/end dates in Jira, so available hours cannot "
+            "be derived. Set the sprint dates on the board."
+        )
+        return
+
+    if "estimated_sec" in agg.columns:
+        owners = agg["Assignee"].fillna("Unassigned").astype(str).str.strip()
+        committed = (
+            agg["estimated_sec"]
+            .div(3600.0)
+            .groupby(owners.mask(owners.eq(""), "Unassigned"))
+            .sum()
+        )
+    else:
+        committed = pd.Series(dtype="float64")
+    table = capacity_table(committed, WEEKLY_HOURS, start, end)
+    if table.empty:
+        st.caption("No assignees to report on for this sprint.")
+        return
+
+    st.caption(
+        f"{days:.0f} working day(s) in this sprint "
+        f"({pd.Timestamp(start).date()} to {pd.Timestamp(end).date()}). "
+        "Utilization is committed / available; \"Unknown\" means no weekly hours "
+        "are declared for that person."
+    )
+    st.dataframe(
+        table,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Committed (h)": st.column_config.NumberColumn(format="%.1f"),
+            "Available (h)": st.column_config.NumberColumn(format="%.1f"),
+            "Utilization %": st.column_config.NumberColumn(format="%.0f%%"),
+            "Delta (h)": st.column_config.NumberColumn(
+                format="%.1f",
+                help="Available minus committed; negative means over-committed.",
+            ),
+        },
+    )
+
 
 _STAGE_COLORS: dict[str, tuple[str, str]] = {
     # (background, text)
@@ -1524,6 +1757,12 @@ def main() -> None:
 
     st.divider()
     _render_priority_queue(filtered, include_backlogs=include_backlogs)
+
+    st.divider()
+    _render_estimate_policy(filtered)
+
+    st.divider()
+    _render_stale_cleanup(filtered)
 
     restore_requested = bool(st.session_state.pop("restore_sprint_ticket_table", False))
     bubble_chart_version = int(st.session_state.get("bubble_chart_version", 0))

@@ -590,6 +590,9 @@ class JiraClient:
             sprint_state = chosen_sprint.get("state") if chosen_sprint else None
             sprint_id = chosen_sprint.get("id") if chosen_sprint else None
             sprint_board_id = chosen_sprint.get("boardId") if chosen_sprint else None
+            # Sprint window drives per-person available hours in the capacity view.
+            sprint_start = chosen_sprint.get("startDate") if chosen_sprint else None
+            sprint_end = chosen_sprint.get("endDate") if chosen_sprint else None
 
             # Carry-over means the ticket is currently planned/in-flight and was also present in prior closed sprints.
             carry_over_count = len(closed_sprints) if (future_sprints or active_sprints) else 0
@@ -622,6 +625,8 @@ class JiraClient:
                     "sprint_name": sprint_name,
                     "sprint_state": sprint_state,
                     "sprint_board_id": sprint_board_id,
+                    "sprint_start": sprint_start,
+                    "sprint_end": sprint_end,
                     "carry_over_count": carry_over_count,
                     "ticket_url": f"{self.base_url}/browse/{issue.get('key')}",
                 }
