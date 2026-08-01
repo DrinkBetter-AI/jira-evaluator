@@ -36,6 +36,7 @@ profile when they are not all set.
 | `JIRA_TEAM_MEMBERS` | no | `Tam,Shivanand,Mehdi Ordikhani` | Comma-separated defaults for the Team scope |
 | `JIRA_MAX_RESULTS` | no | `1000` | Ceiling on tickets fetched per run; the dashboard warns when the result set is truncated |
 | `JIRA_BACKLOG_STATUSES` | no | `Backlog` | Comma-separated statuses hidden when *Include Backlogs* is off |
+| `JIRA_AUDIT_LOG_PATH` | no | `logs/jira_ticket_changes.jsonl` | Where write-back history is recorded; point at durable storage when containerized |
 | `JIRA_BROWSE_BASE` | no | `<resolved Jira site>/browse` | Base URL for ticket hyperlinks; defaults to the site the credentials resolve to |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
@@ -70,6 +71,7 @@ gcloud run deploy jira-dashboard \
   --source . \
   --project "$PROJECT" --region "$REGION" \
   --no-allow-unauthenticated \
+  --session-affinity --max-instances 1 \
   --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>" \
   --set-secrets "JIRA_API_TOKEN=jira-api-token:latest"
 
@@ -79,8 +81,21 @@ gcloud run services add-iam-policy-binding jira-dashboard \
   --member "domain:vinovoss.com" --role roles/run.invoker
 ```
 
-The command prints the service URL. Streamlit keeps state per browser session, so
-the dashboard is safe to share: each viewer gets their own filters and selections.
+The command prints the service URL. Streamlit holds per-user state on a websocket,
+hence `--session-affinity` and the single instance: they keep a viewer's reconnects
+on the instance that served them. Each viewer still gets their own filters and
+selections.
+
+Cloud Run's filesystem is per-instance and in-memory, so the write-back audit log
+(and with it the *Change History and Revert* section) is wiped on every restart.
+Mount durable storage and set `JIRA_AUDIT_LOG_PATH` to a path inside it if reverting
+past changes matters:
+
+```bash
+  --add-volume "name=audit,type=cloud-storage,bucket=<bucket>" \
+  --add-volume-mount "volume=audit,mount-path=/audit" \
+  --set-env-vars "JIRA_AUDIT_LOG_PATH=/audit/jira_ticket_changes.jsonl"
+```
 
 ## Dashboard layout
 

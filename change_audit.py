@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
-LOG_DIR = Path(__file__).resolve().parent / "logs"
-LOG_FILE = LOG_DIR / "jira_ticket_changes.jsonl"
+# Containers have an ephemeral filesystem, so point this at a mounted volume to
+# keep the revert history across restarts.
+LOG_FILE = Path(
+    os.getenv(
+        "JIRA_AUDIT_LOG_PATH",
+        str(Path(__file__).resolve().parent / "logs" / "jira_ticket_changes.jsonl"),
+    )
+).expanduser()
+LOG_DIR = LOG_FILE.parent
 
 
 def _now_iso() -> str:
