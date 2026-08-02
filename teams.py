@@ -70,7 +70,10 @@ def _team_for_person(display_name: str, people_teams: dict[str, str]) -> str | N
         return people_teams[name]
     tokens = set(name.replace(".", " ").split())
     for person, team in people_teams.items():
-        if person in tokens:
+        # Subset either way, so a roster "Mehdi Ordikhani" still finds Jira's
+        # "Mehdi Ordikhani Fard" rather than falling through to the project.
+        person_tokens = set(person.replace(".", " ").split())
+        if person_tokens and (person_tokens <= tokens or tokens <= person_tokens):
             return team
     return None
 

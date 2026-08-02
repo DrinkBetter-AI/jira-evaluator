@@ -24,7 +24,9 @@ _failed_attempts = 0
 
 def require_password() -> None:
     """Stop the script until the visitor supplies the shared password."""
-    expected = os.getenv(PASSWORD_ENV, "")
+    # Stripped, so a whitespace-only value is a missing password rather than a
+    # gate that anyone can walk through by typing a space.
+    expected = os.getenv(PASSWORD_ENV, "").strip()
     if not expected:
         return
     if st.session_state.get(_SESSION_KEY):
