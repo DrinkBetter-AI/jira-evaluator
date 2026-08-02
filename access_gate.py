@@ -1,7 +1,9 @@
 """Shared-password gate for hosted deployments.
 
-When ``DASHBOARD_PASSWORD`` is unset the gate is a no-op, so local runs are
-unaffected; hosted instances set it and every visitor types it once per session.
+Locally, where the only visitor is the person who started the process, an unset
+``DASHBOARD_PASSWORD`` skips the gate. On Cloud Run it fails closed instead: the
+service is reachable from the internet and can write to Jira, so a forgotten
+environment variable must stop the app rather than open it.
 """
 
 from __future__ import annotations
@@ -20,6 +22,9 @@ _MAX_BACKOFF_SECONDS = 30
 # Counted per process rather than per session: a new websocket would otherwise
 # reset the backoff, which is exactly what a script guessing passwords does.
 _failed_attempts = 0
+# Cloud Run sets this for every revision; its presence is how the process knows
+# it is serving the public rather than one developer's laptop.
+_HOSTED_ENV = "K_SERVICE"
 
 
 def require_password() -> None:
@@ -28,6 +33,12 @@ def require_password() -> None:
     # gate that anyone can walk through by typing a space.
     expected = os.getenv(PASSWORD_ENV, "").strip()
     if not expected:
+        if os.getenv(_HOSTED_ENV, "").strip():
+            st.error(
+                f"{PASSWORD_ENV} is not set on this deployment. Refusing to serve "
+                "a dashboard that can write to Jira without a gate in front of it."
+            )
+            st.stop()
         return
     if st.session_state.get(_SESSION_KEY):
         return
