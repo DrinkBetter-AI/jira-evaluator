@@ -102,9 +102,8 @@ gcloud run deploy jira-dashboard \
   --project "$PROJECT" --region "$REGION" \
   --allow-unauthenticated \
   --session-affinity --max-instances 1 \
-  --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>" \
-  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest" \
-  --update-env-vars "DASHBOARD_PASSWORD=<shared-password>"
+  --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>,DASHBOARD_PASSWORD=<shared-password>" \
+  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest"
 ```
 
 A shared password is weaker than Google sign-in: it does not identify who is

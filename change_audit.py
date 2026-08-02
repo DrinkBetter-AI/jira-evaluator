@@ -10,11 +10,11 @@ from typing import Any
 
 # Containers have an ephemeral filesystem, so point this at a mounted volume to
 # keep the revert history across restarts.
+_DEFAULT_LOG_FILE = Path(__file__).resolve().parent / "logs" / "jira_ticket_changes.jsonl"
+# A blank value is a missing setting, not a request to append to the working
+# directory, which is what ``Path("")`` would mean.
 LOG_FILE = Path(
-    os.getenv(
-        "JIRA_AUDIT_LOG_PATH",
-        str(Path(__file__).resolve().parent / "logs" / "jira_ticket_changes.jsonl"),
-    )
+    os.getenv("JIRA_AUDIT_LOG_PATH", "").strip() or str(_DEFAULT_LOG_FILE)
 ).expanduser()
 LOG_DIR = LOG_FILE.parent
 
@@ -48,10 +48,21 @@ def new_operation_record(
     }
 
 
-def append_operation(record: dict[str, Any]) -> None:
-    _ensure_log_dir()
-    with LOG_FILE.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, ensure_ascii=True) + "\n")
+def append_operation(record: dict[str, Any]) -> str | None:
+    """Record the operation; return why it could not be, rather than raising.
+
+    The Jira writes have already happened by the time this is called, so an
+    unwritable log path must not blow up the page and hide which tickets moved.
+    Losing the revert record is worth saying out loud, not worth losing the
+    result summary over.
+    """
+    try:
+        _ensure_log_dir()
+        with LOG_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=True) + "\n")
+    except OSError as exc:
+        return f"{LOG_FILE}: {exc}"
+    return None
 
 
 def load_operations(limit: int = 50) -> list[dict[str, Any]]:

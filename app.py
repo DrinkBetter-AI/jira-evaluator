@@ -2246,7 +2246,12 @@ def _apply_action_with_audit(
             )
 
     operation = finalize_operation(operation, items)
-    append_operation(operation)
+    log_error = append_operation(operation)
+    if log_error:
+        st.warning(
+            "The changes went through, but the audit log could not be written, "
+            f"so this batch cannot be reverted from the dashboard - {log_error}"
+        )
     return succeeded, failed, operation
 
 

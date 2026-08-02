@@ -85,12 +85,19 @@ def resolve_weekly_hours(
     back in the second element so the caller can say why.
     """
     resolved: dict[str, float] = {}
+    spelled_out: set[str] = set()
     ambiguous: set[str] = set()
     for declared, hours in weekly_hours.items():
         exact = [name for name in names if name == declared]
         matches = exact or [name for name in names if same_person(declared, name)]
         if len(matches) == 1:
+            # A later, looser entry must not overwrite hours declared against the
+            # full Jira name, or spelling the name out would not settle a clash.
+            if not exact and matches[0] in spelled_out:
+                continue
             resolved[matches[0]] = hours
+            if exact:
+                spelled_out.add(matches[0])
         elif len(matches) > 1:
             ambiguous.update(matches)
     # An exact declaration outranks the ambiguity of a shorter one it collides
