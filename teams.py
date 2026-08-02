@@ -110,9 +110,7 @@ def add_team(
     # An unowned ticket has no team of its own; it belongs to whoever picks it up,
     # so it is called out rather than silently attributed to a project's team.
     no_owner = owners.str.strip().str.lower().isin(_NO_OWNER)
-    out["team"] = by_person.fillna(by_project).mask(
-        no_owner & bool(people_teams), NO_OWNER_TEAM
-    )
+    out["team"] = by_person.fillna(by_project).mask(no_owner, NO_OWNER_TEAM)
     return out
 
 
