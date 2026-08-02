@@ -34,6 +34,10 @@ AGE_SATURATION_DAYS = 180.0
 
 SCORE_COLUMNS = ["priority_score", "priority_rank", "priority_reasons"]
 
+# Jira writes this placeholder for issues nobody owns; it is work, not a person.
+NO_OWNER_LABEL = "(no owner)"
+_NO_OWNER_NAMES = {"", "unassigned", "none"}
+
 
 def _priority_weight(value: object) -> float:
     return PRIORITY_WEIGHTS.get(str(value or "").strip().lower(), DEFAULT_PRIORITY_WEIGHT)
@@ -152,7 +156,10 @@ def assignee_rollup(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
 
     working = df.copy()
-    working["assignee"] = working["assignee"].fillna("Unassigned").astype(str)
+    owners = working["assignee"].fillna("").astype(str).str.strip()
+    unowned = owners.str.lower().isin(_NO_OWNER_NAMES)
+    working["assignee"] = owners.mask(unowned, NO_OWNER_LABEL)
+    working["_unowned"] = unowned.astype(int)
     idle_days = pd.to_numeric(working.get("idle_days"), errors="coerce").fillna(0.0)
     working["_stale"] = (idle_days >= 15).astype(int)
     working["_unprioritized"] = (
@@ -173,11 +180,15 @@ def assignee_rollup(df: pd.DataFrame) -> pd.DataFrame:
         max_idle_days=("idle_days", "max"),
         stale_15d_plus=("_stale", "sum"),
         unprioritized=("_unprioritized", "sum"),
+        _unowned=("_unowned", "max"),
     )
 
     rollup = grouped.reset_index()
     for column in ["avg_priority_score", "top_priority_score", "avg_idle_days", "max_idle_days"]:
         rollup[column] = pd.to_numeric(rollup[column], errors="coerce").round(1)
+    # Ownerless work is kept visible but sorted last, so it cannot outrank a
+    # real person in a table about who is carrying what.
     return rollup.sort_values(
-        ["avg_priority_score", "open_tickets"], ascending=[False, False]
+        ["_unowned", "avg_priority_score", "open_tickets"],
+        ascending=[True, False, False],
     ).reset_index(drop=True)[columns]

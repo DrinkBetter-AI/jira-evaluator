@@ -125,7 +125,19 @@ def _default_browse_base() -> str:
     return f"{normalize_base_url(str(config['base_url']))}/browse"
 
 
-JIRA_BROWSE_BASE = os.getenv("JIRA_BROWSE_BASE", "").strip() or _default_browse_base()
+def _browse_base() -> str:
+    """The ticket link prefix, refusing anything that is not plain http(s).
+
+    The value is rendered as a clickable link in several tables, so a scheme
+    like ``javascript:`` would turn every ticket key into a trap.
+    """
+    configured = os.getenv("JIRA_BROWSE_BASE", "").strip()
+    if configured and not configured.lower().startswith(("http://", "https://")):
+        configured = ""
+    return configured or _default_browse_base()
+
+
+JIRA_BROWSE_BASE = _browse_base()
 
 
 def _jira_ticket_url(key: str) -> str:
