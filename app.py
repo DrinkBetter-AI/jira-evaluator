@@ -609,8 +609,10 @@ def _triage_state(queue_name: str, keys: list[str]) -> tuple[dict[str, str], int
     The queue's contents shift under the reviewer - tickets age into it, closures
     drop out of it - so identity is the queue *choice*, not its membership;
     otherwise applying a batch would throw away every decision still pending.
-    Decisions for tickets that have left are pruned rather than kept, which also
-    keeps the reviewed count from exceeding the queue length.
+    Every decision stays in the session; the dict returned here is only the part
+    the current queue can show, so narrowing the page size or tightening a filter
+    hides decisions rather than destroying them, and the reviewed count still
+    cannot exceed the queue length.
 
     The place in the queue is remembered as a ticket key rather than an offset,
     because closing five tickets shortens the list above the cursor and an offset
@@ -627,7 +629,6 @@ def _triage_state(queue_name: str, keys: list[str]) -> tuple[dict[str, str], int
         for key, choice in st.session_state.setdefault(_TRIAGE_DECISIONS_KEY, {}).items()
         if key in present
     }
-    st.session_state[_TRIAGE_DECISIONS_KEY] = decisions
 
     cursor = st.session_state.setdefault(_TRIAGE_CURSOR_KEY, None)
     if cursor in present:
