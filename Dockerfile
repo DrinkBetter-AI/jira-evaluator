@@ -10,6 +10,8 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# The theme lives here; without it the hosted app falls back to Streamlit's default.
+COPY .streamlit ./.streamlit
 COPY *.py ./
 
 # Cloud Run injects PORT; Streamlit needs it on the command line.

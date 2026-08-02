@@ -30,6 +30,7 @@ from access_gate import require_password
 from capacity import capacity_table, parse_weekly_hours, working_days
 from epics import epic_health_flags, epic_rollup
 from teams import (
+    NO_OWNER_TEAM,
     DEFAULT_TEAM_PEOPLE,
     add_team,
     parse_team_people,
@@ -418,13 +419,23 @@ def _render_priority_queue(df: pd.DataFrame, include_backlogs: bool) -> None:
 def _render_team_overview(df: pd.DataFrame) -> None:
     """Per-team load, staffing and sprint state, so each squad is legible alone."""
     st.subheader("Teams")
-    if not TEAM_PROJECTS:
+    if TEAM_PEOPLE:
+        fallback = (
+            "JIRA_TEAM_PROJECTS" if TEAM_PROJECTS else "the Jira project key"
+        )
+        st.caption(
+            f"A ticket's team follows its assignee (JIRA_TEAM_PEOPLE, "
+            f"{len(TEAM_PEOPLE)} people), falling back to {fallback} for anyone "
+            "off the roster. Tickets with no owner are grouped as "
+            f'"{NO_OWNER_TEAM}" rather than credited to a team.'
+        )
+    elif TEAM_PROJECTS:
+        st.caption("Team membership comes from JIRA_TEAM_PROJECTS.")
+    else:
         st.caption(
             "Teams default to Jira project keys. Group them with "
-            'JIRA_TEAM_PROJECTS, e.g. "Marketplace=MB;App=AS,OA;Design=MAR".'
+            'JIRA_TEAM_PEOPLE, e.g. "Design=Robert,Alesya;App=Ali,Farid".'
         )
-    else:
-        st.caption("Team membership comes from JIRA_TEAM_PROJECTS.")
 
     scored = add_team(estimate_policy(df, BACKLOG_STATUSES), TEAM_PROJECTS, TEAM_PEOPLE)
     summary = team_summary(scored)
