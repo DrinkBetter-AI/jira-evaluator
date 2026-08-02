@@ -46,7 +46,10 @@ _NO_OWNER_NAMES = {"", "unassigned", "none"}
 
 
 def _priority_weight(value: object) -> float:
-    return PRIORITY_WEIGHTS.get(str(value or "").strip().lower(), DEFAULT_PRIORITY_WEIGHT)
+    name = str(value or "").strip().lower()
+    # A blank field and the priority literally named "None" are one bucket
+    # everywhere else in the dashboard, so they have to score the same here.
+    return PRIORITY_WEIGHTS.get(name or "none", DEFAULT_PRIORITY_WEIGHT)
 
 
 def _due_pressure(due_date: object, now: pd.Timestamp) -> float:

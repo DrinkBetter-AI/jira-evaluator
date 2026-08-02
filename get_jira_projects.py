@@ -11,7 +11,9 @@ CSV_FILENAME = Path(f"jira_epic_tickets_extended_{EPIC_KEY}.csv")
 def main() -> None:
     jql = f'"parent" in ({EPIC_KEY}, {EPIC_KEY_2}) ORDER BY created ASC'
 
-    client = JiraClient.from_yaml(
+    # Same resolution as the dashboard, so the script also runs in the container,
+    # where the credentials arrive as environment variables and no YAML exists.
+    client = JiraClient.resolve(
         creds_path="~/.creds/vinovoss.yml",
         profile_name="ML-TEAM-MANAGEMENT",
     )

@@ -69,12 +69,18 @@ def _team_for_person(display_name: str, people_teams: dict[str, str]) -> str | N
     if name in people_teams:
         return people_teams[name]
     tokens = set(name.replace(".", " ").split())
+    matched: set[str] = set()
     for person, team in people_teams.items():
         # Subset either way, so a roster "Mehdi Ordikhani" still finds Jira's
         # "Mehdi Ordikhani Fard" rather than falling through to the project.
         person_tokens = set(person.replace(".", " ").split())
         if person_tokens and (person_tokens <= tokens or tokens <= person_tokens):
-            return team
+            matched.add(team)
+    # A bare roster first name can match two people on different teams; naming
+    # one of them would be a coin toss dressed up as a fact, so the ticket falls
+    # back to its project instead. Fix by spelling the name out in the roster.
+    if len(matched) == 1:
+        return matched.pop()
     return None
 
 
