@@ -599,7 +599,7 @@ def _render_epics(df: pd.DataFrame) -> None:
 
 
 _TRIAGE_DECISIONS_KEY = "_triage_decisions"
-_TRIAGE_POSITION_KEY = "_triage_position"
+_TRIAGE_CURSOR_KEY = "_triage_cursor_key"
 _TRIAGE_QUEUE_KEY = "_triage_queue_name"
 
 
@@ -611,11 +611,16 @@ def _triage_state(queue_name: str, keys: list[str]) -> tuple[dict[str, str], int
     otherwise applying a batch would throw away every decision still pending.
     Decisions for tickets that have left are pruned rather than kept, which also
     keeps the reviewed count from exceeding the queue length.
+
+    The place in the queue is remembered as a ticket key rather than an offset,
+    because closing five tickets shortens the list above the cursor and an offset
+    would silently step over five tickets nobody ever saw. A key that has itself
+    left the queue falls back to the first ticket still undecided.
     """
     if st.session_state.get(_TRIAGE_QUEUE_KEY) != queue_name:
         st.session_state[_TRIAGE_QUEUE_KEY] = queue_name
         st.session_state[_TRIAGE_DECISIONS_KEY] = {}
-        st.session_state[_TRIAGE_POSITION_KEY] = 0
+        st.session_state[_TRIAGE_CURSOR_KEY] = None
     present = set(keys)
     decisions = {
         key: choice
@@ -623,7 +628,12 @@ def _triage_state(queue_name: str, keys: list[str]) -> tuple[dict[str, str], int
         if key in present
     }
     st.session_state[_TRIAGE_DECISIONS_KEY] = decisions
-    return decisions, int(st.session_state.setdefault(_TRIAGE_POSITION_KEY, 0))
+
+    cursor = st.session_state.setdefault(_TRIAGE_CURSOR_KEY, None)
+    if cursor in present:
+        return decisions, keys.index(cursor)
+    undecided = [index for index, key in enumerate(keys) if key not in decisions]
+    return decisions, undecided[0] if undecided else len(keys)
 
 
 def _render_triage_card(row: pd.Series) -> None:
@@ -720,9 +730,13 @@ def _render_cleanup(
         row = queue.iloc[position]
         _render_triage_card(row)
 
+        keys = queue["key"].astype(str).tolist()
+
         def _decide(choice: str) -> None:
             st.session_state[_TRIAGE_DECISIONS_KEY][row["key"]] = choice
-            st.session_state[_TRIAGE_POSITION_KEY] = position + 1
+            st.session_state[_TRIAGE_CURSOR_KEY] = (
+                keys[position + 1] if position + 1 < len(keys) else None
+            )
 
         buttons = st.columns(5)
         buttons[0].button(
@@ -756,7 +770,7 @@ def _render_cleanup(
             key=f"triage_skip_{row['key']}",
         )
         if buttons[4].button("Back", width="stretch", disabled=position == 0):
-            st.session_state[_TRIAGE_POSITION_KEY] = position - 1
+            st.session_state[_TRIAGE_CURSOR_KEY] = keys[position - 1]
             st.rerun()
 
         st.caption(f"Ticket {position + 1} of {len(queue)}")
@@ -799,7 +813,7 @@ def _render_triage_decisions(queue: pd.DataFrame, decisions: dict[str, str]) -> 
         )
         if st.button("Start over", key="triage_reset"):
             st.session_state[_TRIAGE_DECISIONS_KEY] = {}
-            st.session_state[_TRIAGE_POSITION_KEY] = 0
+            st.session_state[_TRIAGE_CURSOR_KEY] = None
             st.rerun()
 
     to_close = cleanup.pending_closures(queue, decisions)
