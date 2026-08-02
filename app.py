@@ -847,6 +847,10 @@ def _render_triage_decisions(queue: pd.DataFrame, decisions: dict[str, str]) -> 
         + " / ".join(cleanup.CLOSING_STATUS_PREFERENCE[:4])
         + " over Done so cleanup stays distinguishable from real completions."
     )
+    # Named, not just counted: decisions outlive the queue they were made in, so
+    # the reviewer has to be able to see exactly which tickets a click will move.
+    with st.expander(f"Which {len(to_close)} tickets", expanded=False):
+        st.write(", ".join(to_close))
     apply_columns = st.columns([3, 1])
     confirmed = apply_columns[0].checkbox(
         f"Yes, write these {len(to_close)} changes to Jira", value=False
