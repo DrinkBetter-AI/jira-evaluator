@@ -41,7 +41,7 @@ profile when they are not all set.
 | `JIRA_BROWSE_BASE` | no | `<resolved Jira site>/browse` | Base URL for ticket hyperlinks; defaults to the site the credentials resolve to |
 | `JIRA_TEAM_PROJECTS` | no | — | Which Jira projects form each team, e.g. `Marketplace=MB;App=AS,OA;Design=MAR`; used only where the assignee roster has no answer |
 | `JIRA_TEAM_PEOPLE` | no | the VinoVoss roster in `teams.py` | Who sits on each team, e.g. `Design=Robert,Alesya;App=Ali,Farid`; first names match Jira display names, and a `Former staff` team surfaces work still owned by leavers |
-| `DASHBOARD_PASSWORD` | no | — | Shared password visitors must enter; unset means no gate, which is the norm locally |
+| `DASHBOARD_PASSWORD` | no locally, **yes when publicly reachable** | — | Shared password visitors must enter; unset or blank means no gate at all |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
 env mode; otherwise the YAML profile is used:
@@ -62,6 +62,14 @@ organization-wide view, e.g. `project in (MB, ML) AND statusCategory != Done`.
 The `Dockerfile` runs Streamlit on the port Cloud Run injects. Deploy it privately
 and let Google sign-in gate access, so anyone on the Workspace domain can open the
 URL and nobody else can:
+
+> Cloud Run IAM authenticates callers, not browsers: a viewer without a signed
+> request gets a bare 403 rather than a login page, and turning that into a real
+> sign-in needs IAP, which in turn needs the project to sit inside a Google Cloud
+> Organization. Where that is not the case, the fallback below trades the IAM
+> binding for the app's own shared password — and then `DASHBOARD_PASSWORD` is the
+> only thing between the public internet and Jira write access, so it is required,
+> not optional.
 
 ```bash
 PROJECT=<gcp-project-id>
@@ -84,6 +92,24 @@ gcloud run services add-iam-policy-binding jira-dashboard \
   --project "$PROJECT" --region "$REGION" \
   --member "domain:vinovoss.com" --role roles/run.invoker
 ```
+
+If the project is outside an Organization, deploy publicly with the password gate
+instead of the IAM binding:
+
+```bash
+gcloud run deploy jira-dashboard \
+  --source . \
+  --project "$PROJECT" --region "$REGION" \
+  --allow-unauthenticated \
+  --session-affinity --max-instances 1 \
+  --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>" \
+  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest" \
+  --update-env-vars "DASHBOARD_PASSWORD=<shared-password>"
+```
+
+A shared password is weaker than Google sign-in: it does not identify who is
+looking, cannot be revoked per person, and only throttles guessing. Treat it as a
+stopgap until the service can live in an Organization behind IAP.
 
 The command prints the service URL. Streamlit holds per-user state on a websocket,
 hence `--session-affinity` and the single instance: they keep a viewer's reconnects
@@ -141,9 +167,12 @@ past changes matters:
    contributors are part-time: `JIRA_WEEKLY_HOURS` is spread over the weekdays
    between the sprint's start and end dates, so 20h/week across a 10-working-day
    sprint is 40h available. Status is *Over-committed* above 100% utilization, *At
-   capacity* from 85%, otherwise *Has room*. People with declared hours appear even
-   with nothing assigned; people without declared hours show *Unknown*, and a sprint
-   with no dates in Jira disables the table rather than guessing.
+   capacity* from 85%, otherwise *Has room*. In the Organization scope everyone with
+   declared hours appears, including anyone carrying nothing at all, which is how
+   spare capacity surfaces; the Team and Individual scopes narrow the table to the
+   people selected, so that someone merely filtered out is not read as idle. People
+   without declared hours show *Unknown*, and a sprint with no dates in Jira
+   disables the table rather than guessing.
 
 ## Metric definitions
 
