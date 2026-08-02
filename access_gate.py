@@ -16,9 +16,12 @@ import streamlit as st
 
 PASSWORD_ENV = "DASHBOARD_PASSWORD"
 _SESSION_KEY = "_access_granted"
-# Each wrong guess costs a second more than the last, capped so a locked-out
-# visitor is not stuck forever; enough to make guessing pointless.
-_MAX_BACKOFF_SECONDS = 30
+# Each wrong guess costs a second more than the last, capped low: the sleep
+# holds a Streamlit script thread, and the service runs on a single instance, so
+# a long backoff would let a few wrong guesses stall the dashboard for everyone.
+# Slowing a script down is all this can honestly claim; real lockout needs an
+# identity layer in front of the app.
+_MAX_BACKOFF_SECONDS = 3
 # Counted per process rather than per session: a new websocket would otherwise
 # reset the backoff, which is exactly what a script guessing passwords does.
 _failed_attempts = 0
