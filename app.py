@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import os
 import re
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
@@ -144,8 +145,12 @@ JIRA_BROWSE_BASE = _browse_base()
 
 
 def _jira_ticket_url(key: str) -> str:
-    """Generate a Jira ticket URL from its key."""
-    return f"{JIRA_BROWSE_BASE}/{str(key).strip()}"
+    """Generate a Jira ticket URL from its key.
+
+    The key is quoted: it arrives from Jira rather than from this code, and a
+    stray ``?`` or space would otherwise change which URL the link points at.
+    """
+    return f"{JIRA_BROWSE_BASE}/{quote(str(key).strip(), safe='')}"
 
 
 def _normalize_sprint_id(value: object) -> str | None:
@@ -687,7 +692,7 @@ def _render_triage_card(row: pd.Series) -> None:
         f"</div>",
         unsafe_allow_html=True,
     )
-    st.markdown(f"[Open {row['key']} in Jira]({_jira_ticket_url(str(row['key']))})")
+    st.link_button(f"Open {row['key']} in Jira", _jira_ticket_url(str(row["key"])))
 
 
 def _render_cleanup(
