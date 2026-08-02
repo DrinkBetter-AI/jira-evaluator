@@ -2304,7 +2304,15 @@ def main() -> None:
 
     df = add_priority_score(add_ticket_health_fields(raw_df))
 
-    assignees = sorted(df["assignee"].dropna().unique().tolist())
+    # "Unassigned" is Jira's placeholder, not a colleague: offering it here would
+    # inflate the head-count and let someone "focus" on a person who does not
+    # exist. Ownerless work is reached through the cleanup queue and the
+    # unassigned KPI instead.
+    assignees = sorted(
+        name
+        for name in df["assignee"].dropna().unique().tolist()
+        if str(name).strip().lower() not in _NO_OWNER_NAMES
+    )
     statuses = sorted(df["status"].dropna().unique().tolist())
     priorities = sorted(df["priority"].dropna().unique().tolist())
 
