@@ -1681,7 +1681,9 @@ def _render_hourly_capacity(sprint_df: pd.DataFrame, in_sprint_df: pd.DataFrame)
         "Committed covers every ticket in the sprint that the current scope and "
         "filters keep, not just the statuses counted in hours above. Utilization is "
         'committed / available; "Unknown" means no weekly hours are declared for '
-        "that person."
+        'that person, and "Ambiguous roster name" means a declaration like '
+        '"Dan=40" matches more than one person in Jira, so it is withheld rather '
+        "than handed to both - spell that entry as the full Jira name to fix it."
     )
     st.dataframe(
         table,

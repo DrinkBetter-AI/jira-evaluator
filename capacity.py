@@ -17,6 +17,7 @@ OVER_COMMITTED = "Over-committed"
 AT_CAPACITY = "At capacity"
 HAS_ROOM = "Has room"
 UNKNOWN_AVAILABILITY = "Unknown"
+AMBIGUOUS_AVAILABILITY = "Ambiguous roster name"
 NO_AVAILABILITY = "No hours this sprint"
 UNALLOCATED = "Unallocated"
 UNASSIGNED = "Unassigned"
@@ -72,6 +73,32 @@ def match_weekly_hours(name: str, weekly_hours: dict[str, float]) -> float | Non
     return None
 
 
+def resolve_weekly_hours(
+    names: list[str], weekly_hours: dict[str, float]
+) -> tuple[dict[str, float], set[str]]:
+    """Assign each declared allowance to at most one person.
+
+    A roster written as bare first names is ambiguous the moment Jira holds two
+    people who share one: crediting ``Dan=40`` to both ``Dan Smith`` and ``Dan
+    Jones`` would invent a second contractor's worth of capacity. Such a
+    declaration is withheld from everyone it could mean, and its claimants come
+    back in the second element so the caller can say why.
+    """
+    resolved: dict[str, float] = {}
+    ambiguous: set[str] = set()
+    for declared, hours in weekly_hours.items():
+        exact = [name for name in names if name == declared]
+        matches = exact or [name for name in names if same_person(declared, name)]
+        if len(matches) == 1:
+            resolved[matches[0]] = hours
+        elif len(matches) > 1:
+            ambiguous.update(matches)
+    # An exact declaration outranks the ambiguity of a shorter one it collides
+    # with: spelling a name in full is how the reviewer resolves the clash.
+    ambiguous -= set(resolved)
+    return resolved, ambiguous
+
+
 def working_days(start: object, end: object) -> float:
     """Weekdays in the inclusive [start, end] window; 0 when either is missing."""
     if start is None or end is None or pd.isna(start) or pd.isna(end):
@@ -91,9 +118,17 @@ def available_hours(weekly_hours: float, start: object, end: object) -> float:
     return round(weekly_hours / WORKING_DAYS_PER_WEEK * days, 1)
 
 
-def _status(name: str, committed: float, available: float, declared: bool) -> str:
+def _status(
+    name: str,
+    committed: float,
+    available: float,
+    declared: bool,
+    ambiguous: bool = False,
+) -> str:
     if name == UNASSIGNED:
         return UNALLOCATED
+    if ambiguous:
+        return AMBIGUOUS_AVAILABILITY
     if available <= 0:
         return NO_AVAILABILITY if declared else UNKNOWN_AVAILABILITY
     ratio = committed / available
@@ -136,10 +171,12 @@ def capacity_table(
     if not names:
         return pd.DataFrame(columns=columns)
 
+    declared_by_name, ambiguous = resolve_weekly_hours(names, weekly_hours)
+
     rows = []
     for name in names:
         held = float(committed.get(name, 0.0))
-        declared_hours = match_weekly_hours(name, weekly_hours)
+        declared_hours = declared_by_name.get(name)
         capacity = available_hours(declared_hours or 0.0, start, end)
         rows.append(
             {
@@ -148,7 +185,13 @@ def capacity_table(
                 "Available (h)": capacity,
                 "Utilization %": round(held / capacity * 100.0, 0) if capacity > 0 else None,
                 "Delta (h)": round(capacity - held, 1) if capacity > 0 else None,
-                "Status": _status(name, held, capacity, declared_hours is not None),
+                "Status": _status(
+                    name,
+                    held,
+                    capacity,
+                    declared_hours is not None,
+                    ambiguous=name in ambiguous,
+                ),
             }
         )
 
@@ -159,7 +202,8 @@ def capacity_table(
         HAS_ROOM: 2,
         NO_AVAILABILITY: 3,
         UNALLOCATED: 4,
-        UNKNOWN_AVAILABILITY: 5,
+        AMBIGUOUS_AVAILABILITY: 5,
+        UNKNOWN_AVAILABILITY: 6,
     }
     return (
         table.assign(_order=table["Status"].map(order))
