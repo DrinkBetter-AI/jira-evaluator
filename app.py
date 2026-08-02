@@ -606,13 +606,13 @@ _TRIAGE_QUEUE_KEY = "_triage_queue_name"
 def _triage_state(queue_name: str, keys: list[str]) -> tuple[dict[str, str], int]:
     """Decisions made so far and the current position for this queue.
 
-    The queue's contents shift under the reviewer - tickets age into it, closures
-    drop out of it - so identity is the queue *choice*, not its membership;
-    otherwise applying a batch would throw away every decision still pending.
-    Every decision stays in the session; the dict returned here is only the part
-    the current queue can show, so narrowing the page size or tightening a filter
-    hides decisions rather than destroying them, and the reviewed count still
-    cannot exceed the queue length.
+    Every decision stays in the session until it is applied or the reviewer
+    starts over; the dict returned here is only the part the current queue can
+    show. Switching queue, narrowing the page size or tightening a filter
+    therefore hides decisions rather than destroying them - the two queues
+    overlap heavily, so a peek at the unassigned list must not cost an
+    afternoon of triage - and the reviewed count still cannot exceed the
+    queue length.
 
     The place in the queue is remembered as a ticket key rather than an offset,
     because closing five tickets shortens the list above the cursor and an offset
@@ -620,8 +620,9 @@ def _triage_state(queue_name: str, keys: list[str]) -> tuple[dict[str, str], int
     left the queue falls back to the first ticket still undecided.
     """
     if st.session_state.get(_TRIAGE_QUEUE_KEY) != queue_name:
+        # Only the cursor is queue-local: the other queue's ticket would be an
+        # arbitrary starting point here, so the first undecided one wins.
         st.session_state[_TRIAGE_QUEUE_KEY] = queue_name
-        st.session_state[_TRIAGE_DECISIONS_KEY] = {}
         st.session_state[_TRIAGE_CURSOR_KEY] = None
     present = set(keys)
     decisions = {
