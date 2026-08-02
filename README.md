@@ -156,7 +156,8 @@ past changes matters:
    defaults to *Keep*. Two queues: oldest open, and oldest unassigned. Decisions live
    in the session and are exportable as CSV; only the explicit *Apply* button at the
    bottom writes to Jira, transitioning the tickets marked *Close* to a status you
-   name, through the same audited path as every other write.
+   name, through the same audited path as every other write. Backlog tickets are
+   always included here regardless of *Include Backlogs* - they are the point.
 7. **Assignee Breakdown** — per-assignee roll-up (open tickets, average and top
    priority score, average and max idle days, tickets idle 15d+, tickets with no
    priority). In `Individual` scope this collapses to that person's headline numbers.

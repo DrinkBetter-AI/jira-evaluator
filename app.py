@@ -653,8 +653,9 @@ def _render_cleanup(df: pd.DataFrame) -> None:
     """
     st.subheader("Backlog Cleanup")
     st.caption(
-        "The oldest open tickets, one at a time. Decisions are held in this "
-        "session and only written to Jira when you apply them at the bottom."
+        "The oldest open tickets, one at a time, Backlog included regardless of "
+        "the sidebar toggle. Decisions are held in this session and only written "
+        "to Jira when you apply them at the bottom."
     )
     if df.empty:
         st.info("No tickets in the current scope.")
@@ -2239,7 +2240,8 @@ def main() -> None:
     _render_epics(_metrics_df(filtered, include_backlogs))
 
     st.divider()
-    _render_cleanup(_metrics_df(filtered, include_backlogs))
+    # Backlog-inclusive on purpose: the backlog is what this section clears out.
+    _render_cleanup(filtered)
 
     st.divider()
     _render_scope_breakdown(filtered, scope=scope, include_backlogs=include_backlogs)
