@@ -153,8 +153,10 @@ past changes matters:
    the signals arguing for closure highlighted, and a suggested decision derived in
    `cleanup.suggest_decision`: a ticket a year old and untouched for six months, or
    one nobody ever took that has sat 90 days, is proposed for closing; anything else
-   defaults to *Keep*. Two queues: oldest open, and oldest unassigned. Decisions live
-   in the session and are exportable as CSV; only the explicit *Apply* button at the
+   defaults to *Keep*. Two queues: oldest open, and oldest unassigned - the latter
+   ignores the assignee scope filter, since a ticket with no owner belongs to no
+   team and would otherwise be empty by construction outside Organization scope.
+   Decisions live in the session and are exportable as CSV; only the explicit *Apply* button at the
    bottom writes to Jira, through the same audited path as every other write.
    Because each project runs its own workflow - few statuses here offer *Done*
    from a backlog state - the closing status is resolved per ticket from the

@@ -656,19 +656,28 @@ def _render_triage_card(row: pd.Series) -> None:
     st.markdown(f"[Open {row['key']} in Jira]({_jira_ticket_url(str(row['key']))})")
 
 
-def _render_cleanup(df: pd.DataFrame) -> None:
+def _render_cleanup(
+    df: pd.DataFrame,
+    *,
+    unassigned_source: pd.DataFrame | None = None,
+) -> None:
     """Review the oldest tickets one at a time and decide their fate.
 
     Nothing reaches Jira from here until the decisions are applied at the
     bottom, so a wrong click costs one more click rather than a ticket.
+
+    ``unassigned_source`` is the same data before the assignee scope filter:
+    unowned tickets match no assignee, so without it the unassigned queue would
+    be empty by construction in Team and Individual scope.
     """
     st.subheader("Backlog Cleanup")
     st.caption(
         "The oldest open tickets, one at a time, Backlog included regardless of "
-        "the sidebar toggle. Decisions are held in this session and only written "
-        "to Jira when you apply them at the bottom."
+        "the sidebar toggle, and the unassigned queue ignores the scope filter "
+        "because nobody's tickets belong to no team. Decisions are held in this "
+        "session and only written to Jira when you apply them at the bottom."
     )
-    if df.empty:
+    if df.empty and (unassigned_source is None or unassigned_source.empty):
         st.info("No tickets in the current scope.")
         return
 
@@ -681,14 +690,18 @@ def _render_cleanup(df: pd.DataFrame) -> None:
     size = controls[1].selectbox("How many", options=[25, 50, 100, 200], index=2)
 
     unassigned_only = queue_choice.startswith("Oldest unassigned")
-    queue = cleanup.build_queue(df, unassigned_only=unassigned_only, limit=int(size))
+    source = df
+    if unassigned_only and unassigned_source is not None:
+        source = unassigned_source
+    queue = cleanup.build_queue(source, unassigned_only=unassigned_only, limit=int(size))
     if queue.empty:
         st.success("Nothing in this queue.")
         return
 
-    decisions, position = _triage_state(
-        f"{queue_choice}:{size}", queue["key"].astype(str).tolist()
-    )
+    # Size is not part of the identity: the queues are prefixes of one another,
+    # so widening the list keeps every decision and narrowing it prunes the ones
+    # that fell off, which is what the reviewer expects from a page-size control.
+    decisions, position = _triage_state(queue_choice, queue["key"].astype(str).tolist())
     position = max(0, min(position, len(queue)))
     counts = cleanup.decision_summary(decisions)
 
@@ -2259,14 +2272,18 @@ def main() -> None:
         color_by = st.radio("Bubble color", options=["priority", "assignee"], horizontal=True)
 
     filtered = df.copy()
-    if selected_assignees is not None:
-        filtered = filtered[filtered["assignee"].isin(selected_assignees)]
     if selected_statuses:
         filtered = filtered[filtered["status"].isin(selected_statuses)]
     if selected_priorities:
         filtered = filtered[filtered["priority"].isin(selected_priorities)]
 
     filtered = filtered[(filtered["idle_days"] >= min_idle) & (filtered["ticket_age_days"] >= min_age)]
+
+    # Ownerless work belongs to nobody, so no assignee scope can contain it; the
+    # cleanup section keeps this pre-scope frame to feed its unassigned queue.
+    unscoped = filtered
+    if selected_assignees is not None:
+        filtered = filtered[filtered["assignee"].isin(selected_assignees)]
 
     _render_metrics(filtered, include_backlogs=include_backlogs)
 
@@ -2278,7 +2295,7 @@ def main() -> None:
 
     st.divider()
     # Backlog-inclusive on purpose: the backlog is what this section clears out.
-    _render_cleanup(filtered)
+    _render_cleanup(filtered, unassigned_source=unscoped)
 
     st.divider()
     _render_scope_breakdown(filtered, scope=scope, include_backlogs=include_backlogs)
