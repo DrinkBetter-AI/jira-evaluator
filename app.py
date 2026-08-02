@@ -829,6 +829,12 @@ def _render_triage_decisions(queue: pd.DataFrame, decisions: dict[str, str]) -> 
             "Could not close "
             + "; ".join(f"{key}: {reason}" for key, reason in failed.items())
         )
+        return
+    if succeeded:
+        # Redraw from fresh Jira data, otherwise the queue keeps offering the
+        # tickets that were just closed. Held back when something failed, so the
+        # reader gets to read why before the page moves.
+        st.rerun()
 
 
 def _render_estimate_policy(df: pd.DataFrame) -> None:

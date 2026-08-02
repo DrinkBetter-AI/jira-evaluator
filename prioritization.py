@@ -18,7 +18,13 @@ PRIORITY_WEIGHTS: dict[str, float] = {
     "normal": 18.0,
     "low": 8.0,
     "lowest": 4.0,
+    # This instance also defines these two; an idea is not work yet, and an
+    # unset priority should not borrow weight from a real one.
+    "idea": 2.0,
+    "none": 0.0,
 }
+# Anything the instance adds later scores as barely-prioritised rather than
+# silently mid-table, which is the safer direction for a name nobody mapped.
 DEFAULT_PRIORITY_WEIGHT = 4.0
 
 LATE_STAGE_STATUSES = {"IN DEV ENV", "Review in Staging", "Ready for Production"}
