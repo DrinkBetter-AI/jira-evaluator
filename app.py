@@ -242,7 +242,21 @@ def _metrics_df(df: pd.DataFrame, include_backlogs: bool) -> pd.DataFrame:
     return df[~statuses.isin(BACKLOG_STATUSES)]
 
 
-def _render_metrics(df: pd.DataFrame, include_backlogs: bool = False) -> None:
+def _render_metrics(
+    df: pd.DataFrame,
+    include_backlogs: bool = False,
+    *,
+    unassigned_source: pd.DataFrame | None = None,
+) -> None:
+    """The headline numbers for the current scope.
+
+    ``unassigned_source`` is the same data before the assignee scope filter. No
+    unowned ticket can match a selected assignee, so within Team or Individual
+    scope the unassigned count is structurally zero - a green zero reading as
+    "nothing is ownerless" when the truth is "ownerless work is out of view".
+    Counting it from the pre-scope frame, and saying so on the card, keeps the
+    number honest.
+    """
     metrics_df = _metrics_df(df, include_backlogs)
     total_open = int(len(metrics_df))
     avg_idle = float(metrics_df["idle_days"].mean()) if total_open else 0.0
@@ -271,10 +285,14 @@ def _render_metrics(df: pd.DataFrame, include_backlogs: bool = False) -> None:
         )
 
     idle_30 = 0
-    unassigned = 0
     if total_open:
         idle_30 = int(pd.to_numeric(metrics_df["idle_days"], errors="coerce").fillna(0).ge(30).sum())
-        owners = metrics_df["assignee"].fillna("").astype(str).str.strip().str.lower()
+
+    out_of_scope = unassigned_source is not None
+    owner_df = _metrics_df(unassigned_source, include_backlogs) if out_of_scope else metrics_df
+    unassigned = 0
+    if len(owner_df):
+        owners = owner_df["assignee"].fillna("").astype(str).str.strip().str.lower()
         unassigned = int(owners.isin({"", "unassigned", "none"}).sum())
 
     kpi_strip(
@@ -289,7 +307,7 @@ def _render_metrics(df: pd.DataFrame, include_backlogs: bool = False) -> None:
             (
                 "Unassigned",
                 f"{unassigned}",
-                "no owner set",
+                "no owner set, so outside this scope" if out_of_scope else "no owner set",
                 "warning" if unassigned else "good",
             ),
             (
@@ -2301,7 +2319,11 @@ def main() -> None:
     if selected_assignees is not None:
         filtered = filtered[filtered["assignee"].isin(selected_assignees)]
 
-    _render_metrics(filtered, include_backlogs=include_backlogs)
+    _render_metrics(
+        filtered,
+        include_backlogs=include_backlogs,
+        unassigned_source=unscoped if selected_assignees is not None else None,
+    )
 
     st.divider()
     _render_team_overview(_metrics_df(filtered, include_backlogs))
