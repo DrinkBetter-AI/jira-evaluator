@@ -28,6 +28,7 @@ from jira_client import (
 from access_gate import require_password
 from capacity import (
     capacity_table,
+    same_person,
     match_weekly_hours,
     parse_weekly_hours,
     working_days,
@@ -296,6 +297,20 @@ def _render_metrics(df: pd.DataFrame, include_backlogs: bool = False) -> None:
         _render_status_pills(metrics_df["status"])
 
 
+def _roster_matches(roster: list[str], assignees: list[str]) -> list[str]:
+    """The Jira assignees named by a configured roster.
+
+    Matched the same loose way as everywhere else, because the roster is written
+    by hand: a configured "Mehdi Ordikhani" has to select "Mehdi Ordikhani Fard"
+    rather than quietly selecting nobody, which would empty the whole view.
+    """
+    return [
+        name
+        for name in assignees
+        if any(same_person(member, name) for member in roster)
+    ]
+
+
 def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | None:
     """Return the assignees to filter on for the selected scope.
 
@@ -307,7 +322,7 @@ def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | No
         return None
 
     if scope == SCOPE_TEAM:
-        defaults = [name for name in ORG_TEAM_MEMBERS if name in assignees]
+        defaults = _roster_matches(ORG_TEAM_MEMBERS, assignees)
         selected = st.multiselect("Team members", options=assignees, default=defaults)
         if not selected:
             st.warning("No team members selected - showing no tickets.")
@@ -316,7 +331,8 @@ def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | No
     if not assignees:
         st.warning("No assignees available in the current data.")
         return []
-    default_individual = next((name for name in ORG_TEAM_MEMBERS if name in assignees), assignees[0])
+    matches = _roster_matches(ORG_TEAM_MEMBERS, assignees)
+    default_individual = matches[0] if matches else assignees[0]
     selected = st.selectbox(
         "Assignee",
         options=assignees,
