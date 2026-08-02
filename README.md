@@ -217,7 +217,7 @@ never diverges from the health numbers:
 
 | Component | Contribution |
 | --- | --- |
-| Jira priority | Highest/Urgent 40, High 30, Medium/Normal 18, Low 8, Lowest 4, Idea 2, the priority literally named `None` 0; a name this table does not know, including a missing priority field, scores 4 |
+| Jira priority | Highest/Urgent 40, High 30, Medium/Normal 18, Low 8, Lowest 4, Idea 2, and 0 for an unprioritised ticket — whether Jira holds the priority literally named `None` or no priority at all, which the rest of the dashboard also treats as one bucket; an unrecognised name scores 4 |
 | Idle time | up to 20, linear over `idle_days` saturating at 30 days |
 | Ticket age | up to 10, linear over `ticket_age_days` saturating at 180 days |
 | Sprint carry-over | 5 per closed sprint carried, capped at 15 |

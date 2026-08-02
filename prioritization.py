@@ -46,7 +46,10 @@ _NO_OWNER_NAMES = {"", "unassigned", "none"}
 
 
 def _priority_weight(value: object) -> float:
-    name = str(value or "").strip().lower()
+    # pd.isna over truthiness: a frame that has been through fillna or
+    # convert_dtypes carries NaN or pd.NA here, and those are missing priorities
+    # too - not the string "nan", and not a reason to raise.
+    name = "" if value is None or pd.isna(value) else str(value).strip().lower()
     # A blank field and the priority literally named "None" are one bucket
     # everywhere else in the dashboard, so they have to score the same here.
     return PRIORITY_WEIGHTS.get(name or "none", DEFAULT_PRIORITY_WEIGHT)

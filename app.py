@@ -800,6 +800,20 @@ def _render_cleanup(
 
 def _render_triage_decisions(queue: pd.DataFrame, decisions: dict[str, str]) -> None:
     """The decisions taken so far, and the one place they can reach Jira."""
+    # Decisions outlive the queue they were made in, so count the closures waiting
+    # out of sight rather than letting Apply look like the whole outstanding job.
+    visible = set(queue["key"].astype(str))
+    elsewhere = sum(
+        1
+        for key, choice in st.session_state.get(_TRIAGE_DECISIONS_KEY, {}).items()
+        if choice == cleanup.CLOSE and key not in visible
+    )
+    if elsewhere:
+        st.caption(
+            f"{elsewhere} more ticket(s) marked Close sit outside this queue and "
+            "are untouched by Apply here; switch queue or widen the filters to "
+            "reach them."
+        )
     if not decisions:
         return
 
