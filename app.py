@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import html
+import os
 import re
+from urllib.parse import quote, unquote
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 from change_audit import (
@@ -15,21 +17,140 @@ from change_audit import (
     new_operation_record,
     summarize_operations,
 )
-from jira_client import DEFAULT_FIELDS, JiraClient, JiraConfigError
+from jira_client import (
+    DEFAULT_CREDS_PATH,
+    DEFAULT_FIELDS,
+    DEFAULT_PROFILE_NAME,
+    JiraClient,
+    JiraConfigError,
+    normalize_base_url,
+    load_jira_env,
+    load_jira_profile,
+)
+from access_gate import require_password
+from capacity import (
+    capacity_table,
+    same_person,
+    match_weekly_hours,
+    parse_weekly_hours,
+    working_days,
+)
+import cleanup
+from cleanup import is_unowned
+from epics import epic_health_flags, epic_rollup
+from teams import (
+    NO_OWNER_TEAM,
+    DEFAULT_TEAM_PEOPLE,
+    add_team,
+    parse_team_people,
+    parse_team_projects,
+    team_summary,
+)
+from theme import inject_styles, kpi_strip
+from hygiene import (
+    DEFAULT_STALE_DAYS,
+    estimate_policy,
+    policy_compliance_by_owner,
+    stale_candidates,
+)
+from prioritization import add_priority_score, assignee_rollup
 from transformations import add_ticket_health_fields
 
 
 DEFAULT_JQL = """statusCategory != Done
 ORDER BY updated ASC"""
 
-FETCH_SCHEMA_VERSION = 3
-JIRA_BROWSE_BASE = "https://vinovoss.atlassian.net/browse"
+# Credentials resolve from JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN when set,
+# otherwise from this YAML profile. See README.md.
+CREDS_PATH = os.getenv("JIRA_CREDS_PATH", DEFAULT_CREDS_PATH)
+PROFILE_NAME = os.getenv("JIRA_PROFILE", DEFAULT_PROFILE_NAME)
+JQL = os.getenv("JIRA_DASHBOARD_JQL", DEFAULT_JQL)
+ORG_TEAM_MEMBERS = [
+    name.strip()
+    for name in os.getenv("JIRA_TEAM_MEMBERS", "Tam,Shivanand,Mehdi Ordikhani").split(",")
+    if name.strip()
+]
+
+# Placeholder owner names Jira writes when nobody is assigned.
+_NO_OWNER_NAMES = {"", "unassigned", "none"}
+
+
+def _positive_int(value: str | None, *, default: int) -> int:
+    """Read a positive integer setting; a typo costs the setting, not the app."""
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+SCOPE_ORG = "Organization"
+SCOPE_TEAM = "Team"
+SCOPE_INDIVIDUAL = "Individual"
+
+FETCH_SCHEMA_VERSION = 6
 JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
+
+# One Jira request per key, so bound how many the sprint editor asks about.
+TRANSITION_LOOKUP_LIMIT = 50
+# Upper bound on how many tickets a bulk write-back pre-selects.
+BULK_ACTION_DEFAULT_LIMIT = 25
+# Ceiling on tickets fetched per run; org-wide JQL can exceed the old fixed 1000.
+MAX_RESULTS = _positive_int(os.getenv("JIRA_MAX_RESULTS"), default=1000)
+# Statuses hidden when "Include Backlogs" is off; projects name their backlog differently.
+BACKLOG_STATUSES = {
+    name.strip().lower()
+    for name in os.getenv("JIRA_BACKLOG_STATUSES", "Backlog").split(",")
+    if name.strip()
+}
+# Weekly hours per person ("Tam=10,Shivanand=20"); Jira does not know who is part-time.
+WEEKLY_HOURS = parse_weekly_hours(os.getenv("JIRA_WEEKLY_HOURS", ""))
+# Which Jira projects make up each team ("Marketplace=MB;App=AS,OA").
+TEAM_PROJECTS = parse_team_projects(os.getenv("JIRA_TEAM_PROJECTS", ""))
+# Who sits on which team ("Design=Robert,Alesya;App=Ali,Farid"); people beat
+# projects because part-timers here work across several projects.
+TEAM_PEOPLE = parse_team_people(os.getenv("JIRA_TEAM_PEOPLE", DEFAULT_TEAM_PEOPLE))
+_SCOPE_ASSIGNEES_KEY = "_scope_assignees"
+
+
+def _default_browse_base() -> str:
+    """Derive the ticket link prefix from the site the client actually reads from.
+
+    Resolution mirrors JiraClient.resolve so links never point at a different
+    site than the data: the environment only wins when it carries full
+    credentials, otherwise the YAML profile does.
+    """
+    config = load_jira_env()
+    if config is None:
+        try:
+            config = load_jira_profile(CREDS_PATH, PROFILE_NAME)
+        except Exception:  # noqa: BLE001
+            config = {"base_url": "https://vinovoss.atlassian.net"}
+    return f"{normalize_base_url(str(config['base_url']))}/browse"
+
+
+def _browse_base() -> str:
+    """The ticket link prefix, refusing anything that is not plain http(s).
+
+    The value is rendered as a clickable link in several tables, so a scheme
+    like ``javascript:`` would turn every ticket key into a trap.
+    """
+    configured = os.getenv("JIRA_BROWSE_BASE", "").strip().rstrip("/")
+    if configured and not configured.lower().startswith(("http://", "https://")):
+        configured = ""
+    return configured or _default_browse_base()
+
+
+JIRA_BROWSE_BASE = _browse_base()
 
 
 def _jira_ticket_url(key: str) -> str:
-    """Generate a Jira ticket URL from its key."""
-    return f"{JIRA_BROWSE_BASE}/{str(key).strip()}"
+    """Generate a Jira ticket URL from its key.
+
+    The key is quoted: it arrives from Jira rather than from this code, and a
+    stray ``?`` or space would otherwise change which URL the link points at.
+    """
+    return f"{JIRA_BROWSE_BASE}/{quote(str(key).strip(), safe='')}"
 
 
 def _normalize_sprint_id(value: object) -> str | None:
@@ -62,7 +183,7 @@ def fetch_tickets(
     page_size: int,
     schema_version: int,
 ) -> pd.DataFrame:
-    client = JiraClient.from_yaml(creds_path=creds_path, profile_name=profile_name)
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
     _ = schema_version
     result = client.search_issues(
         jql=jql,
@@ -71,7 +192,17 @@ def fetch_tickets(
         page_size=page_size,
         expand="changelog",
     )
-    for col in ["sprint_id", "sprint_name", "sprint_state", "sprint_board_id"]:  # noqa: E501
+    for col in [
+        "sprint_id",
+        "sprint_name",
+        "sprint_state",
+        "sprint_board_id",
+        "sprint_start",
+        "sprint_end",
+        "project_key",
+        "epic_key",
+        "epic_summary",
+    ]:
         if col not in result.columns:
             result[col] = pd.NA
     return result
@@ -79,13 +210,13 @@ def fetch_tickets(
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_all_priorities(creds_path: str, profile_name: str) -> list[str]:
-    client = JiraClient.from_yaml(creds_path=creds_path, profile_name=profile_name)
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
     return client.get_all_priorities()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_all_users(creds_path: str, profile_name: str) -> list[dict[str, str]]:
-    client = JiraClient.from_yaml(creds_path=creds_path, profile_name=profile_name)
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
     return client.get_all_users()
 
 
@@ -95,7 +226,7 @@ def fetch_available_transition_statuses(
     profile_name: str,
     issue_keys: tuple[str, ...],
 ) -> list[str]:
-    client = JiraClient.from_yaml(creds_path=creds_path, profile_name=profile_name)
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
     available: set[str] = set()
     for key in issue_keys:
         try:
@@ -112,10 +243,25 @@ def fetch_available_transition_statuses(
 def _metrics_df(df: pd.DataFrame, include_backlogs: bool) -> pd.DataFrame:
     if include_backlogs or "status" not in df.columns:
         return df
-    return df[df["status"].fillna("").astype(str) != "Backlog"]
+    statuses = df["status"].fillna("").astype(str).str.strip().str.lower()
+    return df[~statuses.isin(BACKLOG_STATUSES)]
 
 
-def _render_metrics(df: pd.DataFrame, include_backlogs: bool = False) -> None:
+def _render_metrics(
+    df: pd.DataFrame,
+    include_backlogs: bool = False,
+    *,
+    unassigned_source: pd.DataFrame | None = None,
+) -> None:
+    """The headline numbers for the current scope.
+
+    ``unassigned_source`` is the same data before the assignee scope filter. No
+    unowned ticket can match a selected assignee, so within Team or Individual
+    scope the unassigned count is structurally zero - a green zero reading as
+    "nothing is ownerless" when the truth is "ownerless work is out of view".
+    Counting it from the pre-scope frame, and saying so on the card, keeps the
+    number honest.
+    """
     metrics_df = _metrics_df(df, include_backlogs)
     total_open = int(len(metrics_df))
     avg_idle = float(metrics_df["idle_days"].mean()) if total_open else 0.0
@@ -143,23 +289,780 @@ def _render_metrics(df: pd.DataFrame, include_backlogs: bool = False) -> None:
             ).sum()
         )
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Open Tickets", total_open)
-    m2.metric("Average Idle Days", f"{avg_idle:.1f}")
-    m3.metric("Max Idle Days", f"{max_idle:.1f}")
-    m4.metric("Oldest Ticket Age", f"{oldest:.1f}")
+    idle_30 = 0
+    if total_open:
+        idle_30 = int(pd.to_numeric(metrics_df["idle_days"], errors="coerce").fillna(0).ge(30).sum())
 
-    n1, n2, n3 = st.columns(3)
-    n1.metric("Estimate Coverage", f"{estimate_coverage_pct:.0f}%")
-    n2.metric(
-        "Stale in Late Stage",
-        stale_late_stage,
-        help="Tickets in IN DEV ENV, Review in Staging, or Ready for Production idle for >6 days",
+    out_of_scope = unassigned_source is not None
+    owner_df = _metrics_df(unassigned_source, include_backlogs) if out_of_scope else metrics_df
+    unassigned = 0
+    if len(owner_df):
+        owners = owner_df["assignee"].fillna("").astype(str).str.strip().str.lower()
+        unassigned = int(owners.isin({"", "unassigned", "none"}).sum())
+
+    kpi_strip(
+        [
+            ("Open tickets", f"{total_open}", "current scope", "neutral"),
+            (
+                "Stalled 30d+",
+                f"{idle_30}",
+                f"{idle_30 / total_open * 100:.0f}% of open" if total_open else "—",
+                "danger" if idle_30 else "good",
+            ),
+            (
+                "Unassigned",
+                f"{unassigned}",
+                "no owner set, so outside this scope" if out_of_scope else "no owner set",
+                "warning" if unassigned else "good",
+            ),
+            (
+                "Estimate coverage",
+                f"{estimate_coverage_pct:.0f}%",
+                "tickets carrying an estimate",
+                "good" if estimate_coverage_pct >= 80 else "warning",
+            ),
+            (
+                "Stale late stage",
+                f"{stale_late_stage}",
+                "in dev/staging/prod, idle >6d",
+                "danger" if stale_late_stage else "good",
+            ),
+            ("Oldest ticket", f"{oldest:.0f}d", f"avg idle {avg_idle:.0f}d · max {max_idle:.0f}d", "info"),
+        ]
     )
-    n3.metric("—", "—")
 
     if "status" in metrics_df.columns and total_open:
         _render_status_pills(metrics_df["status"])
+
+
+def _roster_matches(roster: list[str], assignees: list[str]) -> list[str]:
+    """The Jira assignees named by a configured roster.
+
+    Matched the same loose way as everywhere else, because the roster is written
+    by hand: a configured "Mehdi Ordikhani" has to select "Mehdi Ordikhani Fard"
+    rather than quietly selecting nobody, which would empty the whole view.
+    """
+    return [
+        name
+        for name in assignees
+        if any(same_person(member, name) for member in roster)
+    ]
+
+
+def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | None:
+    """Return the assignees to filter on for the selected scope.
+
+    None means "no assignee filter" (organization-wide); a list, including an
+    empty one, is an explicit selection.
+    """
+    if scope == SCOPE_ORG:
+        st.caption(f"Organization-wide view across {len(assignees)} assignee(s).")
+        return None
+
+    if scope == SCOPE_TEAM:
+        defaults = _roster_matches(ORG_TEAM_MEMBERS, assignees)
+        selected = st.multiselect("Team members", options=assignees, default=defaults)
+        if not selected:
+            st.warning("No team members selected - showing no tickets.")
+        return selected
+
+    if not assignees:
+        st.warning("No assignees available in the current data.")
+        return []
+    matches = _roster_matches(ORG_TEAM_MEMBERS, assignees)
+    default_individual = matches[0] if matches else assignees[0]
+    selected = st.selectbox(
+        "Assignee",
+        options=assignees,
+        index=assignees.index(default_individual),
+    )
+    return [selected]
+
+
+def _render_scope_breakdown(df: pd.DataFrame, scope: str, include_backlogs: bool) -> None:
+    """Render the per-assignee roll-up that backs org-wide and individual views."""
+    scoped = _metrics_df(df, include_backlogs)
+    rollup = assignee_rollup(scoped)
+
+    st.subheader("Assignee Breakdown")
+    if rollup.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    if scope == SCOPE_INDIVIDUAL and len(rollup) == 1:
+        row = rollup.iloc[0]
+        st.markdown(f"**{row['assignee']}**")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Open Tickets", int(row["open_tickets"]))
+        c2.metric("Avg Priority Score", f"{row['avg_priority_score']:.1f}")
+        c3.metric("Idle 15d+", int(row["stale_15d_plus"]))
+        c4.metric("Unprioritized", int(row["unprioritized"]))
+        return
+
+    st.dataframe(
+        rollup,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "assignee": st.column_config.TextColumn("Assignee"),
+            "open_tickets": st.column_config.NumberColumn("Open"),
+            "avg_priority_score": st.column_config.NumberColumn("Avg Score", format="%.1f"),
+            "top_priority_score": st.column_config.NumberColumn("Top Score", format="%.1f"),
+            "avg_idle_days": st.column_config.NumberColumn("Avg Idle (days)", format="%.1f"),
+            "max_idle_days": st.column_config.NumberColumn("Max Idle (days)", format="%.1f"),
+            "stale_15d_plus": st.column_config.NumberColumn("Idle 15d+"),
+            "unprioritized": st.column_config.NumberColumn("No Priority"),
+        },
+    )
+    st.bar_chart(rollup.set_index("assignee")["open_tickets"], height=260)
+
+
+def _render_priority_queue(df: pd.DataFrame, include_backlogs: bool) -> None:
+    """Rank tickets by the composite priority score so work can be picked top-down."""
+    scoped = _metrics_df(df, include_backlogs)
+
+    st.subheader("Prioritized Queue")
+    st.caption(
+        "Score (0-100) = Jira priority + idle time + ticket age + sprint carry-over "
+        "+ due-date urgency + late-stage staleness. See README.md."
+    )
+    if scoped.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    top_n = st.slider("Tickets to show", min_value=5, max_value=100, value=25, step=5)
+    queue = scoped.sort_values("priority_score", ascending=False).head(top_n).copy()
+    queue["key_url"] = queue["key"].map(_jira_ticket_url)
+
+    columns = [
+        "key_url",
+        "summary",
+        "assignee",
+        "status",
+        "priority",
+        "priority_score",
+        "priority_reasons",
+        "idle_days",
+        "ticket_age_days",
+    ]
+    st.dataframe(
+        queue[columns],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "key_url": st.column_config.LinkColumn("Key", display_text=JIRA_KEY_DISPLAY_PATTERN),
+            "summary": st.column_config.TextColumn("Summary"),
+            "assignee": st.column_config.TextColumn("Assignee"),
+            "status": st.column_config.TextColumn("Status"),
+            "priority": st.column_config.TextColumn("Jira Priority"),
+            "priority_score": st.column_config.ProgressColumn(
+                "Score",
+                format="%.1f",
+                min_value=0,
+                max_value=100,
+            ),
+            "priority_reasons": st.column_config.TextColumn("Why"),
+            "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
+            "ticket_age_days": st.column_config.NumberColumn("Age (days)", format="%.1f"),
+        },
+    )
+    st.download_button(
+        "Download prioritized queue (CSV)",
+        data=queue[columns[1:]].assign(key=queue["key"]).to_csv(index=False).encode("utf-8"),
+        file_name="jira_prioritized_queue.csv",
+        mime="text/csv",
+    )
+
+
+def _render_team_overview(df: pd.DataFrame) -> None:
+    """Per-team load, staffing and sprint state, so each squad is legible alone."""
+    st.subheader("Teams")
+    if TEAM_PEOPLE:
+        fallback = (
+            "JIRA_TEAM_PROJECTS" if TEAM_PROJECTS else "the Jira project key"
+        )
+        st.caption(
+            f"A ticket's team follows its assignee (JIRA_TEAM_PEOPLE, "
+            f"{len(TEAM_PEOPLE)} people), falling back to {fallback} for anyone "
+            "off the roster. Tickets with no owner are grouped as "
+            f'"{NO_OWNER_TEAM}" rather than credited to a team.'
+        )
+    elif TEAM_PROJECTS:
+        st.caption("Team membership comes from JIRA_TEAM_PROJECTS.")
+    else:
+        st.caption(
+            "Teams default to Jira project keys. Group them with "
+            'JIRA_TEAM_PEOPLE, e.g. "Design=Robert,Alesya;App=Ali,Farid".'
+        )
+
+    scored = add_team(estimate_policy(df, BACKLOG_STATUSES), TEAM_PROJECTS, TEAM_PEOPLE)
+    summary = team_summary(scored)
+    if summary.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    st.dataframe(
+        summary,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "team": st.column_config.TextColumn("Team"),
+            "open": st.column_config.NumberColumn("Open"),
+            "people": st.column_config.NumberColumn("People"),
+            "avg_idle": st.column_config.NumberColumn("Avg idle (days)", format="%.1f"),
+            "idle_30d": st.column_config.NumberColumn("Stalled 30d+"),
+            "unassigned": st.column_config.NumberColumn("Unassigned"),
+            "no_estimate": st.column_config.NumberColumn("No estimate"),
+        },
+    )
+
+    team_names = summary["team"].tolist()
+    chosen = st.selectbox("Current sprint for team", options=team_names)
+    team_df = scored[scored["team"] == chosen]
+
+    states = team_df["sprint_state"].fillna("").astype(str).str.lower()
+    active = team_df[states.eq("active")]
+    if active.empty:
+        active = team_df[states.eq("future")]
+    if active.empty:
+        st.caption(
+            f"{chosen} has no ticket in an active or future sprint - "
+            f"all {len(team_df)} open tickets sit outside a sprint."
+        )
+        return
+
+    sprint_label = (
+        active["sprint_name"].fillna("").astype(str).mode().iat[0]
+        if not active["sprint_name"].dropna().empty
+        else "current sprint"
+    )
+    current = active[active["sprint_name"].fillna("").astype(str).eq(sprint_label)]
+    owners = current["assignee"].fillna("").astype(str).str.strip().str.lower()
+    unowned = owners.isin(_NO_OWNER_NAMES)
+    kpi_strip(
+        [
+            ("Sprint", sprint_label, chosen, "info"),
+            ("Tickets", f"{len(current)}", "in this sprint", "neutral"),
+            (
+                "People",
+                f"{current.loc[~unowned, 'assignee'].nunique()}",
+                "with sprint work",
+                "neutral",
+            ),
+            (
+                "Committed",
+                f"{current['estimate_hours'].sum():.0f}h",
+                "estimated hours",
+                "neutral",
+            ),
+            (
+                "Unassigned",
+                f"{int(unowned.sum())}",
+                "no owner in sprint",
+                "warning" if unowned.any() else "good",
+            ),
+        ]
+    )
+    st.bar_chart(
+        current.groupby(current["status"].fillna("Unknown").astype(str))["key"].count(),
+        height=240,
+    )
+    st.caption(
+        f"{chosen}: {len(team_df)} open tickets total, {len(current)} in {sprint_label}. "
+        "Per-person hours are in Availability vs Commitment below."
+    )
+
+
+def _render_epics(df: pd.DataFrame) -> None:
+    """Group open work by epic and name what is wrong with each one."""
+    st.subheader("Epics")
+    st.caption(
+        "Open children only - the dashboard does not load Done tickets, so this is "
+        "remaining work per epic, not completion."
+    )
+
+    scored = estimate_policy(df, BACKLOG_STATUSES)
+    rollup = epic_health_flags(epic_rollup(scored))
+    if rollup.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    orphans = int(rollup.loc[rollup["epic"] == "No epic", "open_children"].sum())
+    drifting = int((rollup["issue_count"] > 0).sum() - (1 if orphans else 0))
+    e1, e2, e3 = st.columns(3)
+    e1.metric("Epics with open work", int((rollup["epic"] != "No epic").sum()))
+    e2.metric("Epics needing attention", max(drifting, 0))
+    e3.metric("Tickets with no epic", orphans)
+
+    display = rollup.drop(columns=["epic_key"])
+    st.dataframe(
+        display,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "epic": st.column_config.TextColumn("Epic"),
+            "open_children": st.column_config.NumberColumn("Open"),
+            "owners": st.column_config.NumberColumn("Owners"),
+            "avg_idle": st.column_config.NumberColumn("Avg idle (days)", format="%.1f"),
+            "max_idle": st.column_config.NumberColumn("Max idle (days)", format="%.1f"),
+            "unassigned": st.column_config.NumberColumn("Unassigned"),
+            "no_estimate": st.column_config.NumberColumn("No estimate"),
+            "estimated_hours": st.column_config.NumberColumn("Estimated (h)", format="%.1f"),
+            "sprints": st.column_config.NumberColumn("Sprints"),
+            "issues": st.column_config.TextColumn("What is wrong"),
+            "issue_count": st.column_config.NumberColumn("Signals"),
+        },
+    )
+    st.download_button(
+        "Download epic rollup (CSV)",
+        data=rollup.to_csv(index=False).encode("utf-8"),
+        file_name="jira_epic_rollup.csv",
+        mime="text/csv",
+    )
+
+
+_TRIAGE_DECISIONS_KEY = "_triage_decisions"
+_TRIAGE_CURSOR_KEY = "_triage_cursor_key"
+_TRIAGE_QUEUE_KEY = "_triage_queue_name"
+
+
+def _triage_state(queue_name: str, keys: list[str]) -> tuple[dict[str, str], int]:
+    """Decisions made so far and the current position for this queue.
+
+    Every decision stays in the session until it is applied or the reviewer
+    starts over; the dict returned here is only the part the current queue can
+    show. Switching queue, narrowing the page size or tightening a filter
+    therefore hides decisions rather than destroying them - the two queues
+    overlap heavily, so a peek at the unassigned list must not cost an
+    afternoon of triage - and the reviewed count still cannot exceed the
+    queue length.
+
+    The place in the queue is remembered as a ticket key rather than an offset,
+    because closing five tickets shortens the list above the cursor and an offset
+    would silently step over five tickets nobody ever saw. A key that has itself
+    left the queue falls back to the first ticket still undecided.
+    """
+    if st.session_state.get(_TRIAGE_QUEUE_KEY) != queue_name:
+        # Only the cursor is queue-local: the other queue's ticket would be an
+        # arbitrary starting point here, so the first undecided one wins.
+        st.session_state[_TRIAGE_QUEUE_KEY] = queue_name
+        st.session_state[_TRIAGE_CURSOR_KEY] = None
+    present = set(keys)
+    decisions = {
+        key: choice
+        for key, choice in st.session_state.setdefault(_TRIAGE_DECISIONS_KEY, {}).items()
+        if key in present
+    }
+
+    cursor = st.session_state.setdefault(_TRIAGE_CURSOR_KEY, None)
+    if cursor in present:
+        return decisions, keys.index(cursor)
+    undecided = [index for index, key in enumerate(keys) if key not in decisions]
+    return decisions, undecided[0] if undecided else len(keys)
+
+
+def _render_triage_card(row: pd.Series) -> None:
+    """One ticket, large enough to judge without opening Jira."""
+    age = float(row["ticket_age_days"] or 0)
+    idle = float(row["idle_days"] or 0)
+    owner = "Nobody" if is_unowned(row["assignee"]) else str(row["assignee"])
+    chips = [
+        (f"{age:.0f} days old", age >= cleanup.ABANDONED_AGE_DAYS),
+        (f"untouched {idle:.0f} days", idle >= cleanup.ABANDONED_IDLE_DAYS),
+        (f"Owner: {owner}", is_unowned(row["assignee"])),
+        (f"Status: {row['status']}", False),
+        (f"Epic: {row['epic_summary'] or 'none'}", not str(row["epic_summary"] or "").strip()),
+        (f"Priority: {row['priority'] or 'none'}", False),
+    ]
+    if cleanup.is_container(row.get("issue_type")):
+        # Closing a container from an age-sorted queue is the one decision here
+        # that can strand other people's open work, so it is called out in red.
+        chips.append(("Holds other tickets - closing it orphans them", True))
+    chip_html = "".join(
+        f'<span class="{"hot" if hot else ""}">{html.escape(str(text))}</span>'
+        for text, hot in chips
+    )
+    st.markdown(
+        f'<div class="triage-card">'
+        f'<div class="triage-key">{html.escape(str(row["key"]))}</div>'
+        f'<div class="triage-summary">{html.escape(str(row["summary"]))}</div>'
+        f'<div class="triage-meta">{chip_html}</div>'
+        f'<div class="triage-why">Suggested: {html.escape(str(row["suggested"]))} '
+        f'- {html.escape(str(row["why"]))}</div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.link_button(f"Open {row['key']} in Jira", _jira_ticket_url(str(row["key"])))
+
+
+def _render_cleanup(
+    df: pd.DataFrame,
+    *,
+    unassigned_source: pd.DataFrame | None = None,
+) -> None:
+    """Review the oldest tickets one at a time and decide their fate.
+
+    Nothing reaches Jira from here until the decisions are applied at the
+    bottom, so a wrong click costs one more click rather than a ticket.
+
+    ``unassigned_source`` is the same data before the assignee scope filter:
+    unowned tickets match no assignee, so without it the unassigned queue would
+    be empty by construction in Team and Individual scope.
+    """
+    st.subheader("Backlog Cleanup")
+    st.caption(
+        "The oldest open tickets, one at a time, Backlog included regardless of "
+        "the sidebar toggle, and the unassigned queue ignores the scope filter "
+        "because nobody's tickets belong to no team. Decisions are held in this "
+        "session and only written to Jira when you apply them at the bottom."
+    )
+    if df.empty and (unassigned_source is None or unassigned_source.empty):
+        st.info("No tickets in the current scope.")
+        return
+
+    controls = st.columns([2, 1])
+    queue_choice = controls[0].radio(
+        "Queue",
+        options=["Oldest open tickets", "Oldest unassigned tickets"],
+        horizontal=True,
+    )
+    size = controls[1].selectbox("How many", options=[25, 50, 100, 200], index=2)
+
+    unassigned_only = queue_choice.startswith("Oldest unassigned")
+    source = df
+    if unassigned_only and unassigned_source is not None:
+        source = unassigned_source
+    queue = cleanup.build_queue(source, unassigned_only=unassigned_only, limit=int(size))
+    if queue.empty:
+        st.success("Nothing in this queue.")
+        return
+
+    # Size is not part of the identity: the queues are prefixes of one another,
+    # so widening the list keeps every decision and narrowing it prunes the ones
+    # that fell off, which is what the reviewer expects from a page-size control.
+    decisions, position = _triage_state(queue_choice, queue["key"].astype(str).tolist())
+    position = max(0, min(position, len(queue)))
+    counts = cleanup.decision_summary(decisions)
+
+    st.progress(
+        min(len(decisions) / len(queue), 1.0),
+        text=(
+            f"{len(decisions)} of {len(queue)} reviewed - "
+            f"{counts[cleanup.CLOSE]} to close, {counts[cleanup.KEEP]} keep, "
+            f"{counts[cleanup.NEEDS_OWNER]} need an owner, {counts[cleanup.SKIP]} skipped"
+        ),
+    )
+
+    if position >= len(queue):
+        st.success("End of the queue - review the decisions below.")
+    else:
+        row = queue.iloc[position]
+        _render_triage_card(row)
+
+        keys = queue["key"].astype(str).tolist()
+
+        def _decide(choice: str) -> None:
+            st.session_state[_TRIAGE_DECISIONS_KEY][row["key"]] = choice
+            st.session_state[_TRIAGE_CURSOR_KEY] = (
+                keys[position + 1] if position + 1 < len(keys) else None
+            )
+
+        buttons = st.columns(5)
+        buttons[0].button(
+            "Close it",
+            width="stretch",
+            type="primary" if row["suggested"] == cleanup.CLOSE else "secondary",
+            on_click=_decide,
+            args=(cleanup.CLOSE,),
+            key=f"triage_close_{row['key']}",
+        )
+        buttons[1].button(
+            "Keep",
+            width="stretch",
+            type="primary" if row["suggested"] == cleanup.KEEP else "secondary",
+            on_click=_decide,
+            args=(cleanup.KEEP,),
+            key=f"triage_keep_{row['key']}",
+        )
+        buttons[2].button(
+            "Needs an owner",
+            width="stretch",
+            on_click=_decide,
+            args=(cleanup.NEEDS_OWNER,),
+            key=f"triage_owner_{row['key']}",
+        )
+        buttons[3].button(
+            "Skip",
+            width="stretch",
+            on_click=_decide,
+            args=(cleanup.SKIP,),
+            key=f"triage_skip_{row['key']}",
+        )
+        if buttons[4].button("Back", width="stretch", disabled=position == 0):
+            st.session_state[_TRIAGE_CURSOR_KEY] = keys[position - 1]
+            st.rerun()
+
+        st.caption(f"Ticket {position + 1} of {len(queue)}")
+
+    _render_triage_decisions(queue, decisions)
+
+
+def _render_triage_decisions(queue: pd.DataFrame, decisions: dict[str, str]) -> None:
+    """The decisions taken so far, and the one place they can reach Jira."""
+    # Decisions outlive the queue they were made in, so count the closures waiting
+    # out of sight rather than letting Apply look like the whole outstanding job.
+    visible = set(queue["key"].astype(str))
+    elsewhere = sum(
+        1
+        for key, choice in st.session_state.get(_TRIAGE_DECISIONS_KEY, {}).items()
+        if choice == cleanup.CLOSE and key not in visible
+    )
+    if elsewhere:
+        st.caption(
+            f"{elsewhere} more ticket(s) marked Close sit outside this queue and "
+            "are untouched by Apply here; switch queue or widen the filters to "
+            "reach them."
+        )
+    if not decisions:
+        return
+
+    decided = queue[queue["key"].isin(decisions)].copy()
+    decided["decision"] = decided["key"].map(decisions)
+    decided["key_url"] = decided["key"].map(_jira_ticket_url)
+
+    with st.expander(f"Decisions so far ({len(decided)})", expanded=False):
+        st.dataframe(
+            decided[["key_url", "decision", "summary", "assignee", "ticket_age_days", "idle_days"]],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "key_url": st.column_config.LinkColumn(
+                    "Key", display_text=JIRA_KEY_DISPLAY_PATTERN
+                ),
+                "decision": st.column_config.TextColumn("Decision"),
+                "summary": st.column_config.TextColumn("Summary"),
+                "assignee": st.column_config.TextColumn("Assignee"),
+                "ticket_age_days": st.column_config.NumberColumn("Age (days)", format="%.0f"),
+                "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.0f"),
+            },
+        )
+        st.download_button(
+            "Download decisions (CSV)",
+            data=decided[["key", "decision", "summary", "assignee", "status", "ticket_age_days"]]
+            .to_csv(index=False)
+            .encode("utf-8"),
+            file_name="jira_cleanup_decisions.csv",
+            mime="text/csv",
+        )
+        if st.button("Start over", key="triage_reset"):
+            st.session_state[_TRIAGE_DECISIONS_KEY] = {}
+            st.session_state[_TRIAGE_CURSOR_KEY] = None
+            st.rerun()
+
+    to_close = cleanup.pending_closures(queue, decisions)
+    if not to_close:
+        return
+
+    st.markdown(f"##### Apply {len(to_close)} closure(s) to Jira")
+    st.caption(
+        "Each project runs its own workflow, so the closing status is resolved per "
+        "ticket from the transitions Jira actually offers it, preferring "
+        + " / ".join(cleanup.CLOSING_STATUS_PREFERENCE[:4])
+        + " over Done so cleanup stays distinguishable from real completions."
+    )
+    # Named, not just counted: decisions outlive the queue they were made in, so
+    # the reviewer has to be able to see exactly which tickets a click will move.
+    with st.expander(f"Which {len(to_close)} tickets", expanded=False):
+        st.write(", ".join(to_close))
+    apply_columns = st.columns([3, 1])
+    confirmed = apply_columns[0].checkbox(
+        f"Yes, write these {len(to_close)} changes to Jira", value=False
+    )
+    if not apply_columns[1].button("Apply", type="primary", disabled=not confirmed):
+        return
+
+    client = JiraClient.resolve(creds_path=CREDS_PATH, profile_name=PROFILE_NAME)
+    succeeded: list[str] = []
+    failed: dict[str, str] = {}
+    progress = st.progress(0.0, text="Resolving transitions...")
+    for index, key in enumerate(to_close, start=1):
+        progress.progress(index / len(to_close), text=f"Closing {key} ({index}/{len(to_close)})")
+        try:
+            offered = [t.get("to_status", "") for t in client.get_issue_transitions(key)]
+        except Exception as error:  # noqa: BLE001
+            failed[key] = f"could not read transitions ({error})"
+            continue
+        target = cleanup.closing_status(offered)
+        if target is None:
+            failed[key] = "no closing transition available (offers: " + ", ".join(offered) + ")"
+            continue
+        moved, errors, _ = _apply_action_with_audit(
+            client=client,
+            action_type="status",
+            selected_keys=[key],
+            target=target,
+        )
+        succeeded.extend(moved)
+        failed.update(errors)
+    progress.empty()
+
+    if succeeded:
+        st.success(f"Closed {len(succeeded)}: {', '.join(succeeded)}")
+        for key in succeeded:
+            st.session_state[_TRIAGE_DECISIONS_KEY].pop(key, None)
+        st.cache_data.clear()
+    if failed:
+        st.error(
+            "Could not close "
+            + "; ".join(f"{key}: {reason}" for key, reason in failed.items())
+        )
+        return
+    if succeeded:
+        # Redraw from fresh Jira data, otherwise the queue keeps offering the
+        # tickets that were just closed. Held back when something failed, so the
+        # reader gets to read why before the page moves.
+        st.rerun()
+
+
+def _render_estimate_policy(df: pd.DataFrame) -> None:
+    """Who is honouring "estimate it before it leaves Backlog"."""
+    st.subheader("Estimate Policy")
+    st.caption(
+        "Every ticket past Backlog is expected to carry an estimate. Backlog "
+        "statuses are exempt (configurable via JIRA_BACKLOG_STATUSES)."
+    )
+
+    scored = estimate_policy(df, BACKLOG_STATUSES)
+    in_scope = scored[scored["policy_applies"].fillna(False).astype(bool)] if not scored.empty else scored
+    if in_scope.empty:
+        st.info("No tickets past Backlog in the current scope.")
+        return
+
+    violations = in_scope[in_scope["policy_violation"].astype(bool)]
+    compliance_pct = (1 - len(violations) / len(in_scope)) * 100.0
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Policy Compliance", f"{compliance_pct:.0f}%")
+    c2.metric("Missing Estimate", len(violations))
+    c3.metric("Estimated Work", f"{in_scope['estimate_hours'].sum():.0f}h")
+
+    rollup = policy_compliance_by_owner(scored)
+    if not rollup.empty:
+        st.dataframe(
+            rollup,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "assignee": st.column_config.TextColumn("Assignee"),
+                "past_backlog": st.column_config.NumberColumn("Past Backlog"),
+                "missing_estimate": st.column_config.NumberColumn("Missing Estimate"),
+                "compliance_pct": st.column_config.ProgressColumn(
+                    "Compliance",
+                    format="%.0f%%",
+                    min_value=0,
+                    max_value=100,
+                ),
+                "estimated_hours": st.column_config.NumberColumn("Estimated (h)", format="%.1f"),
+            },
+        )
+
+    if violations.empty:
+        st.success("Every ticket past Backlog has an estimate.")
+        return
+
+    offenders = violations.sort_values(["assignee", "key"]).copy()
+    offenders["key_url"] = offenders["key"].map(_jira_ticket_url)
+    with st.expander(f"Tickets missing an estimate ({len(offenders)})", expanded=False):
+        st.dataframe(
+            offenders[["key_url", "summary", "assignee", "status", "idle_days"]],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "key_url": st.column_config.LinkColumn("Key", display_text=JIRA_KEY_DISPLAY_PATTERN),
+                "summary": st.column_config.TextColumn("Summary"),
+                "assignee": st.column_config.TextColumn("Assignee"),
+                "status": st.column_config.TextColumn("Status"),
+                "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
+            },
+        )
+    st.download_button(
+        "Download missing-estimate tickets (CSV)",
+        data=offenders[["key", "summary", "assignee", "status", "idle_days"]]
+        .to_csv(index=False)
+        .encode("utf-8"),
+        file_name="jira_missing_estimates.csv",
+        mime="text/csv",
+    )
+
+
+def _render_stale_cleanup(df: pd.DataFrame) -> None:
+    """Old tickets ranked by how abandoned they look, so they can be cleared out."""
+    st.subheader("Stale & Abandoned")
+    st.caption(
+        "Tickets idle past the threshold, ranked by how many neglect signals they "
+        "carry. The top of this list is the safest to close or send back to Backlog. "
+        "Backlog tickets are always included here regardless of the Include Backlogs "
+        "filter - that is where rot accumulates."
+    )
+    if df.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    threshold = st.slider(
+        "Idle at least (days)",
+        min_value=30,
+        max_value=365,
+        value=DEFAULT_STALE_DAYS,
+        step=15,
+    )
+    candidates = stale_candidates(df, idle_days=threshold, backlog_statuses=BACKLOG_STATUSES)
+    if candidates.empty:
+        st.success(f"No ticket has been idle for {threshold}+ days.")
+        return
+
+    unassigned = candidates["stale_reasons"].str.contains("unassigned").sum()
+    never_started = candidates["stale_reasons"].str.contains("never started").sum()
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"Idle {threshold}d+", len(candidates))
+    c2.metric("Unassigned", int(unassigned))
+    c3.metric("Never Started", int(never_started))
+
+    display = candidates.copy()
+    display["key_url"] = display["key"].map(_jira_ticket_url)
+    st.dataframe(
+        display[
+            [
+                "key_url",
+                "summary",
+                "assignee",
+                "status",
+                "idle_days",
+                "ticket_age_days",
+                "stale_reasons",
+            ]
+        ],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "key_url": st.column_config.LinkColumn("Key", display_text=JIRA_KEY_DISPLAY_PATTERN),
+            "summary": st.column_config.TextColumn("Summary"),
+            "assignee": st.column_config.TextColumn("Assignee"),
+            "status": st.column_config.TextColumn("Status"),
+            "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
+            "ticket_age_days": st.column_config.NumberColumn("Age (days)", format="%.1f"),
+            "stale_reasons": st.column_config.TextColumn("Why it looks abandoned"),
+        },
+    )
+    st.download_button(
+        "Download stale tickets (CSV)",
+        data=display[
+            ["key", "summary", "assignee", "status", "idle_days", "ticket_age_days", "stale_reasons"]
+        ]
+        .to_csv(index=False)
+        .encode("utf-8"),
+        file_name="jira_stale_tickets.csv",
+        mime="text/csv",
+    )
 
 
 def _fmt_seconds(secs: float) -> str:
@@ -201,6 +1104,38 @@ def _parse_estimate_to_seconds(value: str) -> float | None:
     for num, unit in tokens:
         total += int(num) * unit_seconds[unit]
     return total
+
+
+def _transition_sample_keys(editor_df: pd.DataFrame) -> tuple[str, ...]:
+    """Pick the tickets to query transitions for, bounded by TRANSITION_LOOKUP_LIMIT.
+
+    One request goes to Jira per key, so an org-wide table cannot query every row.
+    One ticket per status that no sprint member holds is reserved first, so the
+    Status dropdown keeps offering those moves even for a sprint large enough to
+    exhaust the budget on its own; sprint members fill whatever remains.
+    """
+    frame = editor_df.dropna(subset=["key"]).copy()
+    if frame.empty:
+        return ()
+    frame["key"] = frame["key"].astype(str)
+    frame["status"] = frame.get("status", "").fillna("").astype(str).str.strip()
+
+    in_sprint = (
+        frame["include"].fillna(False).astype(bool)
+        if "include" in frame.columns
+        else pd.Series(True, index=frame.index)
+    )
+    sprint_statuses = set(frame.loc[in_sprint, "status"])
+    outside = frame.loc[~in_sprint & ~frame["status"].isin(sprint_statuses)]
+    reserved = [
+        sorted(group["key"].tolist())[0]
+        for _, group in outside.groupby("status", sort=True)
+    ][:TRANSITION_LOOKUP_LIMIT]
+
+    budget = TRANSITION_LOOKUP_LIMIT - len(reserved)
+    keys = reserved + sorted(frame.loc[in_sprint, "key"].unique().tolist())[:budget]
+
+    return tuple(sorted(set(keys)))
 
 
 def _render_sprint_capacity(
@@ -390,24 +1325,24 @@ def _render_sprint_capacity(
     ) or "none"
     editor_widget_key = f"{editor_widget_key_base}_{sort_signature}"
 
-    visible_keys = tuple(sorted(display_editor_df["key"].dropna().astype(str).unique().tolist()))
+    visible_keys = _transition_sample_keys(display_editor_df)
     current_statuses = sorted(display_editor_df["status"].dropna().astype(str).str.strip().unique().tolist())
     try:
         transition_statuses = fetch_available_transition_statuses(
-            "~/.creds/vinovoss.yml",
-            "ML-TEAM-MANAGEMENT",
+            CREDS_PATH,
+            PROFILE_NAME,
             visible_keys,
         )
     except Exception:
         transition_statuses = []
     _all_statuses = sorted(set(current_statuses) | set(transition_statuses))
     try:
-        _all_priorities = fetch_all_priorities("~/.creds/vinovoss.yml", "ML-TEAM-MANAGEMENT")
+        _all_priorities = fetch_all_priorities(CREDS_PATH, PROFILE_NAME)
     except Exception:
         _all_priorities = ["Highest", "Urgent", "High", "Normal", "Medium", "Low", "Lowest"]
 
     try:
-        all_users = fetch_all_users("~/.creds/vinovoss.yml", "ML-TEAM-MANAGEMENT")
+        all_users = fetch_all_users(CREDS_PATH, PROFILE_NAME)
     except Exception:
         all_users = []
 
@@ -517,7 +1452,11 @@ def _render_sprint_capacity(
 
     # Restore key column from jira_key_link (extract key from URL)
     edited_tickets = edited_output.copy()
-    edited_tickets["key"] = edited_tickets["jira_key_link"].apply(lambda url: url.split("/")[-1])
+    # unquote mirrors the encoding _jira_ticket_url applies, so the key that goes
+    # back to Jira is the key that came out of it.
+    edited_tickets["key"] = edited_tickets["jira_key_link"].apply(
+        lambda url: unquote(str(url).split("/")[-1])
+    )
     edited_tickets = edited_tickets.drop(columns=["jira_key_link"])
 
     # Build edit dicts directly from the data_editor output (edited_tickets) for the displayed rows,
@@ -767,9 +1706,9 @@ def _render_sprint_capacity(
         st.rerun()
 
     if apply_sprint_selection:
-        client = JiraClient.from_yaml(
-            creds_path="~/.creds/vinovoss.yml",
-            profile_name="ML-TEAM-MANAGEMENT",
+        client = JiraClient.resolve(
+            creds_path=CREDS_PATH,
+            profile_name=PROFILE_NAME,
         )
         with st.spinner("Updating sprint membership..."):
             parts: list[str] = []
@@ -936,10 +1875,8 @@ def _render_sprint_capacity(
 
     if workload_statuses:
         preview_workload = preview_scoped[preview_scoped["status_live"].isin(workload_statuses)].copy()
-        all_sprint_workload = all_sprint_tickets[all_sprint_tickets["status_live"].isin(workload_statuses)].copy()
     else:
         preview_workload = preview_scoped.iloc[0:0].copy()
-        all_sprint_workload = all_sprint_tickets.iloc[0:0].copy()
 
     c1, c2, c3 = st.columns(3)
     c1.markdown(
@@ -995,20 +1932,122 @@ def _render_sprint_capacity(
         hide_index=True,
     )
 
+    _render_hourly_capacity(scoped, preview_scoped)
 
+
+def _sprint_window(sprint_df: pd.DataFrame) -> tuple[object, object]:
+    """Start and end of a sprint, taken from a single row so they cannot mismatch."""
+    if not {"sprint_start", "sprint_end"}.issubset(sprint_df.columns):
+        return None, None
+    dated = sprint_df[sprint_df["sprint_start"].notna() & sprint_df["sprint_end"].notna()]
+    if dated.empty:
+        return None, None
+    row = dated.iloc[0]
+    start = pd.to_datetime(row["sprint_start"], errors="coerce", utc=True)
+    end = pd.to_datetime(row["sprint_end"], errors="coerce", utc=True)
+    if pd.isna(start) or pd.isna(end):
+        return None, None
+    return start, end
+
+
+def _render_hourly_capacity(sprint_df: pd.DataFrame, in_sprint_df: pd.DataFrame) -> None:
+    """Committed hours against each person's declared availability.
+
+    Part-time and hourly engineers make raw committed totals unreadable, so the
+    hours per week come from JIRA_WEEKLY_HOURS and are spread across the
+    sprint's own working days.
+    """
+    st.markdown("##### Availability vs Commitment")
+    if not WEEKLY_HOURS:
+        st.caption(
+            "Set JIRA_WEEKLY_HOURS (e.g. \"Tam=10,Shivanand=20\") to compare committed "
+            "hours against what each person is actually available for."
+        )
+        return
+
+    start, end = _sprint_window(sprint_df)
+    days = working_days(start, end)
+    if not days:
+        st.caption(
+            "This sprint has no start/end dates in Jira, so available hours cannot "
+            "be derived. Set the sprint dates on the board."
+        )
+        return
+
+    if in_sprint_df.empty:
+        committed = pd.Series(dtype="float64")
+    else:
+        owners = in_sprint_df["assignee_live"].fillna("Unassigned").astype(str).str.strip()
+        committed = (
+            pd.to_numeric(in_sprint_df["estimate_seconds_live"], errors="coerce")
+            .fillna(0.0)
+            .div(3600.0)
+            .groupby(owners.mask(owners.eq(""), "Unassigned"))
+            .sum()
+        )
+    # The roster has to follow the scope: outside it a person's tickets are not
+    # loaded, so they would read as idle when they are merely filtered out.
+    in_scope = st.session_state.get(_SCOPE_ASSIGNEES_KEY)
+    roster = (
+        WEEKLY_HOURS
+        if in_scope is None
+        else {
+            name: hours
+            for name, hours in WEEKLY_HOURS.items()
+            # Roster names are short ("Farid"), scope names are Jira display
+            # names ("Farid Shahidi"), so compare them the same loose way.
+            if any(
+                match_weekly_hours(person, {name: hours}) is not None
+                for person in in_scope
+            )
+        }
+    )
+    table = capacity_table(committed, roster, start, end)
+    if table.empty:
+        st.caption("No assignees to report on for this sprint.")
+        return
+
+    st.caption(
+        f"{days:.0f} working day(s) in this sprint "
+        f"({pd.Timestamp(start).date()} to {pd.Timestamp(end).date()}). "
+        "Committed covers every ticket in the sprint that the current scope and "
+        "filters keep, not just the statuses counted in hours above. Utilization is "
+        'committed / available; "Unknown" means no weekly hours are declared for '
+        'that person, and "Ambiguous roster name" means a declaration like '
+        '"Dan=40" matches more than one person in Jira, so it is withheld rather '
+        "than handed to both - spell that entry as the full Jira name to fix it."
+    )
+    st.dataframe(
+        table,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Committed (h)": st.column_config.NumberColumn(format="%.1f"),
+            "Available (h)": st.column_config.NumberColumn(format="%.1f"),
+            "Utilization %": st.column_config.NumberColumn(format="%.0f%%"),
+            "Delta (h)": st.column_config.NumberColumn(
+                format="%.1f",
+                help="Available minus committed; negative means over-committed.",
+            ),
+        },
+    )
+
+
+# Tinted background with a saturated text colour of the same hue, so the pills
+# sit on the light theme the KPI cards are drawn for.
 _STAGE_COLORS: dict[str, tuple[str, str]] = {
     # (background, text)
-    "Backlog":               ("#2a2a3d", "#8888aa"),
-    "DISCUSSION NEEDED":     ("#3d2a2a", "#cc8888"),
-    "To Do":                 ("#1e3a5f", "#6aaad4"),
-    "In Progress":           ("#1a3d2b", "#5cba82"),
-    "IN DEV ENV":            ("#1e3a5f", "#58a6e6"),
-    "Code Review":           ("#2e2a3d", "#9b88cc"),
-    "Review in Staging":     ("#3d3520", "#c8a840"),
-    "Ready for Production":  ("#1a3d1e", "#4ccc5a"),
-    "Review":                ("#3d2a1a", "#d4834a"),
+    "Backlog":               ("#eef0f5", "#525c73"),
+    "DISCUSSION NEEDED":     ("#fdecec", "#b42318"),
+    "To Do":                 ("#e8f0fd", "#1d4ed8"),
+    "In Progress":           ("#e6f6ec", "#15803d"),
+    "IN DEV ENV":            ("#e6f2fd", "#0369a1"),
+    "Code Review":           ("#f1ecfd", "#6d28d9"),
+    "Review in Staging":     ("#fdf3e0", "#a16207"),
+    "Ready for Production":  ("#e7f8ea", "#15803d"),
+    "Review":                ("#fdefe5", "#c2410c"),
 }
-_DEFAULT_PILL: tuple[str, str] = ("#2a2a2a", "#aaaaaa")
+_DEFAULT_PILL: tuple[str, str] = ("#f1f2f4", "#4b5563")
 
 
 def _render_status_pills(status_series: pd.Series) -> None:
@@ -1026,7 +2065,8 @@ def _render_status_pills(status_series: pd.Series) -> None:
             f'font-size:0.78rem;font-weight:600;white-space:nowrap;'
             f'border:1px solid {fg}22;'
             f'">'
-            f'{status} <span style="opacity:0.75;font-weight:400;">({count})</span>'
+            f'{html.escape(str(status))} '
+            f'<span style="opacity:0.75;font-weight:400;">({int(count)})</span>'
             f'</span>'
         )
     pills_html += "</div>"
@@ -1219,12 +2259,19 @@ def _apply_action_with_audit(
             )
 
     operation = finalize_operation(operation, items)
-    append_operation(operation)
+    log_error = append_operation(operation)
+    if log_error:
+        st.warning(
+            "The changes went through, but the audit log could not be written, "
+            f"so this batch cannot be reverted from the dashboard - {log_error}"
+        )
     return succeeded, failed, operation
 
 
 def main() -> None:
     st.set_page_config(page_title="Jira Ticket Health Dashboard", layout="wide")
+    require_password()
+    inject_styles()
     st.title("Jira Ticket Health Dashboard")
     st.caption("Visual monitoring for stale, idle, and high-risk tickets.")
 
@@ -1233,14 +2280,14 @@ def main() -> None:
     if refresh_clicked:
         st.cache_data.clear()
 
-    jql = DEFAULT_JQL
-    max_results = 1000
+    jql = JQL
+    max_results = MAX_RESULTS
     page_size = 100
 
     try:
         raw_df = fetch_tickets(
-            creds_path="~/.creds/vinovoss.yml",
-            profile_name="ML-TEAM-MANAGEMENT",
+            creds_path=CREDS_PATH,
+            profile_name=PROFILE_NAME,
             jql=jql,
             max_results=max_results,
             page_size=page_size,
@@ -1257,28 +2304,52 @@ def main() -> None:
         st.warning("No tickets returned for the current JQL.")
         st.stop()
 
-    df = add_ticket_health_fields(raw_df)
+    if len(raw_df) >= max_results:
+        st.warning(
+            f"Showing the first {max_results} tickets of a larger result set - the JQL "
+            "orders by least recently updated, so newer tickets are missing. Narrow "
+            "JIRA_DASHBOARD_JQL or raise JIRA_MAX_RESULTS."
+        )
 
-    st.subheader("Filters")
-    f1, f2, f3, f4, f5 = st.columns(5)
-    assignees = sorted(df["assignee"].dropna().unique().tolist())
+    df = add_priority_score(add_ticket_health_fields(raw_df))
+
+    # "Unassigned" is Jira's placeholder, not a colleague: offering it here would
+    # inflate the head-count and let someone "focus" on a person who does not
+    # exist. Ownerless work is reached through the cleanup queue and the
+    # unassigned KPI instead.
+    assignees = sorted(
+        name
+        for name in df["assignee"].dropna().unique().tolist()
+        if str(name).strip().lower() not in _NO_OWNER_NAMES
+    )
     statuses = sorted(df["status"].dropna().unique().tolist())
     priorities = sorted(df["priority"].dropna().unique().tolist())
 
-    ML_TEAM_MEMBERS = ["Tam", "Shivanand", "Mehdi Ordikhani"]
-    default_assignees = [m for m in ML_TEAM_MEMBERS if m in assignees]
-    selected_assignees = f1.multiselect("Assignee", options=assignees, default=default_assignees)
-    selected_statuses = f2.multiselect("Status", options=statuses, default=[])
-    selected_priorities = f3.multiselect("Priority", options=priorities, default=[])
-    min_idle = f4.slider("Min idle days", min_value=0, max_value=180, value=0)
-    min_age = f5.slider("Min ticket age", min_value=0, max_value=365, value=0)
+    with st.sidebar:
+        st.header("Scope")
+        scope = st.radio(
+            "View",
+            options=[SCOPE_ORG, SCOPE_TEAM, SCOPE_INDIVIDUAL],
+            help=(
+                "Organization shows every assignee in the JQL scope; "
+                "Team pre-selects the configured team members; "
+                "Individual focuses on a single assignee."
+            ),
+        )
+        selected_assignees = _resolve_scope_assignees(scope, assignees)
+        st.session_state[_SCOPE_ASSIGNEES_KEY] = (
+            None if selected_assignees is None else set(selected_assignees)
+        )
 
-    color_by = st.radio("Bubble color", options=["priority", "assignee"], horizontal=True)
-    include_backlogs = st.checkbox("Include Backlogs", value=False)
+        st.header("Filters")
+        selected_statuses = st.multiselect("Status", options=statuses, default=[])
+        selected_priorities = st.multiselect("Priority", options=priorities, default=[])
+        min_idle = st.slider("Min idle days", min_value=0, max_value=180, value=0)
+        min_age = st.slider("Min ticket age", min_value=0, max_value=365, value=0)
+        include_backlogs = st.checkbox("Include Backlogs", value=False)
+        color_by = st.radio("Bubble color", options=["priority", "assignee"], horizontal=True)
 
     filtered = df.copy()
-    if selected_assignees:
-        filtered = filtered[filtered["assignee"].isin(selected_assignees)]
     if selected_statuses:
         filtered = filtered[filtered["status"].isin(selected_statuses)]
     if selected_priorities:
@@ -1286,7 +2357,39 @@ def main() -> None:
 
     filtered = filtered[(filtered["idle_days"] >= min_idle) & (filtered["ticket_age_days"] >= min_age)]
 
-    _render_metrics(filtered, include_backlogs=include_backlogs)
+    # Ownerless work belongs to nobody, so no assignee scope can contain it; the
+    # cleanup section keeps this pre-scope frame to feed its unassigned queue.
+    unscoped = filtered
+    if selected_assignees is not None:
+        filtered = filtered[filtered["assignee"].isin(selected_assignees)]
+
+    _render_metrics(
+        filtered,
+        include_backlogs=include_backlogs,
+        unassigned_source=unscoped if selected_assignees is not None else None,
+    )
+
+    st.divider()
+    _render_team_overview(_metrics_df(filtered, include_backlogs))
+
+    st.divider()
+    _render_epics(_metrics_df(filtered, include_backlogs))
+
+    st.divider()
+    # Backlog-inclusive on purpose: the backlog is what this section clears out.
+    _render_cleanup(filtered, unassigned_source=unscoped)
+
+    st.divider()
+    _render_scope_breakdown(filtered, scope=scope, include_backlogs=include_backlogs)
+
+    st.divider()
+    _render_priority_queue(filtered, include_backlogs=include_backlogs)
+
+    st.divider()
+    _render_estimate_policy(filtered)
+
+    st.divider()
+    _render_stale_cleanup(filtered)
 
     restore_requested = bool(st.session_state.pop("restore_sprint_ticket_table", False))
     bubble_chart_version = int(st.session_state.get("bubble_chart_version", 0))
@@ -1330,9 +2433,11 @@ def main() -> None:
         help="Default action keeps the first cleanup flow: None priority -> Normal.",
     )
 
-    status_options = sorted(filtered["status"].dropna().astype(str).unique().tolist())
-    normalized_priority = filtered["priority"].fillna("").astype(str).str.strip().str.lower()
-    none_priority_keys = sorted(filtered[normalized_priority.isin(["", "none"])]["key"].tolist())
+    # Bulk writes must not reach tickets the user has hidden with Include Backlogs.
+    action_df = _metrics_df(filtered, include_backlogs)
+    status_options = sorted(action_df["status"].dropna().astype(str).unique().tolist())
+    normalized_priority = action_df["priority"].fillna("").astype(str).str.strip().str.lower()
+    none_priority_keys = sorted(action_df[normalized_priority.isin(["", "none"])]["key"].tolist())
 
     with st.container(border=True):
         if action_type == "Set None-priority tickets":
@@ -1345,10 +2450,16 @@ def main() -> None:
                 suffix = " ..." if len(none_priority_keys) > 15 else ""
                 st.caption(f"Sample: {preview}{suffix}")
 
+            default_keys = none_priority_keys[:BULK_ACTION_DEFAULT_LIMIT]
+            if len(none_priority_keys) > len(default_keys):
+                st.caption(
+                    f"Only the first {BULK_ACTION_DEFAULT_LIMIT} are pre-selected; "
+                    "add more explicitly if you mean to update them."
+                )
             selected_keys = st.multiselect(
                 "Tickets to update",
                 options=none_priority_keys,
-                default=none_priority_keys,
+                default=default_keys,
                 help="Remove any tickets you do not want to update.",
             )
 
@@ -1371,11 +2482,17 @@ def main() -> None:
                 to_options = [s for s in status_options if s != source_status] or status_options
                 target_status = st.selectbox("To status", options=to_options, index=0)
 
-                source_keys = sorted(filtered[filtered["status"] == source_status]["key"].tolist())
+                source_keys = sorted(action_df[action_df["status"] == source_status]["key"].tolist())
+                default_source_keys = source_keys[:BULK_ACTION_DEFAULT_LIMIT]
+                if len(source_keys) > len(default_source_keys):
+                    st.caption(
+                        f"Only the first {BULK_ACTION_DEFAULT_LIMIT} are pre-selected; "
+                        "add more explicitly if you mean to update them."
+                    )
                 selected_keys = st.multiselect(
                     "Tickets to update",
                     options=source_keys,
-                    default=source_keys,
+                    default=default_source_keys,
                     help="Only tickets currently in the selected source status are listed.",
                 )
                 target_label = f"status '{source_status}' -> '{target_status}'"
@@ -1387,9 +2504,9 @@ def main() -> None:
         )
 
     if apply_suggestion and selected_keys:
-        client = JiraClient.from_yaml(
-            creds_path="~/.creds/vinovoss.yml",
-            profile_name="ML-TEAM-MANAGEMENT",
+        client = JiraClient.resolve(
+            creds_path=CREDS_PATH,
+            profile_name=PROFILE_NAME,
         )
         with st.spinner(f"Updating {len(selected_keys)} tickets..."):
             if action_type == "Set None-priority tickets":
@@ -1450,9 +2567,9 @@ def main() -> None:
             revert_clicked = st.button("Revert selected operation", disabled=not confirm_revert)
 
             if revert_clicked:
-                client = JiraClient.from_yaml(
-                    creds_path="~/.creds/vinovoss.yml",
-                    profile_name="ML-TEAM-MANAGEMENT",
+                client = JiraClient.resolve(
+                    creds_path=CREDS_PATH,
+                    profile_name=PROFILE_NAME,
                 )
 
                 revert_succeeded: list[str] = []

@@ -1,5 +1,5 @@
 pandas>=2.2.0
 requests>=2.31.0
-streamlit>=1.35.0
+streamlit>=1.49.0
 plotly>=5.20.0
 pyyaml>=6.0.0

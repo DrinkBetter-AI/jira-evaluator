@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
 from typing import Any, Iterable
@@ -25,9 +26,14 @@ DEFAULT_FIELDS = [
     "statuscategorychangedate",
     "timetracking",
     "customfield_10020",
+    "parent",
+    "project",
 ]
 
 _ML_SPRINT_NAME_RE = re.compile(r"^ML\s+Sprint\s+\d+$", re.IGNORECASE)
+
+DEFAULT_CREDS_PATH = "~/.creds/vinovoss.yml"
+DEFAULT_PROFILE_NAME = "ML-TEAM-MANAGEMENT"
 
 
 def _is_ml_sprint_name(value: Any) -> bool:
@@ -110,16 +116,33 @@ def _first_non_empty(mapping: dict[str, Any], keys: Iterable[str]) -> Any:
     return None
 
 
-def _normalize_base_url(base_url: str) -> str:
+def normalize_base_url(base_url: str) -> str:
     cleaned = base_url.strip().rstrip("/")
     if cleaned.startswith("http://") or cleaned.startswith("https://"):
         return cleaned
     return f"https://{cleaned}"
 
 
+def load_jira_env() -> dict[str, str] | None:
+    """Read Jira credentials from the environment, or return None when unset.
+
+    Requires JIRA_BASE_URL, JIRA_EMAIL and JIRA_API_TOKEN to all be present.
+    """
+    base_url = os.getenv("JIRA_BASE_URL", "").strip()
+    email = os.getenv("JIRA_EMAIL", "").strip()
+    api_token = os.getenv("JIRA_API_TOKEN", "").strip()
+    if not (base_url and email and api_token):
+        return None
+    return {
+        "base_url": normalize_base_url(base_url),
+        "email": email,
+        "api_token": api_token,
+    }
+
+
 def load_jira_profile(
-    creds_path: str | Path = "~/.creds/vinovoss.yml",
-    profile_name: str = "ML-TEAM-MANAGEMENT",
+    creds_path: str | Path = DEFAULT_CREDS_PATH,
+    profile_name: str = DEFAULT_PROFILE_NAME,
 ) -> dict[str, str]:
     path = Path(creds_path).expanduser()
     if not path.exists():
@@ -149,7 +172,7 @@ def load_jira_profile(
         )
 
     return {
-        "base_url": _normalize_base_url(str(base_url)),
+        "base_url": normalize_base_url(str(base_url)),
         "email": str(email),
         "api_token": str(api_token),
     }
@@ -164,10 +187,27 @@ class JiraClient:
     @classmethod
     def from_yaml(
         cls,
-        creds_path: str | Path = "~/.creds/vinovoss.yml",
-        profile_name: str = "ML-TEAM-MANAGEMENT",
+        creds_path: str | Path = DEFAULT_CREDS_PATH,
+        profile_name: str = DEFAULT_PROFILE_NAME,
     ) -> "JiraClient":
-        cfg = load_jira_profile(creds_path=creds_path, profile_name=profile_name)
+        """Build a client from the named YAML profile, as asked for."""
+        return cls(**load_jira_profile(creds_path=creds_path, profile_name=profile_name))
+
+    @classmethod
+    def resolve(
+        cls,
+        creds_path: str | Path = DEFAULT_CREDS_PATH,
+        profile_name: str = DEFAULT_PROFILE_NAME,
+    ) -> "JiraClient":
+        """Environment credentials if the deployment supplies them, else the profile.
+
+        Kept apart from ``from_yaml`` so a caller naming a specific profile gets
+        that profile: on Cloud Run there is no credentials file and the env vars
+        are the only source, while locally the profile still wins by absence.
+        """
+        cfg = load_jira_env()
+        if cfg is None:
+            cfg = load_jira_profile(creds_path=creds_path, profile_name=profile_name)
         return cls(**cfg)
 
     def _session(self) -> requests.Session:
@@ -541,6 +581,14 @@ class JiraClient:
             issue_type = fields.get("issuetype") or {}
             resolution = fields.get("resolution") or {}
             timetracking = fields.get("timetracking") or {}
+            parent = fields.get("parent") or {}
+            parent_fields = parent.get("fields") or {}
+            parent_status = parent_fields.get("status") or {}
+            # ``parent`` is the epic for stories and tasks but the containing
+            # story for a sub-task, so only an Epic parent is an epic link.
+            parent_type = (parent_fields.get("issuetype") or {}).get("name") or ""
+            is_epic_parent = parent_type.strip().lower() == "epic"
+            project = fields.get("project") or {}
             time_spent_sec = timetracking.get("timeSpentSeconds") or 0
             orig_est_sec = timetracking.get("originalEstimateSeconds") or 0
             completion_pct = round(time_spent_sec / orig_est_sec * 100, 1) if orig_est_sec > 0 else None
@@ -566,9 +614,15 @@ class JiraClient:
             sprint_state = chosen_sprint.get("state") if chosen_sprint else None
             sprint_id = chosen_sprint.get("id") if chosen_sprint else None
             sprint_board_id = chosen_sprint.get("boardId") if chosen_sprint else None
+            # Sprint window drives per-person available hours in the capacity view.
+            sprint_start = chosen_sprint.get("startDate") if chosen_sprint else None
+            sprint_end = chosen_sprint.get("endDate") if chosen_sprint else None
 
-            # Carry-over means the ticket is currently planned/in-flight and was also present in prior closed sprints.
-            carry_over_count = len(closed_sprints) if (future_sprints or active_sprints) else 0
+            # Closed sprints this still-open ticket has already passed through. Not
+            # conditioned on being in a sprint now: a ticket carried through five
+            # sprints and then dropped out of planning is the most abandoned case
+            # there is, and scoring it zero would hide exactly that.
+            carry_over_count = len(closed_sprints)
             last_meaningful_activity = _extract_last_meaningful_activity(issue)
 
             rows.append(
@@ -586,6 +640,13 @@ class JiraClient:
                     "last_meaningful_activity": last_meaningful_activity,
                     "due_date": fields.get("duedate"),
                     "issue_type": issue_type.get("name"),
+                    "project_key": project.get("key"),
+                    "project_name": project.get("name"),
+                    "parent_key": parent.get("key"),
+                    "parent_type": parent_type or None,
+                    "epic_key": parent.get("key") if is_epic_parent else None,
+                    "epic_summary": parent_fields.get("summary") if is_epic_parent else None,
+                    "epic_status": parent_status.get("name") if is_epic_parent else None,
                     "labels": ", ".join(fields.get("labels", [])),
                     "resolution": resolution.get("name"),
                     "status_category_changed_date": fields.get("statuscategorychangedate"),
@@ -598,6 +659,8 @@ class JiraClient:
                     "sprint_name": sprint_name,
                     "sprint_state": sprint_state,
                     "sprint_board_id": sprint_board_id,
+                    "sprint_start": sprint_start,
+                    "sprint_end": sprint_end,
                     "carry_over_count": carry_over_count,
                     "ticket_url": f"{self.base_url}/browse/{issue.get('key')}",
                 }
