@@ -8,11 +8,16 @@ from __future__ import annotations
 
 import hmac
 import os
+import time
 
 import streamlit as st
 
 PASSWORD_ENV = "DASHBOARD_PASSWORD"
 _SESSION_KEY = "_access_granted"
+_ATTEMPTS_KEY = "_access_attempts"
+# Each wrong guess costs a second more than the last, capped so a locked-out
+# visitor is not stuck forever; enough to make guessing pointless.
+_MAX_BACKOFF_SECONDS = 30
 
 
 def require_password() -> None:
@@ -29,6 +34,11 @@ def require_password() -> None:
         st.stop()
     if hmac.compare_digest(entered.encode("utf-8"), expected.encode("utf-8")):
         st.session_state[_SESSION_KEY] = True
+        st.session_state[_ATTEMPTS_KEY] = 0
         st.rerun()
+
+    attempts = int(st.session_state.get(_ATTEMPTS_KEY, 0)) + 1
+    st.session_state[_ATTEMPTS_KEY] = attempts
+    time.sleep(min(attempts, _MAX_BACKOFF_SECONDS))
     st.error("Incorrect password.")
     st.stop()

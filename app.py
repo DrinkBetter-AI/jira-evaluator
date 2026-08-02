@@ -78,6 +78,7 @@ BACKLOG_STATUSES = {
 WEEKLY_HOURS = parse_weekly_hours(os.getenv("JIRA_WEEKLY_HOURS", ""))
 # Which Jira projects make up each team ("Marketplace=MB;App=AS,OA").
 TEAM_PROJECTS = parse_team_projects(os.getenv("JIRA_TEAM_PROJECTS", ""))
+_SCOPE_ASSIGNEES_KEY = "_scope_assignees"
 
 
 def _default_browse_base() -> str:
@@ -1582,7 +1583,15 @@ def _render_hourly_capacity(sprint_df: pd.DataFrame, in_sprint_df: pd.DataFrame)
             .groupby(owners.mask(owners.eq(""), "Unassigned"))
             .sum()
         )
-    table = capacity_table(committed, WEEKLY_HOURS, start, end)
+    # The roster has to follow the scope: outside it a person's tickets are not
+    # loaded, so they would read as idle when they are merely filtered out.
+    in_scope = st.session_state.get(_SCOPE_ASSIGNEES_KEY)
+    roster = (
+        WEEKLY_HOURS
+        if in_scope is None
+        else {name: hours for name, hours in WEEKLY_HOURS.items() if name in in_scope}
+    )
+    table = capacity_table(committed, roster, start, end)
     if table.empty:
         st.caption("No assignees to report on for this sprint.")
         return
@@ -1590,9 +1599,10 @@ def _render_hourly_capacity(sprint_df: pd.DataFrame, in_sprint_df: pd.DataFrame)
     st.caption(
         f"{days:.0f} working day(s) in this sprint "
         f"({pd.Timestamp(start).date()} to {pd.Timestamp(end).date()}). "
-        "Committed covers every ticket in the sprint, not just the statuses counted "
-        "in hours above. Utilization is committed / available; \"Unknown\" means no "
-        "weekly hours are declared for that person."
+        "Committed covers every ticket in the sprint that the current scope and "
+        "filters keep, not just the statuses counted in hours above. Utilization is "
+        'committed / available; "Unknown" means no weekly hours are declared for '
+        "that person."
     )
     st.dataframe(
         table,
@@ -1898,6 +1908,9 @@ def main() -> None:
             ),
         )
         selected_assignees = _resolve_scope_assignees(scope, assignees)
+        st.session_state[_SCOPE_ASSIGNEES_KEY] = (
+            None if selected_assignees is None else set(selected_assignees)
+        )
 
         st.header("Filters")
         selected_statuses = st.multiselect("Status", options=statuses, default=[])

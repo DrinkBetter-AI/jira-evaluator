@@ -51,7 +51,14 @@ def epic_rollup(df: pd.DataFrame) -> pd.DataFrame:
         frame["_hours"] = pd.to_numeric(frame["estimate_hours"], errors="coerce").fillna(0.0)
     else:
         frame["_hours"] = 0.0
-    frame["_sprint"] = frame.get("sprint_name", pd.Series("", index=frame.index)).fillna("").astype(str)
+    # Tickets outside any sprint must not count as a sprint of their own.
+    frame["_sprint"] = (
+        frame.get("sprint_name", pd.Series("", index=frame.index))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+    )
 
     grouped = frame.groupby(["epic", "epic_key"], dropna=False).agg(
         open_children=("key", "count"),
