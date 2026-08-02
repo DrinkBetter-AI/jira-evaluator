@@ -45,6 +45,24 @@ def parse_weekly_hours(spec: str) -> dict[str, float]:
     return hours
 
 
+def match_weekly_hours(name: str, weekly_hours: dict[str, float]) -> float | None:
+    """Declared hours for a Jira display name, matching a first name too.
+
+    The roster is written by hand, so ``Farid=20`` has to find ``Farid Shahidi``
+    rather than producing a second, empty row for the same person.
+    """
+    if name in weekly_hours:
+        return weekly_hours[name]
+    tokens = set(str(name).strip().lower().replace(".", " ").split())
+    if not tokens:
+        return None
+    for declared, hours in weekly_hours.items():
+        key = declared.strip().lower()
+        if key == str(name).strip().lower() or key in tokens:
+            return hours
+    return None
+
+
 def working_days(start: object, end: object) -> float:
     """Weekdays in the inclusive [start, end] window; 0 when either is missing."""
     if start is None or end is None or pd.isna(start) or pd.isna(end):
@@ -97,14 +115,23 @@ def capacity_table(
         "Status",
     ]
     committed = pd.to_numeric(committed_hours, errors="coerce").fillna(0.0)
-    names = sorted(set(committed.index.astype(str)) | set(weekly_hours))
+    known = set(committed.index.astype(str))
+    # Someone already visible under their Jira display name must not appear a
+    # second time under the short name the roster happens to use.
+    unmatched = {
+        declared
+        for declared in weekly_hours
+        if not any(match_weekly_hours(name, {declared: 0.0}) is not None for name in known)
+    }
+    names = sorted(known | unmatched)
     if not names:
         return pd.DataFrame(columns=columns)
 
     rows = []
     for name in names:
         held = float(committed.get(name, 0.0))
-        capacity = available_hours(weekly_hours.get(name, 0.0), start, end)
+        declared_hours = match_weekly_hours(name, weekly_hours)
+        capacity = available_hours(declared_hours or 0.0, start, end)
         rows.append(
             {
                 "Assignee": name,
@@ -112,7 +139,7 @@ def capacity_table(
                 "Available (h)": capacity,
                 "Utilization %": round(held / capacity * 100.0, 0) if capacity > 0 else None,
                 "Delta (h)": round(capacity - held, 1) if capacity > 0 else None,
-                "Status": _status(name, held, capacity, name in weekly_hours),
+                "Status": _status(name, held, capacity, declared_hours is not None),
             }
         )
 

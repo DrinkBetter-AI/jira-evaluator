@@ -6,7 +6,6 @@ import re
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 from change_audit import (
@@ -27,7 +26,12 @@ from jira_client import (
     load_jira_profile,
 )
 from access_gate import require_password
-from capacity import capacity_table, parse_weekly_hours, working_days
+from capacity import (
+    capacity_table,
+    match_weekly_hours,
+    parse_weekly_hours,
+    working_days,
+)
 from epics import epic_health_flags, epic_rollup
 from teams import (
     NO_OWNER_TEAM,
@@ -1510,10 +1514,8 @@ def _render_sprint_capacity(
 
     if workload_statuses:
         preview_workload = preview_scoped[preview_scoped["status_live"].isin(workload_statuses)].copy()
-        all_sprint_workload = all_sprint_tickets[all_sprint_tickets["status_live"].isin(workload_statuses)].copy()
     else:
         preview_workload = preview_scoped.iloc[0:0].copy()
-        all_sprint_workload = all_sprint_tickets.iloc[0:0].copy()
 
     c1, c2, c3 = st.columns(3)
     c1.markdown(
@@ -1628,7 +1630,16 @@ def _render_hourly_capacity(sprint_df: pd.DataFrame, in_sprint_df: pd.DataFrame)
     roster = (
         WEEKLY_HOURS
         if in_scope is None
-        else {name: hours for name, hours in WEEKLY_HOURS.items() if name in in_scope}
+        else {
+            name: hours
+            for name, hours in WEEKLY_HOURS.items()
+            # Roster names are short ("Farid"), scope names are Jira display
+            # names ("Farid Shahidi"), so compare them the same loose way.
+            if any(
+                match_weekly_hours(person, {name: hours}) is not None
+                for person in in_scope
+            )
+        }
     )
     table = capacity_table(committed, roster, start, end)
     if table.empty:

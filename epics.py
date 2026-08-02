@@ -30,12 +30,11 @@ def epic_rollup(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
 
     frame = df.copy()
-    # A sub-task belongs to a story that is itself counted here; counting it too
-    # would double the epic's open work and swell the orphan pile.
+    # A sub-task belongs to a story that is already counted, and an epic has no
+    # epic of its own; either would swell the orphan pile with phantom work.
     if "issue_type" in frame.columns:
-        frame = frame[
-            frame["issue_type"].fillna("").astype(str).str.strip().str.lower().ne("sub-task")
-        ]
+        kinds = frame["issue_type"].fillna("").astype(str).str.strip().str.lower()
+        frame = frame[~kinds.isin({"sub-task", "epic"})]
         if frame.empty:
             return pd.DataFrame(columns=columns)
     frame["epic_key"] = frame["epic_key"].fillna("").astype(str).str.strip()
