@@ -603,16 +603,27 @@ _TRIAGE_POSITION_KEY = "_triage_position"
 _TRIAGE_QUEUE_KEY = "_triage_queue_name"
 
 
-def _triage_state(queue_name: str) -> tuple[dict[str, str], int]:
-    """Decisions made so far and the current position, reset when the queue changes."""
+def _triage_state(queue_name: str, keys: list[str]) -> tuple[dict[str, str], int]:
+    """Decisions made so far and the current position for this queue.
+
+    The queue's contents shift under the reviewer - tickets age into it, closures
+    drop out of it - so identity is the queue *choice*, not its membership;
+    otherwise applying a batch would throw away every decision still pending.
+    Decisions for tickets that have left are pruned rather than kept, which also
+    keeps the reviewed count from exceeding the queue length.
+    """
     if st.session_state.get(_TRIAGE_QUEUE_KEY) != queue_name:
         st.session_state[_TRIAGE_QUEUE_KEY] = queue_name
         st.session_state[_TRIAGE_DECISIONS_KEY] = {}
         st.session_state[_TRIAGE_POSITION_KEY] = 0
-    return (
-        st.session_state.setdefault(_TRIAGE_DECISIONS_KEY, {}),
-        int(st.session_state.setdefault(_TRIAGE_POSITION_KEY, 0)),
-    )
+    present = set(keys)
+    decisions = {
+        key: choice
+        for key, choice in st.session_state.setdefault(_TRIAGE_DECISIONS_KEY, {}).items()
+        if key in present
+    }
+    st.session_state[_TRIAGE_DECISIONS_KEY] = decisions
+    return decisions, int(st.session_state.setdefault(_TRIAGE_POSITION_KEY, 0))
 
 
 def _render_triage_card(row: pd.Series) -> None:
@@ -675,12 +686,14 @@ def _render_cleanup(df: pd.DataFrame) -> None:
         st.success("Nothing in this queue.")
         return
 
-    decisions, position = _triage_state(f"{queue_choice}:{size}:{len(queue)}")
+    decisions, position = _triage_state(
+        f"{queue_choice}:{size}", queue["key"].astype(str).tolist()
+    )
     position = max(0, min(position, len(queue)))
     counts = cleanup.decision_summary(decisions)
 
     st.progress(
-        len(decisions) / len(queue),
+        min(len(decisions) / len(queue), 1.0),
         text=(
             f"{len(decisions)} of {len(queue)} reviewed - "
             f"{counts[cleanup.CLOSE]} to close, {counts[cleanup.KEEP]} keep, "
