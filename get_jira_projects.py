@@ -1,6 +1,7 @@
+import os
 from pathlib import Path
 
-from jira_client import JiraClient
+from jira_client import DEFAULT_CREDS_PATH, DEFAULT_PROFILE_NAME, JiraClient
 
 
 EPIC_KEY = "MB-4102"
@@ -14,8 +15,8 @@ def main() -> None:
     # Same resolution as the dashboard, so the script also runs in the container,
     # where the credentials arrive as environment variables and no YAML exists.
     client = JiraClient.resolve(
-        creds_path="~/.creds/vinovoss.yml",
-        profile_name="ML-TEAM-MANAGEMENT",
+        creds_path=os.getenv("JIRA_CREDS_PATH", DEFAULT_CREDS_PATH),
+        profile_name=os.getenv("JIRA_PROFILE", DEFAULT_PROFILE_NAME),
     )
 
     df = client.search_issues(
