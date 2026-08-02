@@ -91,6 +91,34 @@ def build_queue(
     return frame[columns].reset_index(drop=True)
 
 
+# Projects here run different workflows, and few of them offer "Done" from a
+# Backlog status, so closing is expressed as a preference and resolved per
+# ticket. Order matters: a cleanup closure should stay distinguishable from a
+# ticket that was genuinely finished, which is why Done comes last.
+CLOSING_STATUS_PREFERENCE = (
+    "Archived",
+    "Won't Do",
+    "Wont Do",
+    "Not needed",
+    "Not Needed",
+    "Cancelled",
+    "Canceled",
+    "Closed",
+    "Rejected",
+    "Done",
+)
+
+
+def closing_status(available: list[str]) -> str | None:
+    """The best closing transition a ticket actually offers, or None."""
+    lowered = {str(name).strip().lower(): str(name).strip() for name in available}
+    for preferred in CLOSING_STATUS_PREFERENCE:
+        match = lowered.get(preferred.lower())
+        if match:
+            return match
+    return None
+
+
 def decision_summary(decisions: dict[str, str]) -> dict[str, int]:
     """How many tickets sit in each decision bucket."""
     counts = {name: 0 for name in DECISIONS}

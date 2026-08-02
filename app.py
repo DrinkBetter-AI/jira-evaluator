@@ -781,26 +781,44 @@ def _render_triage_decisions(queue: pd.DataFrame, decisions: dict[str, str]) -> 
         return
 
     st.markdown(f"##### Apply {len(to_close)} closure(s) to Jira")
-    apply_columns = st.columns([2, 2, 1])
-    target_status = apply_columns[0].text_input(
-        "Transition them to",
-        value="Done",
-        help="The Jira status to move closed tickets into; it must be a valid transition.",
+    st.caption(
+        "Each project runs its own workflow, so the closing status is resolved per "
+        "ticket from the transitions Jira actually offers it, preferring "
+        + " / ".join(cleanup.CLOSING_STATUS_PREFERENCE[:4])
+        + " over Done so cleanup stays distinguishable from real completions."
     )
-    confirmed = apply_columns[1].checkbox(
+    apply_columns = st.columns([3, 1])
+    confirmed = apply_columns[0].checkbox(
         f"Yes, write these {len(to_close)} changes to Jira", value=False
     )
-    if not apply_columns[2].button("Apply", type="primary", disabled=not confirmed):
+    if not apply_columns[1].button("Apply", type="primary", disabled=not confirmed):
         return
 
     client = JiraClient.from_yaml(creds_path=CREDS_PATH, profile_name=PROFILE_NAME)
-    with st.spinner(f"Closing {len(to_close)} tickets..."):
-        succeeded, failed, _ = _apply_action_with_audit(
+    succeeded: list[str] = []
+    failed: dict[str, str] = {}
+    progress = st.progress(0.0, text="Resolving transitions...")
+    for index, key in enumerate(to_close, start=1):
+        progress.progress(index / len(to_close), text=f"Closing {key} ({index}/{len(to_close)})")
+        try:
+            offered = [t.get("to_status", "") for t in client.get_issue_transitions(key)]
+        except Exception as error:  # noqa: BLE001
+            failed[key] = f"could not read transitions ({error})"
+            continue
+        target = cleanup.closing_status(offered)
+        if target is None:
+            failed[key] = "no closing transition available (offers: " + ", ".join(offered) + ")"
+            continue
+        moved, errors, _ = _apply_action_with_audit(
             client=client,
             action_type="status",
-            selected_keys=to_close,
-            target=target_status.strip(),
+            selected_keys=[key],
+            target=target,
         )
+        succeeded.extend(moved)
+        failed.update(errors)
+    progress.empty()
+
     if succeeded:
         st.success(f"Closed {len(succeeded)}: {', '.join(succeeded)}")
         for key in succeeded:

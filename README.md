@@ -155,8 +155,13 @@ past changes matters:
    one nobody ever took that has sat 90 days, is proposed for closing; anything else
    defaults to *Keep*. Two queues: oldest open, and oldest unassigned. Decisions live
    in the session and are exportable as CSV; only the explicit *Apply* button at the
-   bottom writes to Jira, transitioning the tickets marked *Close* to a status you
-   name, through the same audited path as every other write. Backlog tickets are
+   bottom writes to Jira, through the same audited path as every other write.
+   Because each project runs its own workflow - few statuses here offer *Done*
+   from a backlog state - the closing status is resolved per ticket from the
+   transitions Jira actually offers it, preferring *Archived*, *Won't Do*, *Not
+   needed* or *Cancelled* over *Done* so a cleanup closure stays distinguishable
+   from a real completion (`cleanup.CLOSING_STATUS_PREFERENCE`). A ticket offering
+   no closing transition is reported by name rather than forced. Backlog tickets are
    always included here regardless of *Include Backlogs* - they are the point.
 7. **Assignee Breakdown** — per-assignee roll-up (open tickets, average and top
    priority score, average and max idle days, tickets idle 15d+, tickets with no
