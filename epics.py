@@ -13,7 +13,9 @@ NO_EPIC = "No epic"
 
 # Company-managed projects say "Sub-task", team-managed ones say "Subtask", so
 # compare with the separators removed rather than against one spelling.
-EXCLUDED_ISSUE_TYPES = {"subtask", "epic"}
+# Initiatives sit above epics rather than under them, so counting them as
+# parentless work would report the hierarchy's own top as an orphan.
+EXCLUDED_ISSUE_TYPES = {"subtask", "epic", "initiative", "toplevelinitiative"}
 
 
 def epic_rollup(df: pd.DataFrame) -> pd.DataFrame:

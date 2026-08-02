@@ -66,19 +66,26 @@ def append_operation(record: dict[str, Any]) -> str | None:
 
 
 def load_operations(limit: int = 50) -> list[dict[str, Any]]:
-    if not LOG_FILE.exists():
-        return []
+    """Past operations, or none of them: an unreadable log is not worth a blank page.
 
+    The path is configurable, so it can name a directory or an unreadable mount.
+    That must cost the history panel, not the dashboard the panel sits on.
+    """
     ops: list[dict[str, Any]] = []
-    with LOG_FILE.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ops.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    try:
+        if not LOG_FILE.exists():
+            return []
+        with LOG_FILE.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ops.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
 
     if limit <= 0:
         return list(reversed(ops))
