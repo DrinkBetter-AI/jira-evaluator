@@ -58,7 +58,15 @@ def epic_rollup(df: pd.DataFrame) -> pd.DataFrame:
         .str.strip()
     )
     frame.loc[frame["epic_key"].eq(""), ["epic_key", "epic"]] = ["", NO_EPIC]
-    frame["epic"] = frame["epic"].where(frame["epic"].ne(""), frame["epic_key"])
+    # The label is settled once per epic, not per row: Jira can return the parent
+    # summary on some children and not others, and a row-by-row fallback to the key
+    # would then split one epic into two rows of the table.
+    labels = (
+        frame.loc[frame["epic"].ne(""), ["epic_key", "epic"]]
+        .drop_duplicates(subset="epic_key")
+        .set_index("epic_key")["epic"]
+    )
+    frame["epic"] = frame["epic_key"].map(labels).fillna(frame["epic_key"])
 
     frame["_idle"] = pd.to_numeric(frame.get("idle_days"), errors="coerce").fillna(0.0)
     owners = frame.get("assignee", pd.Series("", index=frame.index)).fillna("").astype(str)
