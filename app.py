@@ -26,6 +26,7 @@ from jira_client import (
     load_jira_env,
     load_jira_profile,
 )
+from access_gate import require_password
 from capacity import capacity_table, parse_weekly_hours, working_days
 from hygiene import (
     DEFAULT_STALE_DAYS,
@@ -1676,6 +1677,7 @@ def _apply_action_with_audit(
 
 def main() -> None:
     st.set_page_config(page_title="Jira Ticket Health Dashboard", layout="wide")
+    require_password()
     st.title("Jira Ticket Health Dashboard")
     st.caption("Visual monitoring for stale, idle, and high-risk tickets.")
 

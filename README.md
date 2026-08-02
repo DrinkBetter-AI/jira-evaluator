@@ -39,6 +39,7 @@ profile when they are not all set.
 | `JIRA_WEEKLY_HOURS` | no | — | Hours per week each person is available, e.g. `Tam=10,Shivanand=20,Mehdi Ordikhani=40`; drives *Availability vs Commitment* |
 | `JIRA_AUDIT_LOG_PATH` | no | `logs/jira_ticket_changes.jsonl` | Where write-back history is recorded; point at durable storage when containerized |
 | `JIRA_BROWSE_BASE` | no | `<resolved Jira site>/browse` | Base URL for ticket hyperlinks; defaults to the site the credentials resolve to |
+| `DASHBOARD_PASSWORD` | no | — | Shared password visitors must enter; unset means no gate, which is the norm locally |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
 env mode; otherwise the YAML profile is used:
