@@ -28,6 +28,9 @@ from jira_client import (
 )
 from access_gate import require_password
 from capacity import capacity_table, parse_weekly_hours, working_days
+from epics import epic_health_flags, epic_rollup
+from teams import add_team, parse_team_projects, team_summary
+from theme import inject_styles, kpi_strip
 from hygiene import (
     DEFAULT_STALE_DAYS,
     estimate_policy,
@@ -56,7 +59,7 @@ SCOPE_ORG = "Organization"
 SCOPE_TEAM = "Team"
 SCOPE_INDIVIDUAL = "Individual"
 
-FETCH_SCHEMA_VERSION = 4
+FETCH_SCHEMA_VERSION = 5
 JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
 
 # One Jira request per key, so bound how many the sprint editor asks about.
@@ -73,6 +76,8 @@ BACKLOG_STATUSES = {
 }
 # Weekly hours per person ("Tam=10,Shivanand=20"); Jira does not know who is part-time.
 WEEKLY_HOURS = parse_weekly_hours(os.getenv("JIRA_WEEKLY_HOURS", ""))
+# Which Jira projects make up each team ("Marketplace=MB;App=AS,OA").
+TEAM_PROJECTS = parse_team_projects(os.getenv("JIRA_TEAM_PROJECTS", ""))
 
 
 def _default_browse_base() -> str:
@@ -145,6 +150,9 @@ def fetch_tickets(
         "sprint_board_id",
         "sprint_start",
         "sprint_end",
+        "project_key",
+        "epic_key",
+        "epic_summary",
     ]:
         if col not in result.columns:
             result[col] = pd.NA
@@ -218,20 +226,43 @@ def _render_metrics(df: pd.DataFrame, include_backlogs: bool = False) -> None:
             ).sum()
         )
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Open Tickets", total_open)
-    m2.metric("Average Idle Days", f"{avg_idle:.1f}")
-    m3.metric("Max Idle Days", f"{max_idle:.1f}")
-    m4.metric("Oldest Ticket Age", f"{oldest:.1f}")
+    idle_30 = 0
+    unassigned = 0
+    if total_open:
+        idle_30 = int(pd.to_numeric(metrics_df["idle_days"], errors="coerce").fillna(0).ge(30).sum())
+        owners = metrics_df["assignee"].fillna("").astype(str).str.strip().str.lower()
+        unassigned = int(owners.isin({"", "unassigned", "none"}).sum())
 
-    n1, n2, n3 = st.columns(3)
-    n1.metric("Estimate Coverage", f"{estimate_coverage_pct:.0f}%")
-    n2.metric(
-        "Stale in Late Stage",
-        stale_late_stage,
-        help="Tickets in IN DEV ENV, Review in Staging, or Ready for Production idle for >6 days",
+    kpi_strip(
+        [
+            ("Open tickets", f"{total_open}", "current scope", "neutral"),
+            (
+                "Stalled 30d+",
+                f"{idle_30}",
+                f"{idle_30 / total_open * 100:.0f}% of open" if total_open else "—",
+                "danger" if idle_30 else "good",
+            ),
+            (
+                "Unassigned",
+                f"{unassigned}",
+                "no owner set",
+                "warning" if unassigned else "good",
+            ),
+            (
+                "Estimate coverage",
+                f"{estimate_coverage_pct:.0f}%",
+                "tickets carrying an estimate",
+                "good" if estimate_coverage_pct >= 80 else "warning",
+            ),
+            (
+                "Stale late stage",
+                f"{stale_late_stage}",
+                "in dev/staging/prod, idle >6d",
+                "danger" if stale_late_stage else "good",
+            ),
+            ("Oldest ticket", f"{oldest:.0f}d", f"avg idle {avg_idle:.0f}d · max {max_idle:.0f}d", "info"),
+        ]
     )
-    n3.metric("—", "—")
 
     if "status" in metrics_df.columns and total_open:
         _render_status_pills(metrics_df["status"])
@@ -357,6 +388,137 @@ def _render_priority_queue(df: pd.DataFrame, include_backlogs: bool) -> None:
         "Download prioritized queue (CSV)",
         data=queue[columns[1:]].assign(key=queue["key"]).to_csv(index=False).encode("utf-8"),
         file_name="jira_prioritized_queue.csv",
+        mime="text/csv",
+    )
+
+
+def _render_team_overview(df: pd.DataFrame) -> None:
+    """Per-team load, staffing and sprint state, so each squad is legible alone."""
+    st.subheader("Teams")
+    if not TEAM_PROJECTS:
+        st.caption(
+            "Teams default to Jira project keys. Group them with "
+            'JIRA_TEAM_PROJECTS, e.g. "Marketplace=MB;App=AS,OA;Design=MAR".'
+        )
+    else:
+        st.caption("Team membership comes from JIRA_TEAM_PROJECTS.")
+
+    scored = add_team(estimate_policy(df, BACKLOG_STATUSES), TEAM_PROJECTS)
+    summary = team_summary(scored)
+    if summary.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    st.dataframe(
+        summary,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "team": st.column_config.TextColumn("Team"),
+            "open": st.column_config.NumberColumn("Open"),
+            "people": st.column_config.NumberColumn("People"),
+            "avg_idle": st.column_config.NumberColumn("Avg idle (days)", format="%.1f"),
+            "idle_30d": st.column_config.NumberColumn("Stalled 30d+"),
+            "unassigned": st.column_config.NumberColumn("Unassigned"),
+            "no_estimate": st.column_config.NumberColumn("No estimate"),
+        },
+    )
+
+    team_names = summary["team"].tolist()
+    chosen = st.selectbox("Current sprint for team", options=team_names)
+    team_df = scored[scored["team"] == chosen]
+
+    states = team_df["sprint_state"].fillna("").astype(str).str.lower()
+    active = team_df[states.eq("active")]
+    if active.empty:
+        active = team_df[states.eq("future")]
+    if active.empty:
+        st.caption(
+            f"{chosen} has no ticket in an active or future sprint - "
+            f"all {len(team_df)} open tickets sit outside a sprint."
+        )
+        return
+
+    sprint_label = (
+        active["sprint_name"].fillna("").astype(str).mode().iat[0]
+        if not active["sprint_name"].dropna().empty
+        else "current sprint"
+    )
+    current = active[active["sprint_name"].fillna("").astype(str).eq(sprint_label)]
+    owners = current["assignee"].fillna("").astype(str).str.strip().str.lower()
+    kpi_strip(
+        [
+            ("Sprint", sprint_label, chosen, "info"),
+            ("Tickets", f"{len(current)}", "in this sprint", "neutral"),
+            ("People", f"{current['assignee'].nunique()}", "with sprint work", "neutral"),
+            (
+                "Committed",
+                f"{current['estimate_hours'].sum():.0f}h",
+                "estimated hours",
+                "neutral",
+            ),
+            (
+                "Unassigned",
+                f"{int(owners.isin({'', 'unassigned', 'none'}).sum())}",
+                "no owner in sprint",
+                "warning" if owners.isin({"", "unassigned", "none"}).any() else "good",
+            ),
+        ]
+    )
+    st.bar_chart(
+        current.groupby(current["status"].fillna("Unknown").astype(str))["key"].count(),
+        height=240,
+    )
+    st.caption(
+        f"{chosen}: {len(team_df)} open tickets total, {len(current)} in {sprint_label}. "
+        "Per-person hours are in Availability vs Commitment below."
+    )
+
+
+def _render_epics(df: pd.DataFrame) -> None:
+    """Group open work by epic and name what is wrong with each one."""
+    st.subheader("Epics")
+    st.caption(
+        "Open children only - the dashboard does not load Done tickets, so this is "
+        "remaining work per epic, not completion."
+    )
+
+    scored = estimate_policy(df, BACKLOG_STATUSES)
+    rollup = epic_health_flags(epic_rollup(scored))
+    if rollup.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    orphans = int(rollup.loc[rollup["epic"] == "No epic", "open_children"].sum())
+    drifting = int((rollup["issue_count"] > 0).sum() - (1 if orphans else 0))
+    e1, e2, e3 = st.columns(3)
+    e1.metric("Epics with open work", int((rollup["epic"] != "No epic").sum()))
+    e2.metric("Epics needing attention", max(drifting, 0))
+    e3.metric("Tickets with no epic", orphans)
+
+    display = rollup.drop(columns=["epic_key"])
+    st.dataframe(
+        display,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "epic": st.column_config.TextColumn("Epic"),
+            "open_children": st.column_config.NumberColumn("Open"),
+            "owners": st.column_config.NumberColumn("Owners"),
+            "avg_idle": st.column_config.NumberColumn("Avg idle (days)", format="%.1f"),
+            "max_idle": st.column_config.NumberColumn("Max idle (days)", format="%.1f"),
+            "unassigned": st.column_config.NumberColumn("Unassigned"),
+            "no_estimate": st.column_config.NumberColumn("No estimate"),
+            "estimated_hours": st.column_config.NumberColumn("Estimated (h)", format="%.1f"),
+            "sprints": st.column_config.NumberColumn("Sprints"),
+            "issues": st.column_config.TextColumn("What is wrong"),
+            "issue_count": st.column_config.NumberColumn("Signals"),
+        },
+    )
+    st.download_button(
+        "Download epic rollup (CSV)",
+        data=rollup.to_csv(index=False).encode("utf-8"),
+        file_name="jira_epic_rollup.csv",
         mime="text/csv",
     )
 
@@ -1678,6 +1840,7 @@ def _apply_action_with_audit(
 def main() -> None:
     st.set_page_config(page_title="Jira Ticket Health Dashboard", layout="wide")
     require_password()
+    inject_styles()
     st.title("Jira Ticket Health Dashboard")
     st.caption("Visual monitoring for stale, idle, and high-risk tickets.")
 
@@ -1719,32 +1882,30 @@ def main() -> None:
 
     df = add_priority_score(add_ticket_health_fields(raw_df))
 
-    st.subheader("Scope")
     assignees = sorted(df["assignee"].dropna().unique().tolist())
-    scope = st.radio(
-        "View",
-        options=[SCOPE_ORG, SCOPE_TEAM, SCOPE_INDIVIDUAL],
-        horizontal=True,
-        help=(
-            "Organization shows every assignee in the JQL scope; "
-            "Team pre-selects the configured team members; "
-            "Individual focuses on a single assignee."
-        ),
-    )
-    selected_assignees = _resolve_scope_assignees(scope, assignees)
-
-    st.subheader("Filters")
-    f2, f3, f4, f5 = st.columns(4)
     statuses = sorted(df["status"].dropna().unique().tolist())
     priorities = sorted(df["priority"].dropna().unique().tolist())
 
-    selected_statuses = f2.multiselect("Status", options=statuses, default=[])
-    selected_priorities = f3.multiselect("Priority", options=priorities, default=[])
-    min_idle = f4.slider("Min idle days", min_value=0, max_value=180, value=0)
-    min_age = f5.slider("Min ticket age", min_value=0, max_value=365, value=0)
+    with st.sidebar:
+        st.header("Scope")
+        scope = st.radio(
+            "View",
+            options=[SCOPE_ORG, SCOPE_TEAM, SCOPE_INDIVIDUAL],
+            help=(
+                "Organization shows every assignee in the JQL scope; "
+                "Team pre-selects the configured team members; "
+                "Individual focuses on a single assignee."
+            ),
+        )
+        selected_assignees = _resolve_scope_assignees(scope, assignees)
 
-    color_by = st.radio("Bubble color", options=["priority", "assignee"], horizontal=True)
-    include_backlogs = st.checkbox("Include Backlogs", value=False)
+        st.header("Filters")
+        selected_statuses = st.multiselect("Status", options=statuses, default=[])
+        selected_priorities = st.multiselect("Priority", options=priorities, default=[])
+        min_idle = st.slider("Min idle days", min_value=0, max_value=180, value=0)
+        min_age = st.slider("Min ticket age", min_value=0, max_value=365, value=0)
+        include_backlogs = st.checkbox("Include Backlogs", value=False)
+        color_by = st.radio("Bubble color", options=["priority", "assignee"], horizontal=True)
 
     filtered = df.copy()
     if selected_assignees is not None:
@@ -1757,6 +1918,12 @@ def main() -> None:
     filtered = filtered[(filtered["idle_days"] >= min_idle) & (filtered["ticket_age_days"] >= min_age)]
 
     _render_metrics(filtered, include_backlogs=include_backlogs)
+
+    st.divider()
+    _render_team_overview(_metrics_df(filtered, include_backlogs))
+
+    st.divider()
+    _render_epics(_metrics_df(filtered, include_backlogs))
 
     st.divider()
     _render_scope_breakdown(filtered, scope=scope, include_backlogs=include_backlogs)

@@ -26,6 +26,8 @@ DEFAULT_FIELDS = [
     "statuscategorychangedate",
     "timetracking",
     "customfield_10020",
+    "parent",
+    "project",
 ]
 
 _ML_SPRINT_NAME_RE = re.compile(r"^ML\s+Sprint\s+\d+$", re.IGNORECASE)
@@ -565,6 +567,10 @@ class JiraClient:
             issue_type = fields.get("issuetype") or {}
             resolution = fields.get("resolution") or {}
             timetracking = fields.get("timetracking") or {}
+            parent = fields.get("parent") or {}
+            parent_fields = parent.get("fields") or {}
+            parent_status = parent_fields.get("status") or {}
+            project = fields.get("project") or {}
             time_spent_sec = timetracking.get("timeSpentSeconds") or 0
             orig_est_sec = timetracking.get("originalEstimateSeconds") or 0
             completion_pct = round(time_spent_sec / orig_est_sec * 100, 1) if orig_est_sec > 0 else None
@@ -613,6 +619,11 @@ class JiraClient:
                     "last_meaningful_activity": last_meaningful_activity,
                     "due_date": fields.get("duedate"),
                     "issue_type": issue_type.get("name"),
+                    "project_key": project.get("key"),
+                    "project_name": project.get("name"),
+                    "epic_key": parent.get("key"),
+                    "epic_summary": parent_fields.get("summary"),
+                    "epic_status": parent_status.get("name"),
                     "labels": ", ".join(fields.get("labels", [])),
                     "resolution": resolution.get("name"),
                     "status_category_changed_date": fields.get("statuscategorychangedate"),

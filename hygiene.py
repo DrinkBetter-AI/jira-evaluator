@@ -50,6 +50,7 @@ def estimate_policy(df: pd.DataFrame, backlog_statuses: set[str]) -> pd.DataFram
     out = df.copy()
     if out.empty:
         out["estimate_hours"] = pd.Series(dtype="float64")
+        out["has_estimate"] = pd.Series(dtype="bool")
         out["policy_applies"] = pd.Series(dtype="bool")
         out["policy_violation"] = pd.Series(dtype="bool")
         return out
@@ -57,6 +58,7 @@ def estimate_policy(df: pd.DataFrame, backlog_statuses: set[str]) -> pd.DataFram
     statuses = _normalized(out, "status")
     estimate = _estimate_seconds(out)
     out["estimate_hours"] = (estimate / 3600.0).round(2)
+    out["has_estimate"] = estimate.gt(0)
     out["policy_applies"] = ~statuses.isin({s.lower() for s in backlog_statuses})
     out["policy_violation"] = out["policy_applies"] & estimate.le(0)
     return out
@@ -95,7 +97,7 @@ def stale_reasons(row: pd.Series) -> str:
     reasons: list[str] = []
     if str(row.get("assignee") or "").strip().lower() in {"", "unassigned", "none"}:
         reasons.append("unassigned")
-    if float(row.get("estimate_hours") or 0) <= 0:
+    if not bool(row.get("has_estimate", float(row.get("estimate_hours") or 0) > 0)):
         reasons.append("no estimate")
     if row.get("due_date") is None or pd.isna(row.get("due_date")):
         reasons.append("no due date")

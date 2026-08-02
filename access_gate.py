@@ -27,7 +27,7 @@ def require_password() -> None:
     entered = st.text_input("Password", type="password")
     if not entered:
         st.stop()
-    if hmac.compare_digest(entered, expected):
+    if hmac.compare_digest(entered.encode("utf-8"), expected.encode("utf-8")):
         st.session_state[_SESSION_KEY] = True
         st.rerun()
     st.error("Incorrect password.")

@@ -39,6 +39,7 @@ profile when they are not all set.
 | `JIRA_WEEKLY_HOURS` | no | — | Hours per week each person is available, e.g. `Tam=10,Shivanand=20,Mehdi Ordikhani=40`; drives *Availability vs Commitment* |
 | `JIRA_AUDIT_LOG_PATH` | no | `logs/jira_ticket_changes.jsonl` | Where write-back history is recorded; point at durable storage when containerized |
 | `JIRA_BROWSE_BASE` | no | `<resolved Jira site>/browse` | Base URL for ticket hyperlinks; defaults to the site the credentials resolve to |
+| `JIRA_TEAM_PROJECTS` | no | — | Which Jira projects form each team, e.g. `Marketplace=MB;App=AS,OA;Design=MAR`; unset means one team per project key |
 | `DASHBOARD_PASSWORD` | no | — | Shared password visitors must enter; unset means no gate, which is the norm locally |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
@@ -101,30 +102,38 @@ past changes matters:
 
 ## Dashboard layout
 
-1. **Scope** — `Organization` (every assignee returned by the JQL), `Team`
+1. **Scope** (sidebar) — `Organization` (every assignee returned by the JQL), `Team`
    (multi-select pre-filled from `JIRA_TEAM_MEMBERS`), or `Individual` (one assignee).
-2. **Filters** — status, priority, minimum idle days, minimum ticket age, and an
-   *Include Backlogs* toggle that all downstream sections respect.
-3. **Metrics** — open ticket count, average/max idle days, oldest ticket age,
-   estimate coverage, and tickets stale in a late stage.
-4. **Assignee Breakdown** — per-assignee roll-up (open tickets, average and top
+2. **Filters** (sidebar) — status, priority, minimum idle days, minimum ticket age,
+   and an *Include Backlogs* toggle that all downstream sections respect.
+3. **Headline strip** — open tickets, tickets stalled 30d+, unassigned, estimate
+   coverage, stale late-stage work, and oldest ticket age, colored by severity.
+4. **Teams** — open load, staffing, idle pressure and estimate gaps per team, plus
+   the active (or next) sprint for the selected team: ticket count, people,
+   committed hours and status mix. Teams come from `JIRA_TEAM_PROJECTS`; without it
+   each Jira project key is its own team.
+5. **Epics** — open children rolled up per epic with the signals that mark an epic
+   as drifting (idle, unassigned children, missing estimates, spread across sprints,
+   too many owners), plus a count of tickets with no epic at all. Because the JQL
+   loads open work only, this is remaining work per epic, never completion.
+6. **Assignee Breakdown** — per-assignee roll-up (open tickets, average and top
    priority score, average and max idle days, tickets idle 15d+, tickets with no
    priority). In `Individual` scope this collapses to that person's headline numbers.
-5. **Prioritized Queue** — tickets ranked by priority score with the reasons behind
+7. **Prioritized Queue** — tickets ranked by priority score with the reasons behind
    the score, and a CSV export.
-6. **Estimate Policy** — the team rule is that a ticket carries an estimate once it
+8. **Estimate Policy** — the team rule is that a ticket carries an estimate once it
    leaves Backlog. Anything past a status listed in `JIRA_BACKLOG_STATUSES` with no
    estimate is a violation; the panel shows overall compliance, a per-owner table,
    and the offending tickets (CSV export included). Backlog tickets are exempt and
    are excluded from the denominator.
-7. **Stale & Abandoned** — tickets idle past a threshold (90 days by default,
+9. **Stale & Abandoned** — tickets idle past a threshold (90 days by default,
    adjustable), ranked by how many neglect signals they carry: unassigned, no
    estimate, no due date, never started, no priority, carried over 3+ sprints. Read
    only — it recommends what to close or send back to Backlog, it never writes.
    Backlog tickets are always included here regardless of *Include Backlogs*.
-8. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
+10. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
    age-vs-idle chart, sprint planning tables, and bulk Jira write-back actions.
-9. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
+11. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
    per person against what they are actually available for, which matters when most
    contributors are part-time: `JIRA_WEEKLY_HOURS` is spread over the weekdays
    between the sprint's start and end dates, so 20h/week across a 10-working-day
