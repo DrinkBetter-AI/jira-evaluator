@@ -203,6 +203,11 @@ def capacity_table(
         )
 
     table = pd.DataFrame(rows, columns=columns)
+    # Blank cells are None, so a table where nobody has declared hours would carry
+    # object-dtype columns into a numeric column config; coerce to float so the
+    # dtype is the same whether or not anyone's availability is known.
+    for column in ("Committed (h)", "Available (h)", "Utilization %", "Delta (h)"):
+        table[column] = pd.to_numeric(table[column], errors="coerce")
     order = {
         OVER_COMMITTED: 0,
         AT_CAPACITY: 1,
