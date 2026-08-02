@@ -15,6 +15,10 @@ DEFAULT_STALE_DAYS = 90
 # A ticket that never left these statuses was never really started.
 NOT_STARTED_STATUSES = {"backlog", "to do", "todo", "discussion needed", "open"}
 
+# Containers hold other tickets' work rather than their own hours, so the
+# estimate rule cannot apply to them.
+CONTAINER_ISSUE_TYPES = {"epic", "initiative", "top-level initiative"}
+
 
 def _estimate_seconds(df: pd.DataFrame) -> pd.Series:
     """Estimate in seconds per row, from whichever column the fetch produced.
@@ -59,7 +63,10 @@ def estimate_policy(df: pd.DataFrame, backlog_statuses: set[str]) -> pd.DataFram
     estimate = _estimate_seconds(out)
     out["estimate_hours"] = (estimate / 3600.0).round(2)
     out["has_estimate"] = estimate.gt(0)
-    out["policy_applies"] = ~statuses.isin({s.lower() for s in backlog_statuses})
+    is_container = _normalized(out, "issue_type").isin(CONTAINER_ISSUE_TYPES)
+    out["policy_applies"] = (
+        ~statuses.isin({s.lower() for s in backlog_statuses}) & ~is_container
+    )
     out["policy_violation"] = out["policy_applies"] & estimate.le(0)
     return out
 

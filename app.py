@@ -1670,19 +1670,21 @@ def _render_hourly_capacity(sprint_df: pd.DataFrame, in_sprint_df: pd.DataFrame)
     )
 
 
+# Tinted background with a saturated text colour of the same hue, so the pills
+# sit on the light theme the KPI cards are drawn for.
 _STAGE_COLORS: dict[str, tuple[str, str]] = {
     # (background, text)
-    "Backlog":               ("#2a2a3d", "#8888aa"),
-    "DISCUSSION NEEDED":     ("#3d2a2a", "#cc8888"),
-    "To Do":                 ("#1e3a5f", "#6aaad4"),
-    "In Progress":           ("#1a3d2b", "#5cba82"),
-    "IN DEV ENV":            ("#1e3a5f", "#58a6e6"),
-    "Code Review":           ("#2e2a3d", "#9b88cc"),
-    "Review in Staging":     ("#3d3520", "#c8a840"),
-    "Ready for Production":  ("#1a3d1e", "#4ccc5a"),
-    "Review":                ("#3d2a1a", "#d4834a"),
+    "Backlog":               ("#eef0f5", "#525c73"),
+    "DISCUSSION NEEDED":     ("#fdecec", "#b42318"),
+    "To Do":                 ("#e8f0fd", "#1d4ed8"),
+    "In Progress":           ("#e6f6ec", "#15803d"),
+    "IN DEV ENV":            ("#e6f2fd", "#0369a1"),
+    "Code Review":           ("#f1ecfd", "#6d28d9"),
+    "Review in Staging":     ("#fdf3e0", "#a16207"),
+    "Ready for Production":  ("#e7f8ea", "#15803d"),
+    "Review":                ("#fdefe5", "#c2410c"),
 }
-_DEFAULT_PILL: tuple[str, str] = ("#2a2a2a", "#aaaaaa")
+_DEFAULT_PILL: tuple[str, str] = ("#f1f2f4", "#4b5563")
 
 
 def _render_status_pills(status_series: pd.Series) -> None:
