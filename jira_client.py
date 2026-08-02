@@ -570,6 +570,10 @@ class JiraClient:
             parent = fields.get("parent") or {}
             parent_fields = parent.get("fields") or {}
             parent_status = parent_fields.get("status") or {}
+            # ``parent`` is the epic for stories and tasks but the containing
+            # story for a sub-task, so only an Epic parent is an epic link.
+            parent_type = (parent_fields.get("issuetype") or {}).get("name") or ""
+            is_epic_parent = parent_type.strip().lower() == "epic"
             project = fields.get("project") or {}
             time_spent_sec = timetracking.get("timeSpentSeconds") or 0
             orig_est_sec = timetracking.get("originalEstimateSeconds") or 0
@@ -621,9 +625,11 @@ class JiraClient:
                     "issue_type": issue_type.get("name"),
                     "project_key": project.get("key"),
                     "project_name": project.get("name"),
-                    "epic_key": parent.get("key"),
-                    "epic_summary": parent_fields.get("summary"),
-                    "epic_status": parent_status.get("name"),
+                    "parent_key": parent.get("key"),
+                    "parent_type": parent_type or None,
+                    "epic_key": parent.get("key") if is_epic_parent else None,
+                    "epic_summary": parent_fields.get("summary") if is_epic_parent else None,
+                    "epic_status": parent_status.get("name") if is_epic_parent else None,
                     "labels": ", ".join(fields.get("labels", [])),
                     "resolution": resolution.get("name"),
                     "status_category_changed_date": fields.get("statuscategorychangedate"),

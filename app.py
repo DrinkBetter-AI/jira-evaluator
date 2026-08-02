@@ -59,7 +59,7 @@ SCOPE_ORG = "Organization"
 SCOPE_TEAM = "Team"
 SCOPE_INDIVIDUAL = "Individual"
 
-FETCH_SCHEMA_VERSION = 5
+FETCH_SCHEMA_VERSION = 6
 JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
 
 # One Jira request per key, so bound how many the sprint editor asks about.

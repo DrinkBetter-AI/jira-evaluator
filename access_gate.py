@@ -14,10 +14,12 @@ import streamlit as st
 
 PASSWORD_ENV = "DASHBOARD_PASSWORD"
 _SESSION_KEY = "_access_granted"
-_ATTEMPTS_KEY = "_access_attempts"
 # Each wrong guess costs a second more than the last, capped so a locked-out
 # visitor is not stuck forever; enough to make guessing pointless.
 _MAX_BACKOFF_SECONDS = 30
+# Counted per process rather than per session: a new websocket would otherwise
+# reset the backoff, which is exactly what a script guessing passwords does.
+_failed_attempts = 0
 
 
 def require_password() -> None:
@@ -32,13 +34,13 @@ def require_password() -> None:
     entered = st.text_input("Password", type="password")
     if not entered:
         st.stop()
+    global _failed_attempts
     if hmac.compare_digest(entered.encode("utf-8"), expected.encode("utf-8")):
         st.session_state[_SESSION_KEY] = True
-        st.session_state[_ATTEMPTS_KEY] = 0
+        _failed_attempts = 0
         st.rerun()
 
-    attempts = int(st.session_state.get(_ATTEMPTS_KEY, 0)) + 1
-    st.session_state[_ATTEMPTS_KEY] = attempts
-    time.sleep(min(attempts, _MAX_BACKOFF_SECONDS))
+    _failed_attempts += 1
+    time.sleep(min(_failed_attempts, _MAX_BACKOFF_SECONDS))
     st.error("Incorrect password.")
     st.stop()
