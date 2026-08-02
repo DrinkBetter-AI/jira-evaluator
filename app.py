@@ -379,6 +379,215 @@ def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | No
     return [selected]
 
 
+# --- Per-assignee drill-down: attention tiers + Devin-suitability -------------
+
+# Four attention tiers colour each engineer's board. Red is most urgent, purple
+# is parked low-priority work. Thresholds are deliberately simple so a person
+# can reason about their own colour at a glance; tune them here if the team's
+# definition of "stale" changes.
+_TIER_RED = "Needs attention"
+_TIER_YELLOW = "Watch"
+_TIER_GREEN = "Healthy"
+_TIER_PURPLE = "Low priority"
+
+# Sort order used when ranking by tier: red first, purple last.
+_TIER_ORDER = {_TIER_RED: 0, _TIER_YELLOW: 1, _TIER_GREEN: 2, _TIER_PURPLE: 3}
+
+# Light backgrounds so the row text stays readable.
+_TIER_BG = {
+    _TIER_RED: "#f8d7da",
+    _TIER_YELLOW: "#fff3cd",
+    _TIER_GREEN: "#d4edda",
+    _TIER_PURPLE: "#e7d9f5",
+}
+
+# Jira priorities that park a ticket rather than escalate it.
+_LOW_PRIORITY_NAMES = {"low", "lowest", "idea"}
+_TIER_RED_SCORE = 60.0
+_TIER_RED_IDLE = 90.0
+_TIER_YELLOW_SCORE = 30.0
+_TIER_YELLOW_IDLE = 30.0
+
+# Keyword heuristic for "could Devin pick this up?". Engineering execution work
+# with a clear code surface leans yes; product/design/content/coordination work
+# leans no. Mixed or empty signals stay "Maybe" so nobody trusts it blindly.
+_DEVIN_YES_KEYWORDS = (
+    "bug", "fix", "error", "crash", "exception", "refactor", "migrat", "endpoint",
+    "api", "backend", "frontend", "unit test", "test", "upgrade", "dependency",
+    "integrat", "ssr", "cache", "database", "postgres", "mongo", "sql", "query",
+    "script", "pipeline", "build", "lint", "typing", "performance", "latency",
+    "resource", "config", "infra", "deploy", "ranker", "search", "index",
+    "schema", "logging", "timeout", "rate limit", "webhook", "parser",
+    "validation",
+)
+_DEVIN_NO_KEYWORDS = (
+    "design", "mockup", "wireframe", "logo", "brand", "copywriting", "blog",
+    "article", "story:", "series:", "trend", "instagram", "social", "campaign",
+    "marketing", "video", "interview", "research", "survey", "meeting",
+    "discussion", "strategy", "hiring", "roadmap", "pricing", "content",
+)
+
+
+def _attention_tier(row: pd.Series) -> str:
+    """Bucket a ticket into one of four attention tiers for the drill-down."""
+    priority = str(row.get("priority") or "").strip().lower()
+    if priority in _LOW_PRIORITY_NAMES:
+        return _TIER_PURPLE
+    score = float(row.get("priority_score") or 0.0)
+    idle = float(row.get("idle_days") or 0.0)
+    if score >= _TIER_RED_SCORE or idle >= _TIER_RED_IDLE:
+        return _TIER_RED
+    if score >= _TIER_YELLOW_SCORE or idle >= _TIER_YELLOW_IDLE:
+        return _TIER_YELLOW
+    return _TIER_GREEN
+
+
+def _devin_can_handle(row: pd.Series) -> str:
+    """Rough hint at whether Devin could take a ticket, from its text signals."""
+    issue_type = str(row.get("issue_type") or "").strip().lower()
+    text = f"{row.get('summary') or ''} {issue_type}".lower()
+    yes = issue_type == "bug" or any(k in text for k in _DEVIN_YES_KEYWORDS)
+    no = any(k in text for k in _DEVIN_NO_KEYWORDS)
+    if yes and not no:
+        return "Yes"
+    if no and not yes:
+        return "No"
+    return "Maybe"
+
+
+def _tier_legend_html() -> str:
+    """A small colour legend so the tiers read without guessing."""
+    items = [
+        (_TIER_BG[_TIER_RED], "Needs attention — high score or idle 90d+"),
+        (_TIER_BG[_TIER_YELLOW], "Watch — moderate score or idle 30d+"),
+        (_TIER_BG[_TIER_GREEN], "Healthy — recent, low pressure"),
+        (_TIER_BG[_TIER_PURPLE], "Low priority — parked (Low / Lowest / Idea)"),
+    ]
+    spans = "".join(
+        '<span style="display:inline-block;margin:0 14px 4px 0;">'
+        f'<span style="display:inline-block;width:12px;height:12px;background:{color};'
+        'border:1px solid #999;vertical-align:middle;margin-right:5px;"></span>'
+        f"{html.escape(label)}</span>"
+        for color, label in items
+    )
+    return f'<div style="font-size:0.85rem;margin:2px 0 10px;">{spans}</div>'
+
+
+def _assignee_csv_name(assignee: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", str(assignee)).strip("_").lower()
+    return f"jira_{slug or 'assignee'}_tickets.csv"
+
+
+def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
+    """The per-person ticket board: tier-coloured, sortable, with a Devin hint."""
+    owners = df["assignee"].fillna("").astype(str).str.strip()
+    target = str(assignee).strip()
+    if target.lower() in _NO_OWNER_NAMES or target.lower() == "(no owner)":
+        mask = owners.str.lower().isin(_NO_OWNER_NAMES)
+    else:
+        mask = owners == target
+    owned = df[mask].copy()
+    if owned.empty:
+        st.info(f"No tickets for {assignee} in the current scope.")
+        return
+
+    if "has_estimate" not in owned.columns:
+        owned = estimate_policy(owned, BACKLOG_STATUSES)
+    owned["tier"] = owned.apply(_attention_tier, axis=1)
+    owned["devin"] = owned.apply(_devin_can_handle, axis=1)
+    owned["has_estimate_label"] = owned["has_estimate"].map(
+        lambda value: "Yes" if bool(value) else "No"
+    )
+    owned["key_url"] = owned["key"].map(_jira_ticket_url)
+    owned["_tier_order"] = owned["tier"].map(_TIER_ORDER).fillna(9)
+    for column in ("created", "updated"):
+        if column in owned.columns:
+            owned[column] = (
+                pd.to_datetime(owned[column], utc=True, errors="coerce")
+                .dt.strftime("%Y-%m-%d")
+                .fillna("")
+            )
+
+    st.markdown(f"#### {assignee} — {len(owned)} open ticket(s)")
+    st.markdown(_tier_legend_html(), unsafe_allow_html=True)
+    st.caption("Click any column header to sort, or pick a field below. The key links to Jira.")
+
+    sort_options = {
+        "Attention tier": "_tier_order",
+        "Priority score": "priority_score",
+        "Idle (days)": "idle_days",
+        "Age (days)": "ticket_age_days",
+        "Created": "created",
+        "Updated": "updated",
+        "Status": "status",
+        "Severity (priority)": "priority",
+        "Has estimate": "has_estimate_label",
+        "Devin-able?": "devin",
+    }
+    sort_options = {label: col for label, col in sort_options.items() if col in owned.columns}
+    sort_col, dir_col = st.columns([3, 1])
+    sort_label = sort_col.selectbox(
+        "Sort by", list(sort_options), index=0, key=f"detail_sort_{assignee}"
+    )
+    ascending = (
+        dir_col.selectbox("Order", ["asc", "desc"], index=0, key=f"detail_dir_{assignee}")
+        == "asc"
+    )
+    owned = owned.sort_values(sort_options[sort_label], ascending=ascending, kind="stable")
+
+    display_cols = [
+        "key_url",
+        "summary",
+        "status",
+        "priority",
+        "priority_score",
+        "tier",
+        "idle_days",
+        "ticket_age_days",
+        "created",
+        "updated",
+        "has_estimate_label",
+        "devin",
+    ]
+    display_cols = [c for c in display_cols if c in owned.columns]
+    display = owned[display_cols]
+
+    def _row_style(row: pd.Series) -> list[str]:
+        background = _TIER_BG.get(row.get("tier", ""), "")
+        style = f"background-color: {background}" if background else ""
+        return [style] * len(row)
+
+    styled = display.style.apply(_row_style, axis=1)
+    st.dataframe(
+        styled,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "key_url": st.column_config.LinkColumn("Key", display_text=JIRA_KEY_DISPLAY_PATTERN),
+            "summary": st.column_config.TextColumn("Summary", width="large"),
+            "status": st.column_config.TextColumn("Status"),
+            "priority": st.column_config.TextColumn("Priority"),
+            "priority_score": st.column_config.NumberColumn("Score", format="%.1f"),
+            "tier": st.column_config.TextColumn("Tier"),
+            "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
+            "ticket_age_days": st.column_config.NumberColumn("Age (days)", format="%.1f"),
+            "created": st.column_config.TextColumn("Created"),
+            "updated": st.column_config.TextColumn("Updated"),
+            "has_estimate_label": st.column_config.TextColumn("Estimate?"),
+            "devin": st.column_config.TextColumn("Devin-able?"),
+        },
+    )
+    st.download_button(
+        f"Download {assignee}'s tickets (CSV)",
+        data=owned[["key"] + [c for c in display_cols if c != "key_url"]]
+        .to_csv(index=False)
+        .encode("utf-8"),
+        file_name=_assignee_csv_name(assignee),
+        mime="text/csv",
+        key=f"detail_dl_{assignee}",
+    )
+
+
 def _render_scope_breakdown(df: pd.DataFrame, scope: str, include_backlogs: bool) -> None:
     """Render the per-assignee roll-up that backs org-wide and individual views."""
     scoped = _metrics_df(df, include_backlogs)
@@ -397,12 +606,17 @@ def _render_scope_breakdown(df: pd.DataFrame, scope: str, include_backlogs: bool
         c2.metric("Avg Priority Score", f"{row['avg_priority_score']:.1f}")
         c3.metric("Idle 15d+", int(row["stale_15d_plus"]))
         c4.metric("Unprioritized", int(row["unprioritized"]))
+        _render_assignee_detail(scoped, str(row["assignee"]))
         return
 
-    st.dataframe(
+    st.caption("Click a row to open that person's ticket board below.")
+    event = st.dataframe(
         rollup,
         width="stretch",
         hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="assignee_rollup_select",
         column_config={
             "assignee": st.column_config.TextColumn("Assignee"),
             "open_tickets": st.column_config.NumberColumn("Open"),
@@ -415,6 +629,15 @@ def _render_scope_breakdown(df: pd.DataFrame, scope: str, include_backlogs: bool
         },
     )
     st.bar_chart(rollup.set_index("assignee")["open_tickets"], height=260)
+
+    selected_rows = (event or {}).get("selection", {}).get("rows", [])
+    if selected_rows:
+        index = selected_rows[0]
+        if 0 <= index < len(rollup):
+            st.divider()
+            _render_assignee_detail(scoped, str(rollup.iloc[index]["assignee"]))
+    else:
+        st.caption("Select an assignee above to see their tickets.")
 
 
 def _render_priority_queue(df: pd.DataFrame, include_backlogs: bool) -> None:
