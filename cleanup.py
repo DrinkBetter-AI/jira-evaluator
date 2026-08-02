@@ -24,9 +24,21 @@ NEVER_TAKEN_IDLE_DAYS = 90
 
 _NO_OWNER = {"", "unassigned", "none"}
 
+# Containers are the oldest and idlest rows in any fetch by their nature, so they
+# float to the top of an age-sorted queue - and closing one strands the open work
+# hanging off it. Compared with separators stripped, since Jira spells these
+# differently between company- and team-managed projects.
+CONTAINER_ISSUE_TYPES = {"epic", "initiative", "toplevelinitiative"}
+
 
 def is_unowned(assignee: object) -> bool:
     return str(assignee or "").strip().lower() in _NO_OWNER
+
+
+def is_container(issue_type: object) -> bool:
+    """Whether the issue holds other tickets' work rather than its own."""
+    normalized = "".join(ch for ch in str(issue_type or "").lower() if ch.isalnum())
+    return normalized in CONTAINER_ISSUE_TYPES
 
 
 def suggest_decision(row: pd.Series) -> tuple[str, str]:
@@ -38,6 +50,11 @@ def suggest_decision(row: pd.Series) -> tuple[str, str]:
     age = float(row.get("ticket_age_days") or 0)
     idle = float(row.get("idle_days") or 0)
     unowned = is_unowned(row.get("assignee"))
+
+    if is_container(row.get("issue_type")):
+        # An epic is old because its children are; closing it on age alone would
+        # orphan whatever is still open underneath.
+        return KEEP, f"{row.get('issue_type')} - close it by finishing its children"
 
     if age >= ABANDONED_AGE_DAYS and idle >= ABANDONED_IDLE_DAYS:
         return CLOSE, f"{age:.0f}d old, untouched for {idle:.0f}d"

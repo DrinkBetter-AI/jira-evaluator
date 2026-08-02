@@ -669,6 +669,10 @@ def _render_triage_card(row: pd.Series) -> None:
         (f"Epic: {row['epic_summary'] or 'none'}", not str(row["epic_summary"] or "").strip()),
         (f"Priority: {row['priority'] or 'none'}", False),
     ]
+    if cleanup.is_container(row.get("issue_type")):
+        # Closing a container from an age-sorted queue is the one decision here
+        # that can strand other people's open work, so it is called out in red.
+        chips.append(("Holds other tickets - closing it orphans them", True))
     chip_html = "".join(
         f'<span class="{"hot" if hot else ""}">{html.escape(str(text))}</span>'
         for text, hot in chips
