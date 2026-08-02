@@ -43,7 +43,11 @@ def _due_pressure(due_date: object, now: pd.Timestamp) -> float:
     if due_date is None or pd.isna(due_date):
         return 0.0
     # Jira due dates are date-only, so compare whole days: due today is not yet late.
-    days_left = (pd.Timestamp(due_date).normalize() - now.normalize()).days
+    # Coerced here rather than assumed, so the scorer works on a raw Jira frame.
+    due = pd.to_datetime(due_date, utc=True, errors="coerce")
+    if pd.isna(due):
+        return 0.0
+    days_left = (due.normalize() - now.normalize()).days
     if days_left < 0:
         return 20.0
     if days_left <= 3:

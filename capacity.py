@@ -45,20 +45,29 @@ def parse_weekly_hours(spec: str) -> dict[str, float]:
     return hours
 
 
-def match_weekly_hours(name: str, weekly_hours: dict[str, float]) -> float | None:
-    """Declared hours for a Jira display name, matching a first name too.
+def _name_tokens(name: str) -> set[str]:
+    return set(str(name).strip().lower().replace(".", " ").split())
 
-    The roster is written by hand, so ``Farid=20`` has to find ``Farid Shahidi``
-    rather than producing a second, empty row for the same person.
+
+def same_person(left: str, right: str) -> bool:
+    """Whether two spellings of a name denote one person.
+
+    The comparison is symmetric because the roster is hand-written and Jira is
+    not: ``Farid`` must find ``Farid Shahidi``, and ``Mehdi Ordikhani`` must
+    find ``Mehdi Ordikhani Fard``.
     """
+    a, b = _name_tokens(left), _name_tokens(right)
+    if not a or not b:
+        return False
+    return a <= b or b <= a
+
+
+def match_weekly_hours(name: str, weekly_hours: dict[str, float]) -> float | None:
+    """Declared hours for a Jira display name, tolerating shorter spellings."""
     if name in weekly_hours:
         return weekly_hours[name]
-    tokens = set(str(name).strip().lower().replace(".", " ").split())
-    if not tokens:
-        return None
     for declared, hours in weekly_hours.items():
-        key = declared.strip().lower()
-        if key == str(name).strip().lower() or key in tokens:
+        if same_person(declared, name):
             return hours
     return None
 
@@ -121,7 +130,7 @@ def capacity_table(
     unmatched = {
         declared
         for declared in weekly_hours
-        if not any(match_weekly_hours(name, {declared: 0.0}) is not None for name in known)
+        if not any(same_person(declared, name) for name in known)
     }
     names = sorted(known | unmatched)
     if not names:
