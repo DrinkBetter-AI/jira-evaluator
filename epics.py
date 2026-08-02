@@ -59,6 +59,8 @@ def epic_rollup(df: pd.DataFrame) -> pd.DataFrame:
         frame["_hours"] = pd.to_numeric(frame["estimate_hours"], errors="coerce").fillna(0.0)
     else:
         frame["_hours"] = 0.0
+    # "Unassigned" is Jira's placeholder, not an owner, so it must not be counted.
+    frame["_owner"] = owners.where(frame["_unassigned"].eq(0), pd.NA)
     # Tickets outside any sprint must not count as a sprint of their own.
     frame["_sprint"] = (
         frame.get("sprint_name", pd.Series("", index=frame.index))
@@ -70,7 +72,7 @@ def epic_rollup(df: pd.DataFrame) -> pd.DataFrame:
 
     grouped = frame.groupby(["epic", "epic_key"], dropna=False).agg(
         open_children=("key", "count"),
-        owners=("assignee", "nunique"),
+        owners=("_owner", "nunique"),
         avg_idle=("_idle", "mean"),
         max_idle=("_idle", "max"),
         unassigned=("_unassigned", "sum"),

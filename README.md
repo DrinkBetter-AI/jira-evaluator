@@ -39,7 +39,8 @@ profile when they are not all set.
 | `JIRA_WEEKLY_HOURS` | no | — | Hours per week each person is available, e.g. `Tam=10,Shivanand=20,Mehdi Ordikhani=40`; drives *Availability vs Commitment* |
 | `JIRA_AUDIT_LOG_PATH` | no | `logs/jira_ticket_changes.jsonl` | Where write-back history is recorded; point at durable storage when containerized |
 | `JIRA_BROWSE_BASE` | no | `<resolved Jira site>/browse` | Base URL for ticket hyperlinks; defaults to the site the credentials resolve to |
-| `JIRA_TEAM_PROJECTS` | no | — | Which Jira projects form each team, e.g. `Marketplace=MB;App=AS,OA;Design=MAR`; unset means one team per project key |
+| `JIRA_TEAM_PROJECTS` | no | — | Which Jira projects form each team, e.g. `Marketplace=MB;App=AS,OA;Design=MAR`; used only where the assignee roster has no answer |
+| `JIRA_TEAM_PEOPLE` | no | the VinoVoss roster in `teams.py` | Who sits on each team, e.g. `Design=Robert,Alesya;App=Ali,Farid`; first names match Jira display names, and a `Former staff` team surfaces work still owned by leavers |
 | `DASHBOARD_PASSWORD` | no | — | Shared password visitors must enter; unset means no gate, which is the norm locally |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
@@ -110,8 +111,10 @@ past changes matters:
    coverage, stale late-stage work, and oldest ticket age, colored by severity.
 4. **Teams** — open load, staffing, idle pressure and estimate gaps per team, plus
    the active (or next) sprint for the selected team: ticket count, people,
-   committed hours and status mix. Teams come from `JIRA_TEAM_PROJECTS`; without it
-   each Jira project key is its own team.
+   committed hours and status mix. A ticket's team comes from its assignee
+   (`JIRA_TEAM_PEOPLE`) first, since part-time people work across projects, then
+   from `JIRA_TEAM_PROJECTS`, then from the raw project key. Unowned tickets are
+   grouped as *Unassigned work* rather than credited to a team.
 5. **Epics** — open children rolled up per epic with the signals that mark an epic
    as drifting (idle, unassigned children, missing estimates, spread across sprints,
    too many owners), plus a count of tickets with no epic at all. Because the JQL

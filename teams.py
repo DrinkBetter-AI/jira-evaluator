@@ -1,9 +1,13 @@
-"""Team membership derived from Jira projects.
+"""Team membership for tickets.
 
-Jira has no notion of "the Marketplace team"; the closest durable signal is the
-project a ticket lives in. ``JIRA_TEAM_PROJECTS`` maps one onto the other, e.g.
-``"Marketplace=MB,SI;App=AS,OA;Design=MAR"``. Without it every project is its
-own team, which is still useful and needs no configuration.
+Jira knows nothing about "the Marketplace team". Two signals can stand in for it:
+who the ticket is assigned to (``JIRA_TEAM_PEOPLE``) and which project it lives in
+(``JIRA_TEAM_PROJECTS``). People win where both apply, because part-time engineers
+here work across several projects while their team stays the same.
+
+``JIRA_TEAM_PEOPLE`` is ``"Team=Name,Name;Team=Name"``. Names are matched loosely
+against the Jira display name - a configured ``Farid`` matches ``Farid Shahidi`` -
+so the roster does not have to mirror Jira's spelling.
 """
 
 from __future__ import annotations
@@ -12,37 +16,94 @@ import pandas as pd
 
 
 UNASSIGNED_TEAM = "Other"
+NO_OWNER_TEAM = "Unassigned work"
+# People who left: their open tickets are real work with nobody behind it.
+FORMER_TEAM = "Former staff"
+
+_NO_OWNER = {"", "unassigned", "none"}
+
+# The VinoVoss roster as of this writing; overridden wholesale by JIRA_TEAM_PEOPLE.
+DEFAULT_TEAM_PEOPLE = (
+    "Marketplace=Shawn,Shown,David,Mohsen,Gaston;"
+    "CRM=Anouar,Jal;"
+    "App=Ali,Farid;"
+    "Design=Robert,Alesya;"
+    "QA=Santi,Dina;"
+    "ML=Tam,Mehdi,Jim;"
+    "Business=Zoe,Praveen,Igor,Jason,Kenesha,Whitney,Jennifer,Nancy,Matthew,Sylvia,Evmorfia;"
+    "Leadership=Angel,Arsalan,Mihai,Jeff;"
+    f"{FORMER_TEAM}=Armine,Saji,Sai,Saeid,Haichen,Yantao,Dan"
+)
+
+
+def _parse_groups(spec: str) -> dict[str, str]:
+    """``"Team=a,b;Team=c"`` -> ``{"a": "Team", "b": "Team", "c": "Team"}``."""
+    mapping: dict[str, str] = {}
+    for group in str(spec or "").split(";"):
+        team, _, members = group.partition("=")
+        team = team.strip()
+        if not team:
+            continue
+        for member in members.split(","):
+            member = member.strip()
+            if member:
+                mapping[member.lower()] = team
+    return mapping
 
 
 def parse_team_projects(spec: str) -> dict[str, str]:
     """Project key -> team name, from the ``Team=KEY,KEY;Team=KEY`` spec."""
-    mapping: dict[str, str] = {}
-    for group in str(spec or "").split(";"):
-        team, _, keys = group.partition("=")
-        team = team.strip()
-        if not team:
-            continue
-        for key in keys.split(","):
-            key = key.strip().upper()
-            if key:
-                mapping[key] = team
-    return mapping
+    return {key.upper(): team for key, team in _parse_groups(spec).items()}
 
 
-def add_team(df: pd.DataFrame, project_teams: dict[str, str]) -> pd.DataFrame:
-    """Attach a ``team`` column; unmapped projects keep their key as the team."""
+def parse_team_people(spec: str) -> dict[str, str]:
+    """Person name -> team name, from the ``Team=Name,Name;Team=Name`` spec."""
+    return _parse_groups(spec)
+
+
+def _team_for_person(display_name: str, people_teams: dict[str, str]) -> str | None:
+    """Match a Jira display name against the roster, full name or first name."""
+    name = display_name.strip().lower()
+    if not name or name in _NO_OWNER:
+        return None
+    if name in people_teams:
+        return people_teams[name]
+    tokens = set(name.replace(".", " ").split())
+    for person, team in people_teams.items():
+        if person in tokens:
+            return team
+    return None
+
+
+def add_team(
+    df: pd.DataFrame,
+    project_teams: dict[str, str],
+    people_teams: dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Attach a ``team`` column: assignee first, then project, then the raw key."""
     out = df.copy()
-    if "project_key" not in out.columns:
-        out["team"] = UNASSIGNED_TEAM
-        return out
+    people_teams = people_teams or {}
 
-    keys = out["project_key"].fillna("").astype(str).str.strip().str.upper()
-    if project_teams:
-        out["team"] = keys.map(project_teams).fillna(
-            keys.where(keys.ne(""), UNASSIGNED_TEAM)
+    owners = (
+        out.get("assignee", pd.Series("", index=out.index)).fillna("").astype(str)
+    )
+    by_person = owners.map(lambda name: _team_for_person(name, people_teams))
+
+    if "project_key" in out.columns:
+        keys = out["project_key"].fillna("").astype(str).str.strip().str.upper()
+        by_project = keys.map(project_teams) if project_teams else pd.Series(
+            pd.NA, index=out.index
         )
+        by_project = by_project.fillna(keys.where(keys.ne(""), UNASSIGNED_TEAM))
     else:
-        out["team"] = keys.where(keys.ne(""), UNASSIGNED_TEAM)
+        by_project = pd.Series(UNASSIGNED_TEAM, index=out.index)
+
+    # An unowned ticket has no team of its own; it belongs to whoever picks it up,
+    # so it is called out rather than silently attributed to a project's team.
+    no_owner = owners.str.strip().str.lower().isin(_NO_OWNER)
+    out["team"] = by_person.fillna(by_project).mask(
+        no_owner & bool(people_teams), NO_OWNER_TEAM
+    )
     return out
 
 
@@ -55,7 +116,9 @@ def team_summary(df: pd.DataFrame) -> pd.DataFrame:
     frame = df.copy()
     frame["_idle"] = pd.to_numeric(frame.get("idle_days"), errors="coerce").fillna(0.0)
     owners = frame.get("assignee", pd.Series("", index=frame.index)).fillna("").astype(str)
-    frame["_unassigned"] = owners.str.strip().str.lower().isin({"", "unassigned", "none"}).astype(int)
+    frame["_unassigned"] = owners.str.strip().str.lower().isin(_NO_OWNER).astype(int)
+    # "Unassigned" is a placeholder name, not a teammate, so it must not be counted.
+    frame["_owner"] = owners.where(frame["_unassigned"].eq(0), pd.NA)
     frame["_idle30"] = (frame["_idle"] >= 30).astype(int)
     if "policy_violation" in frame.columns:
         frame["_no_estimate"] = frame["policy_violation"].fillna(False).astype(int)
@@ -64,7 +127,7 @@ def team_summary(df: pd.DataFrame) -> pd.DataFrame:
 
     grouped = frame.groupby("team", dropna=False).agg(
         open=("key", "count"),
-        people=("assignee", "nunique"),
+        people=("_owner", "nunique"),
         avg_idle=("_idle", "mean"),
         idle_30d=("_idle30", "sum"),
         unassigned=("_unassigned", "sum"),

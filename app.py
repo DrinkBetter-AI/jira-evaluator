@@ -29,7 +29,13 @@ from jira_client import (
 from access_gate import require_password
 from capacity import capacity_table, parse_weekly_hours, working_days
 from epics import epic_health_flags, epic_rollup
-from teams import add_team, parse_team_projects, team_summary
+from teams import (
+    DEFAULT_TEAM_PEOPLE,
+    add_team,
+    parse_team_people,
+    parse_team_projects,
+    team_summary,
+)
 from theme import inject_styles, kpi_strip
 from hygiene import (
     DEFAULT_STALE_DAYS,
@@ -55,6 +61,19 @@ ORG_TEAM_MEMBERS = [
     if name.strip()
 ]
 
+# Placeholder owner names Jira writes when nobody is assigned.
+_NO_OWNER_NAMES = {"", "unassigned", "none"}
+
+
+def _positive_int(value: str | None, *, default: int) -> int:
+    """Read a positive integer setting; a typo costs the setting, not the app."""
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
 SCOPE_ORG = "Organization"
 SCOPE_TEAM = "Team"
 SCOPE_INDIVIDUAL = "Individual"
@@ -67,7 +86,7 @@ TRANSITION_LOOKUP_LIMIT = 50
 # Upper bound on how many tickets a bulk write-back pre-selects.
 BULK_ACTION_DEFAULT_LIMIT = 25
 # Ceiling on tickets fetched per run; org-wide JQL can exceed the old fixed 1000.
-MAX_RESULTS = int(os.getenv("JIRA_MAX_RESULTS", "1000"))
+MAX_RESULTS = _positive_int(os.getenv("JIRA_MAX_RESULTS"), default=1000)
 # Statuses hidden when "Include Backlogs" is off; projects name their backlog differently.
 BACKLOG_STATUSES = {
     name.strip().lower()
@@ -78,6 +97,9 @@ BACKLOG_STATUSES = {
 WEEKLY_HOURS = parse_weekly_hours(os.getenv("JIRA_WEEKLY_HOURS", ""))
 # Which Jira projects make up each team ("Marketplace=MB;App=AS,OA").
 TEAM_PROJECTS = parse_team_projects(os.getenv("JIRA_TEAM_PROJECTS", ""))
+# Who sits on which team ("Design=Robert,Alesya;App=Ali,Farid"); people beat
+# projects because part-timers here work across several projects.
+TEAM_PEOPLE = parse_team_people(os.getenv("JIRA_TEAM_PEOPLE", DEFAULT_TEAM_PEOPLE))
 _SCOPE_ASSIGNEES_KEY = "_scope_assignees"
 
 
@@ -404,7 +426,7 @@ def _render_team_overview(df: pd.DataFrame) -> None:
     else:
         st.caption("Team membership comes from JIRA_TEAM_PROJECTS.")
 
-    scored = add_team(estimate_policy(df, BACKLOG_STATUSES), TEAM_PROJECTS)
+    scored = add_team(estimate_policy(df, BACKLOG_STATUSES), TEAM_PROJECTS, TEAM_PEOPLE)
     summary = team_summary(scored)
     if summary.empty:
         st.info("No tickets in the current scope.")
@@ -447,11 +469,17 @@ def _render_team_overview(df: pd.DataFrame) -> None:
     )
     current = active[active["sprint_name"].fillna("").astype(str).eq(sprint_label)]
     owners = current["assignee"].fillna("").astype(str).str.strip().str.lower()
+    unowned = owners.isin(_NO_OWNER_NAMES)
     kpi_strip(
         [
             ("Sprint", sprint_label, chosen, "info"),
             ("Tickets", f"{len(current)}", "in this sprint", "neutral"),
-            ("People", f"{current['assignee'].nunique()}", "with sprint work", "neutral"),
+            (
+                "People",
+                f"{current.loc[~unowned, 'assignee'].nunique()}",
+                "with sprint work",
+                "neutral",
+            ),
             (
                 "Committed",
                 f"{current['estimate_hours'].sum():.0f}h",
@@ -460,9 +488,9 @@ def _render_team_overview(df: pd.DataFrame) -> None:
             ),
             (
                 "Unassigned",
-                f"{int(owners.isin({'', 'unassigned', 'none'}).sum())}",
+                f"{int(unowned.sum())}",
                 "no owner in sprint",
-                "warning" if owners.isin({"", "unassigned", "none"}).any() else "good",
+                "warning" if unowned.any() else "good",
             ),
         ]
     )
