@@ -27,6 +27,25 @@ _STYLE = """
 }
 .kpi-card .kpi-value { font-size: 2rem; font-weight: 700; line-height: 1.2; }
 .kpi-card .kpi-note { font-size: 0.78rem; color: #9ca3af; }
+
+/* Triage card: one ticket, sized to be judged at a glance. */
+.triage-card {
+  border: 1px solid #e5e7eb; border-radius: 14px; background: #ffffff;
+  padding: 1.1rem 1.3rem; margin: 0.4rem 0 0.9rem;
+}
+.triage-card .triage-key { font-size: 0.85rem; font-weight: 700; color: #1d4ed8; }
+.triage-card .triage-summary {
+  font-size: 1.25rem; font-weight: 600; color: #111827; line-height: 1.35;
+  margin: 0.15rem 0 0.7rem;
+}
+.triage-meta { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.6rem; }
+.triage-meta span {
+  background: #f3f4f6; color: #4b5563; border-radius: 6px;
+  padding: 3px 9px; font-size: 0.76rem; white-space: nowrap;
+}
+/* The signals that argue for closing, so the eye finds them first. */
+.triage-meta span.hot { background: #fdecec; color: #b91c1c; font-weight: 600; }
+.triage-why { font-size: 0.85rem; color: #6b7280; font-style: italic; }
 </style>
 """
 

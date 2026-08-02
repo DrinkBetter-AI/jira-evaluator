@@ -34,6 +34,8 @@ from capacity import (
     parse_weekly_hours,
     working_days,
 )
+import cleanup
+from cleanup import is_unowned
 from epics import epic_health_flags, epic_rollup
 from teams import (
     NO_OWNER_TEAM,
@@ -594,6 +596,220 @@ def _render_epics(df: pd.DataFrame) -> None:
         file_name="jira_epic_rollup.csv",
         mime="text/csv",
     )
+
+
+_TRIAGE_DECISIONS_KEY = "_triage_decisions"
+_TRIAGE_POSITION_KEY = "_triage_position"
+_TRIAGE_QUEUE_KEY = "_triage_queue_name"
+
+
+def _triage_state(queue_name: str) -> tuple[dict[str, str], int]:
+    """Decisions made so far and the current position, reset when the queue changes."""
+    if st.session_state.get(_TRIAGE_QUEUE_KEY) != queue_name:
+        st.session_state[_TRIAGE_QUEUE_KEY] = queue_name
+        st.session_state[_TRIAGE_DECISIONS_KEY] = {}
+        st.session_state[_TRIAGE_POSITION_KEY] = 0
+    return (
+        st.session_state.setdefault(_TRIAGE_DECISIONS_KEY, {}),
+        int(st.session_state.setdefault(_TRIAGE_POSITION_KEY, 0)),
+    )
+
+
+def _render_triage_card(row: pd.Series) -> None:
+    """One ticket, large enough to judge without opening Jira."""
+    age = float(row["ticket_age_days"] or 0)
+    idle = float(row["idle_days"] or 0)
+    owner = "Nobody" if is_unowned(row["assignee"]) else str(row["assignee"])
+    chips = [
+        (f"{age:.0f} days old", age >= cleanup.ABANDONED_AGE_DAYS),
+        (f"untouched {idle:.0f} days", idle >= cleanup.ABANDONED_IDLE_DAYS),
+        (f"Owner: {owner}", is_unowned(row["assignee"])),
+        (f"Status: {row['status']}", False),
+        (f"Epic: {row['epic_summary'] or 'none'}", not str(row["epic_summary"] or "").strip()),
+        (f"Priority: {row['priority'] or 'none'}", False),
+    ]
+    chip_html = "".join(
+        f'<span class="{"hot" if hot else ""}">{html.escape(str(text))}</span>'
+        for text, hot in chips
+    )
+    st.markdown(
+        f'<div class="triage-card">'
+        f'<div class="triage-key">{html.escape(str(row["key"]))}</div>'
+        f'<div class="triage-summary">{html.escape(str(row["summary"]))}</div>'
+        f'<div class="triage-meta">{chip_html}</div>'
+        f'<div class="triage-why">Suggested: {html.escape(str(row["suggested"]))} '
+        f'- {html.escape(str(row["why"]))}</div>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(f"[Open {row['key']} in Jira]({_jira_ticket_url(str(row['key']))})")
+
+
+def _render_cleanup(df: pd.DataFrame) -> None:
+    """Review the oldest tickets one at a time and decide their fate.
+
+    Nothing reaches Jira from here until the decisions are applied at the
+    bottom, so a wrong click costs one more click rather than a ticket.
+    """
+    st.subheader("Backlog Cleanup")
+    st.caption(
+        "The oldest open tickets, one at a time. Decisions are held in this "
+        "session and only written to Jira when you apply them at the bottom."
+    )
+    if df.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    controls = st.columns([2, 1])
+    queue_choice = controls[0].radio(
+        "Queue",
+        options=["Oldest open tickets", "Oldest unassigned tickets"],
+        horizontal=True,
+    )
+    size = controls[1].selectbox("How many", options=[25, 50, 100, 200], index=2)
+
+    unassigned_only = queue_choice.startswith("Oldest unassigned")
+    queue = cleanup.build_queue(df, unassigned_only=unassigned_only, limit=int(size))
+    if queue.empty:
+        st.success("Nothing in this queue.")
+        return
+
+    decisions, position = _triage_state(f"{queue_choice}:{size}:{len(queue)}")
+    position = max(0, min(position, len(queue)))
+    counts = cleanup.decision_summary(decisions)
+
+    st.progress(
+        len(decisions) / len(queue),
+        text=(
+            f"{len(decisions)} of {len(queue)} reviewed - "
+            f"{counts[cleanup.CLOSE]} to close, {counts[cleanup.KEEP]} keep, "
+            f"{counts[cleanup.NEEDS_OWNER]} need an owner, {counts[cleanup.SKIP]} skipped"
+        ),
+    )
+
+    if position >= len(queue):
+        st.success("End of the queue - review the decisions below.")
+    else:
+        row = queue.iloc[position]
+        _render_triage_card(row)
+
+        def _decide(choice: str) -> None:
+            st.session_state[_TRIAGE_DECISIONS_KEY][row["key"]] = choice
+            st.session_state[_TRIAGE_POSITION_KEY] = position + 1
+
+        buttons = st.columns(5)
+        buttons[0].button(
+            "Close it",
+            width="stretch",
+            type="primary" if row["suggested"] == cleanup.CLOSE else "secondary",
+            on_click=_decide,
+            args=(cleanup.CLOSE,),
+            key=f"triage_close_{row['key']}",
+        )
+        buttons[1].button(
+            "Keep",
+            width="stretch",
+            type="primary" if row["suggested"] == cleanup.KEEP else "secondary",
+            on_click=_decide,
+            args=(cleanup.KEEP,),
+            key=f"triage_keep_{row['key']}",
+        )
+        buttons[2].button(
+            "Needs an owner",
+            width="stretch",
+            on_click=_decide,
+            args=(cleanup.NEEDS_OWNER,),
+            key=f"triage_owner_{row['key']}",
+        )
+        buttons[3].button(
+            "Skip",
+            width="stretch",
+            on_click=_decide,
+            args=(cleanup.SKIP,),
+            key=f"triage_skip_{row['key']}",
+        )
+        if buttons[4].button("Back", width="stretch", disabled=position == 0):
+            st.session_state[_TRIAGE_POSITION_KEY] = position - 1
+            st.rerun()
+
+        st.caption(f"Ticket {position + 1} of {len(queue)}")
+
+    _render_triage_decisions(queue, decisions)
+
+
+def _render_triage_decisions(queue: pd.DataFrame, decisions: dict[str, str]) -> None:
+    """The decisions taken so far, and the one place they can reach Jira."""
+    if not decisions:
+        return
+
+    decided = queue[queue["key"].isin(decisions)].copy()
+    decided["decision"] = decided["key"].map(decisions)
+    decided["key_url"] = decided["key"].map(_jira_ticket_url)
+
+    with st.expander(f"Decisions so far ({len(decided)})", expanded=False):
+        st.dataframe(
+            decided[["key_url", "decision", "summary", "assignee", "ticket_age_days", "idle_days"]],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "key_url": st.column_config.LinkColumn(
+                    "Key", display_text=JIRA_KEY_DISPLAY_PATTERN
+                ),
+                "decision": st.column_config.TextColumn("Decision"),
+                "summary": st.column_config.TextColumn("Summary"),
+                "assignee": st.column_config.TextColumn("Assignee"),
+                "ticket_age_days": st.column_config.NumberColumn("Age (days)", format="%.0f"),
+                "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.0f"),
+            },
+        )
+        st.download_button(
+            "Download decisions (CSV)",
+            data=decided[["key", "decision", "summary", "assignee", "status", "ticket_age_days"]]
+            .to_csv(index=False)
+            .encode("utf-8"),
+            file_name="jira_cleanup_decisions.csv",
+            mime="text/csv",
+        )
+        if st.button("Start over", key="triage_reset"):
+            st.session_state[_TRIAGE_DECISIONS_KEY] = {}
+            st.session_state[_TRIAGE_POSITION_KEY] = 0
+            st.rerun()
+
+    to_close = cleanup.pending_closures(queue, decisions)
+    if not to_close:
+        return
+
+    st.markdown(f"##### Apply {len(to_close)} closure(s) to Jira")
+    apply_columns = st.columns([2, 2, 1])
+    target_status = apply_columns[0].text_input(
+        "Transition them to",
+        value="Done",
+        help="The Jira status to move closed tickets into; it must be a valid transition.",
+    )
+    confirmed = apply_columns[1].checkbox(
+        f"Yes, write these {len(to_close)} changes to Jira", value=False
+    )
+    if not apply_columns[2].button("Apply", type="primary", disabled=not confirmed):
+        return
+
+    client = JiraClient.from_yaml(creds_path=CREDS_PATH, profile_name=PROFILE_NAME)
+    with st.spinner(f"Closing {len(to_close)} tickets..."):
+        succeeded, failed, _ = _apply_action_with_audit(
+            client=client,
+            action_type="status",
+            selected_keys=to_close,
+            target=target_status.strip(),
+        )
+    if succeeded:
+        st.success(f"Closed {len(succeeded)}: {', '.join(succeeded)}")
+        for key in succeeded:
+            st.session_state[_TRIAGE_DECISIONS_KEY].pop(key, None)
+        st.cache_data.clear()
+    if failed:
+        st.error(
+            "Could not close "
+            + "; ".join(f"{key}: {reason}" for key, reason in failed.items())
+        )
 
 
 def _render_estimate_policy(df: pd.DataFrame) -> None:
@@ -2021,6 +2237,9 @@ def main() -> None:
 
     st.divider()
     _render_epics(_metrics_df(filtered, include_backlogs))
+
+    st.divider()
+    _render_cleanup(_metrics_df(filtered, include_backlogs))
 
     st.divider()
     _render_scope_breakdown(filtered, scope=scope, include_backlogs=include_backlogs)

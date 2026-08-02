@@ -132,7 +132,9 @@ past changes matters:
 1. **Scope** (sidebar) — `Organization` (every assignee returned by the JQL), `Team`
    (multi-select pre-filled from `JIRA_TEAM_MEMBERS`), or `Individual` (one assignee).
 2. **Filters** (sidebar) — status, priority, minimum idle days, minimum ticket age,
-   and an *Include Backlogs* toggle that all downstream sections respect.
+   and an *Include Backlogs* toggle that the summary and analysis sections respect.
+   The bubble chart and the sprint editor deliberately ignore it, since pulling a
+   Backlog ticket into a sprint requires being able to see it.
 3. **Headline strip** — open tickets, tickets stalled 30d+, unassigned, estimate
    coverage, stale late-stage work, and oldest ticket age, colored by severity.
 4. **Teams** — open load, staffing, idle pressure and estimate gaps per team, plus
@@ -145,24 +147,34 @@ past changes matters:
    as drifting (idle, unassigned children, missing estimates, spread across sprints,
    too many owners), plus a count of tickets with no epic at all. Because the JQL
    loads open work only, this is remaining work per epic, never completion.
-6. **Assignee Breakdown** — per-assignee roll-up (open tickets, average and top
+6. **Backlog Cleanup** — the oldest open tickets presented one at a time, because a
+   backlog is triaged in single decisions rather than in a table of 200 rows. Each
+   card carries the ticket's age, idle time, owner, status, epic and priority, with
+   the signals arguing for closure highlighted, and a suggested decision derived in
+   `cleanup.suggest_decision`: a ticket a year old and untouched for six months, or
+   one nobody ever took that has sat 90 days, is proposed for closing; anything else
+   defaults to *Keep*. Two queues: oldest open, and oldest unassigned. Decisions live
+   in the session and are exportable as CSV; only the explicit *Apply* button at the
+   bottom writes to Jira, transitioning the tickets marked *Close* to a status you
+   name, through the same audited path as every other write.
+7. **Assignee Breakdown** — per-assignee roll-up (open tickets, average and top
    priority score, average and max idle days, tickets idle 15d+, tickets with no
    priority). In `Individual` scope this collapses to that person's headline numbers.
-7. **Prioritized Queue** — tickets ranked by priority score with the reasons behind
+8. **Prioritized Queue** — tickets ranked by priority score with the reasons behind
    the score, and a CSV export.
-8. **Estimate Policy** — the team rule is that a ticket carries an estimate once it
+9. **Estimate Policy** — the team rule is that a ticket carries an estimate once it
    leaves Backlog. Anything past a status listed in `JIRA_BACKLOG_STATUSES` with no
    estimate is a violation; the panel shows overall compliance, a per-owner table,
    and the offending tickets (CSV export included). Backlog tickets are exempt and
    are excluded from the denominator.
-9. **Stale & Abandoned** — tickets idle past a threshold (90 days by default,
+10. **Stale & Abandoned** — tickets idle past a threshold (90 days by default,
    adjustable), ranked by how many neglect signals they carry: unassigned, no
    estimate, no due date, never started, no priority, carried over 3+ sprints. Read
    only — it recommends what to close or send back to Backlog, it never writes.
    Backlog tickets are always included here regardless of *Include Backlogs*.
-10. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
+11. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
    age-vs-idle chart, sprint planning tables, and bulk Jira write-back actions.
-11. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
+12. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
    per person against what they are actually available for, which matters when most
    contributors are part-time: `JIRA_WEEKLY_HOURS` is spread over the weekdays
    between the sprint's start and end dates, so 20h/week across a 10-working-day
@@ -172,7 +184,9 @@ past changes matters:
    spare capacity surfaces; the Team and Individual scopes narrow the table to the
    people selected, so that someone merely filtered out is not read as idle. People
    without declared hours show *Unknown*, and a sprint with no dates in Jira
-   disables the table rather than guessing.
+   disables the table rather than guessing. A declaration written as a bare first
+   name that matches two people in Jira is withheld from both rather than granted
+   twice, which shows as *Ambiguous roster name*; spell it as the full display name.
 
 ## Metric definitions
 
