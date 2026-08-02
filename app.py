@@ -379,7 +379,7 @@ def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | No
     return [selected]
 
 
-# --- Per-assignee drill-down: attention tiers + Devin-suitability -------------
+# --- Per-assignee drill-down: attention tiers --------------------------------
 
 # Four attention tiers colour each engineer's board. Red is most urgent, purple
 # is parked low-priority work. Thresholds are deliberately simple so a person
@@ -408,25 +408,6 @@ _TIER_RED_IDLE = 90.0
 _TIER_YELLOW_SCORE = 30.0
 _TIER_YELLOW_IDLE = 30.0
 
-# Keyword heuristic for "could Devin pick this up?". Engineering execution work
-# with a clear code surface leans yes; product/design/content/coordination work
-# leans no. Mixed or empty signals stay "Maybe" so nobody trusts it blindly.
-_DEVIN_YES_KEYWORDS = (
-    "bug", "fix", "error", "crash", "exception", "refactor", "migrat", "endpoint",
-    "api", "backend", "frontend", "unit test", "test", "upgrade", "dependency",
-    "integrat", "ssr", "cache", "database", "postgres", "mongo", "sql", "query",
-    "script", "pipeline", "build", "lint", "typing", "performance", "latency",
-    "resource", "config", "infra", "deploy", "ranker", "search", "index",
-    "schema", "logging", "timeout", "rate limit", "webhook", "parser",
-    "validation",
-)
-_DEVIN_NO_KEYWORDS = (
-    "design", "mockup", "wireframe", "logo", "brand", "copywriting", "blog",
-    "article", "story:", "series:", "trend", "instagram", "social", "campaign",
-    "marketing", "video", "interview", "research", "survey", "meeting",
-    "discussion", "strategy", "hiring", "roadmap", "pricing", "content",
-)
-
 
 def _attention_tier(row: pd.Series) -> str:
     """Bucket a ticket into one of four attention tiers for the drill-down."""
@@ -440,19 +421,6 @@ def _attention_tier(row: pd.Series) -> str:
     if score >= _TIER_YELLOW_SCORE or idle >= _TIER_YELLOW_IDLE:
         return _TIER_YELLOW
     return _TIER_GREEN
-
-
-def _devin_can_handle(row: pd.Series) -> str:
-    """Rough hint at whether Devin could take a ticket, from its text signals."""
-    issue_type = str(row.get("issue_type") or "").strip().lower()
-    text = f"{row.get('summary') or ''} {issue_type}".lower()
-    yes = issue_type == "bug" or any(k in text for k in _DEVIN_YES_KEYWORDS)
-    no = any(k in text for k in _DEVIN_NO_KEYWORDS)
-    if yes and not no:
-        return "Yes"
-    if no and not yes:
-        return "No"
-    return "Maybe"
 
 
 def _tier_legend_html() -> str:
@@ -473,13 +441,8 @@ def _tier_legend_html() -> str:
     return f'<div style="font-size:0.85rem;margin:2px 0 10px;">{spans}</div>'
 
 
-def _assignee_csv_name(assignee: str) -> str:
-    slug = re.sub(r"[^A-Za-z0-9]+", "_", str(assignee)).strip("_").lower()
-    return f"jira_{slug or 'assignee'}_tickets.csv"
-
-
 def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
-    """The per-person ticket board: tier-coloured, sortable, with a Devin hint."""
+    """The per-person ticket board: tier-coloured and sortable."""
     owners = df["assignee"].fillna("").astype(str).str.strip()
     target = str(assignee).strip()
     if target.lower() in _NO_OWNER_NAMES or target.lower() == "(no owner)":
@@ -494,7 +457,6 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
     if "has_estimate" not in owned.columns:
         owned = estimate_policy(owned, BACKLOG_STATUSES)
     owned["tier"] = owned.apply(_attention_tier, axis=1)
-    owned["devin"] = owned.apply(_devin_can_handle, axis=1)
     owned["has_estimate_label"] = owned["has_estimate"].map(
         lambda value: "Yes" if bool(value) else "No"
     )
@@ -522,7 +484,6 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
         "Status": "status",
         "Severity (priority)": "priority",
         "Has estimate": "has_estimate_label",
-        "Devin-able?": "devin",
     }
     sort_options = {label: col for label, col in sort_options.items() if col in owned.columns}
     sort_col, dir_col = st.columns([3, 1])
@@ -547,7 +508,6 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
         "created",
         "updated",
         "has_estimate_label",
-        "devin",
     ]
     display_cols = [c for c in display_cols if c in owned.columns]
     display = owned[display_cols]
@@ -574,17 +534,7 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
             "created": st.column_config.TextColumn("Created"),
             "updated": st.column_config.TextColumn("Updated"),
             "has_estimate_label": st.column_config.TextColumn("Estimate?"),
-            "devin": st.column_config.TextColumn("Devin-able?"),
         },
-    )
-    st.download_button(
-        f"Download {assignee}'s tickets (CSV)",
-        data=owned[["key"] + [c for c in display_cols if c != "key_url"]]
-        .to_csv(index=False)
-        .encode("utf-8"),
-        file_name=_assignee_csv_name(assignee),
-        mime="text/csv",
-        key=f"detail_dl_{assignee}",
     )
 
 
