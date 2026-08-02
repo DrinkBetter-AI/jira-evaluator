@@ -618,8 +618,11 @@ class JiraClient:
             sprint_start = chosen_sprint.get("startDate") if chosen_sprint else None
             sprint_end = chosen_sprint.get("endDate") if chosen_sprint else None
 
-            # Carry-over means the ticket is currently planned/in-flight and was also present in prior closed sprints.
-            carry_over_count = len(closed_sprints) if (future_sprints or active_sprints) else 0
+            # Closed sprints this still-open ticket has already passed through. Not
+            # conditioned on being in a sprint now: a ticket carried through five
+            # sprints and then dropped out of planning is the most abandoned case
+            # there is, and scoring it zero would hide exactly that.
+            carry_over_count = len(closed_sprints)
             last_meaningful_activity = _extract_last_meaningful_activity(issue)
 
             rows.append(

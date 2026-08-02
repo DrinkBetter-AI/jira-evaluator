@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 import os
 import re
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import numpy as np
 import pandas as pd
@@ -1452,7 +1452,11 @@ def _render_sprint_capacity(
 
     # Restore key column from jira_key_link (extract key from URL)
     edited_tickets = edited_output.copy()
-    edited_tickets["key"] = edited_tickets["jira_key_link"].apply(lambda url: url.split("/")[-1])
+    # unquote mirrors the encoding _jira_ticket_url applies, so the key that goes
+    # back to Jira is the key that came out of it.
+    edited_tickets["key"] = edited_tickets["jira_key_link"].apply(
+        lambda url: unquote(str(url).split("/")[-1])
+    )
     edited_tickets = edited_tickets.drop(columns=["jira_key_link"])
 
     # Build edit dicts directly from the data_editor output (edited_tickets) for the displayed rows,
