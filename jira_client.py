@@ -190,7 +190,21 @@ class JiraClient:
         creds_path: str | Path = DEFAULT_CREDS_PATH,
         profile_name: str = DEFAULT_PROFILE_NAME,
     ) -> "JiraClient":
-        """Build a client from environment variables, falling back to the YAML profile."""
+        """Build a client from the named YAML profile, as asked for."""
+        return cls(**load_jira_profile(creds_path=creds_path, profile_name=profile_name))
+
+    @classmethod
+    def resolve(
+        cls,
+        creds_path: str | Path = DEFAULT_CREDS_PATH,
+        profile_name: str = DEFAULT_PROFILE_NAME,
+    ) -> "JiraClient":
+        """Environment credentials if the deployment supplies them, else the profile.
+
+        Kept apart from ``from_yaml`` so a caller naming a specific profile gets
+        that profile: on Cloud Run there is no credentials file and the env vars
+        are the only source, while locally the profile still wins by absence.
+        """
         cfg = load_jira_env()
         if cfg is None:
             cfg = load_jira_profile(creds_path=creds_path, profile_name=profile_name)

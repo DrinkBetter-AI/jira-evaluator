@@ -115,7 +115,7 @@ _SCOPE_ASSIGNEES_KEY = "_scope_assignees"
 def _default_browse_base() -> str:
     """Derive the ticket link prefix from the site the client actually reads from.
 
-    Resolution mirrors JiraClient.from_yaml so links never point at a different
+    Resolution mirrors JiraClient.resolve so links never point at a different
     site than the data: the environment only wins when it carries full
     credentials, otherwise the YAML profile does.
     """
@@ -178,7 +178,7 @@ def fetch_tickets(
     page_size: int,
     schema_version: int,
 ) -> pd.DataFrame:
-    client = JiraClient.from_yaml(creds_path=creds_path, profile_name=profile_name)
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
     _ = schema_version
     result = client.search_issues(
         jql=jql,
@@ -205,13 +205,13 @@ def fetch_tickets(
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_all_priorities(creds_path: str, profile_name: str) -> list[str]:
-    client = JiraClient.from_yaml(creds_path=creds_path, profile_name=profile_name)
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
     return client.get_all_priorities()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_all_users(creds_path: str, profile_name: str) -> list[dict[str, str]]:
-    client = JiraClient.from_yaml(creds_path=creds_path, profile_name=profile_name)
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
     return client.get_all_users()
 
 
@@ -221,7 +221,7 @@ def fetch_available_transition_statuses(
     profile_name: str,
     issue_keys: tuple[str, ...],
 ) -> list[str]:
-    client = JiraClient.from_yaml(creds_path=creds_path, profile_name=profile_name)
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
     available: set[str] = set()
     for key in issue_keys:
         try:
@@ -854,7 +854,7 @@ def _render_triage_decisions(queue: pd.DataFrame, decisions: dict[str, str]) -> 
     if not apply_columns[1].button("Apply", type="primary", disabled=not confirmed):
         return
 
-    client = JiraClient.from_yaml(creds_path=CREDS_PATH, profile_name=PROFILE_NAME)
+    client = JiraClient.resolve(creds_path=CREDS_PATH, profile_name=PROFILE_NAME)
     succeeded: list[str] = []
     failed: dict[str, str] = {}
     progress = st.progress(0.0, text="Resolving transitions...")
@@ -1675,7 +1675,7 @@ def _render_sprint_capacity(
         st.rerun()
 
     if apply_sprint_selection:
-        client = JiraClient.from_yaml(
+        client = JiraClient.resolve(
             creds_path=CREDS_PATH,
             profile_name=PROFILE_NAME,
         )
@@ -2460,7 +2460,7 @@ def main() -> None:
         )
 
     if apply_suggestion and selected_keys:
-        client = JiraClient.from_yaml(
+        client = JiraClient.resolve(
             creds_path=CREDS_PATH,
             profile_name=PROFILE_NAME,
         )
@@ -2523,7 +2523,7 @@ def main() -> None:
             revert_clicked = st.button("Revert selected operation", disabled=not confirm_revert)
 
             if revert_clicked:
-                client = JiraClient.from_yaml(
+                client = JiraClient.resolve(
                     creds_path=CREDS_PATH,
                     profile_name=PROFILE_NAME,
                 )
