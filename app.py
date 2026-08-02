@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import os
 import re
 
@@ -131,7 +132,7 @@ def _browse_base() -> str:
     The value is rendered as a clickable link in several tables, so a scheme
     like ``javascript:`` would turn every ticket key into a trap.
     """
-    configured = os.getenv("JIRA_BROWSE_BASE", "").strip()
+    configured = os.getenv("JIRA_BROWSE_BASE", "").strip().rstrip("/")
     if configured and not configured.lower().startswith(("http://", "https://")):
         configured = ""
     return configured or _default_browse_base()
@@ -1730,7 +1731,8 @@ def _render_status_pills(status_series: pd.Series) -> None:
             f'font-size:0.78rem;font-weight:600;white-space:nowrap;'
             f'border:1px solid {fg}22;'
             f'">'
-            f'{status} <span style="opacity:0.75;font-weight:400;">({count})</span>'
+            f'{html.escape(str(status))} '
+            f'<span style="opacity:0.75;font-weight:400;">({int(count)})</span>'
             f'</span>'
         )
     pills_html += "</div>"

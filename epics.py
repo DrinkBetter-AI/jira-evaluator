@@ -11,6 +11,10 @@ import pandas as pd
 
 NO_EPIC = "No epic"
 
+# Company-managed projects say "Sub-task", team-managed ones say "Subtask", so
+# compare with the separators removed rather than against one spelling.
+EXCLUDED_ISSUE_TYPES = {"subtask", "epic"}
+
 
 def epic_rollup(df: pd.DataFrame) -> pd.DataFrame:
     """Open children per epic, with the signals that mark an epic as drifting."""
@@ -33,8 +37,15 @@ def epic_rollup(df: pd.DataFrame) -> pd.DataFrame:
     # A sub-task belongs to a story that is already counted, and an epic has no
     # epic of its own; either would swell the orphan pile with phantom work.
     if "issue_type" in frame.columns:
-        kinds = frame["issue_type"].fillna("").astype(str).str.strip().str.lower()
-        frame = frame[~kinds.isin({"sub-task", "epic"})]
+        kinds = (
+            frame["issue_type"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .str.replace(r"[-_\s]", "", regex=True)
+        )
+        frame = frame[~kinds.isin(EXCLUDED_ISSUE_TYPES)]
         if frame.empty:
             return pd.DataFrame(columns=columns)
     frame["epic_key"] = frame["epic_key"].fillna("").astype(str).str.strip()

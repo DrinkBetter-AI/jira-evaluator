@@ -17,7 +17,9 @@ NOT_STARTED_STATUSES = {"backlog", "to do", "todo", "discussion needed", "open"}
 
 # Containers hold other tickets' work rather than their own hours, so the
 # estimate rule cannot apply to them.
-CONTAINER_ISSUE_TYPES = {"epic", "initiative", "top-level initiative"}
+# Compared with separators stripped, since Jira spells these differently between
+# company-managed and team-managed projects ("Top-level initiative", "Toplevel").
+CONTAINER_ISSUE_TYPES = {"epic", "initiative", "toplevelinitiative"}
 
 
 def _estimate_seconds(df: pd.DataFrame) -> pd.Series:
@@ -63,7 +65,11 @@ def estimate_policy(df: pd.DataFrame, backlog_statuses: set[str]) -> pd.DataFram
     estimate = _estimate_seconds(out)
     out["estimate_hours"] = (estimate / 3600.0).round(2)
     out["has_estimate"] = estimate.gt(0)
-    is_container = _normalized(out, "issue_type").isin(CONTAINER_ISSUE_TYPES)
+    is_container = (
+        _normalized(out, "issue_type")
+        .str.replace(r"[-_\s]", "", regex=True)
+        .isin(CONTAINER_ISSUE_TYPES)
+    )
     out["policy_applies"] = (
         ~statuses.isin({s.lower() for s in backlog_statuses}) & ~is_container
     )
