@@ -25,6 +25,7 @@ DEFAULT_FIELDS = [
     "issuetype",
     "labels",
     "resolution",
+    "resolutiondate",
     "statuscategorychangedate",
     "timetracking",
     "customfield_10020",
@@ -217,6 +218,35 @@ class JiraClient:
         session.auth = (self.email, self.api_token)
         session.headers.update({"Accept": "application/json"})
         return session
+
+    def count_issues(self, jql: str) -> int:
+        """How many issues a JQL matches, without paging them all back.
+
+        Counting server-side keeps totals honest when a result set is larger
+        than the page ceiling a caller is willing to download.
+        """
+        with self._session() as session:
+            session.headers["Content-Type"] = "application/json"
+            response = session.post(
+                f"{self.base_url}/rest/api/3/search/approximate-count",
+                json={"jql": jql},
+                timeout=30,
+            )
+            if response.status_code == 404:
+                # Older Jira deployments have no count endpoint; the legacy
+                # search reports a total when asked for zero issues.
+                response = session.get(
+                    f"{self.base_url}/rest/api/3/search",
+                    params={"jql": jql, "maxResults": 0},
+                    timeout=30,
+                )
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Failed to count issues ({response.status_code}): {response.text[:300]}"
+            )
+        payload = response.json() or {}
+        return int(payload.get("count", payload.get("total", 0)) or 0)
 
     def search_issues(
         self,
@@ -655,6 +685,7 @@ class JiraClient:
                     "epic_status": parent_status.get("name") if is_epic_parent else None,
                     "labels": ", ".join(fields.get("labels", [])),
                     "resolution": resolution.get("name"),
+                    "resolved_at": fields.get("resolutiondate"),
                     "status_category_changed_date": fields.get("statuscategorychangedate"),
                     "original_estimate": timetracking.get("originalEstimate"),
                     "logged_time": timetracking.get("timeSpent"),

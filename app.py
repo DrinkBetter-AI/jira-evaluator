@@ -96,6 +96,14 @@ JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
 TRANSITION_LOOKUP_LIMIT = 50
 # Upper bound on how many tickets a bulk write-back pre-selects.
 BULK_ACTION_DEFAULT_LIMIT = 25
+# Slices a composition pie shows before the tail collapses into "Other".
+MIX_SLICE_LIMIT = 10
+# How far back resolved work is read for the per-week detail.
+RESOLVED_LOOKBACK_DAYS = 90
+# Ceiling on that sample; a bulk archive can resolve thousands in a day.
+RESOLVED_SAMPLE_LIMIT = 1000
+# Weeks of resolution history shown as a trend.
+THROUGHPUT_WEEKS = 8
 # Ceiling on tickets fetched per run; org-wide JQL can exceed the old fixed 1000.
 MAX_RESULTS = _positive_int(os.getenv("JIRA_MAX_RESULTS"), default=1000)
 # Statuses hidden when "Include Backlogs" is off; projects name their backlog differently.
@@ -173,6 +181,50 @@ def _normalize_sprint_id(value: object) -> str | None:
     if re.fullmatch(r"\d+\.0+", text):
         return text.split(".", 1)[0]
     return text
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def count_resolved_since(
+    creds_path: str,
+    profile_name: str,
+    since: str,
+    until: str,
+    schema_version: int,
+) -> int:
+    """Count resolutions server-side, optionally up to an exclusive end date.
+
+    The sample fetch is capped, and a bulk archive can exceed that cap in a
+    single day, so headline figures are counted by Jira rather than by however
+    many rows fitted in the download.
+    """
+    _ = schema_version
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    jql = f'resolutiondate >= "{since}"'
+    if until:
+        jql += f' AND resolutiondate < "{until}"'
+    return client.count_issues(jql)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_resolved(
+    creds_path: str,
+    profile_name: str,
+    days: int,
+    max_results: int,
+    schema_version: int,
+) -> pd.DataFrame:
+    """Recently resolved tickets, which the open-backlog JQL excludes by design.
+
+    No changelog expansion: throughput only needs the resolution date, and
+    asking for histories here would triple the cost of every page load.
+    """
+    _ = schema_version
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.search_issues(
+        jql=f"resolutiondate >= -{int(days)}d ORDER BY resolutiondate DESC",
+        max_results=max_results,
+        page_size=100,
+    )
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -378,6 +430,137 @@ def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | No
         index=assignees.index(default_individual),
     )
     return [selected]
+
+
+def _render_mix(df: pd.DataFrame) -> None:
+    """Composition of the open backlog, as a share rather than a count.
+
+    Counts answer "how much"; this answers "of what" - which slice of the
+    backlog a reader is actually looking at before they read any table.
+    """
+    st.subheader("Backlog Composition")
+    if df.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    # Team is derived, not a Jira field, so it has to be attached before it can
+    # be offered as a slice.
+    df = add_team(df, TEAM_PROJECTS, TEAM_PEOPLE)
+    dimensions = {
+        "Status": "status",
+        "Team": "team",
+        "Priority": "priority",
+        "Issue type": "issue_type",
+        "Assignee": "assignee",
+        "Project": "project_key",
+    }
+    available = {
+        label: column for label, column in dimensions.items() if column in df.columns
+    }
+    if not available:
+        st.info("No breakdown fields available in the current data.")
+        return
+
+    label = st.radio(
+        "Break down by",
+        options=list(available.keys()),
+        horizontal=True,
+        key="mix_dimension",
+    )
+    column = available[label]
+
+    counts = (
+        df[column]
+        .fillna("Unknown")
+        .astype(str)
+        .str.strip()
+        .replace({"": "Unknown"})
+        .value_counts()
+    )
+    # A pie with forty slices is a colour wheel, not a chart: keep the shape of
+    # the backlog readable and let the tail sit in one honest "Other" slice.
+    top = counts.head(MIX_SLICE_LIMIT)
+    remainder = int(counts.iloc[MIX_SLICE_LIMIT:].sum())
+    if remainder:
+        top = pd.concat([top, pd.Series({f"Other ({len(counts) - MIX_SLICE_LIMIT})": remainder})])
+
+    mix = top.rename_axis(label).reset_index(name="tickets")
+    figure = px.pie(mix, names=label, values="tickets", hole=0.45)
+    figure.update_traces(textposition="inside", textinfo="percent+label")
+    figure.update_layout(height=420, legend_title_text=label)
+    left, right = st.columns([3, 2])
+    left.plotly_chart(figure, width="stretch")
+    right.dataframe(
+        mix.assign(share=(mix["tickets"] / mix["tickets"].sum() * 100).round(1)),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "tickets": st.column_config.NumberColumn("Tickets"),
+            "share": st.column_config.NumberColumn("Share %", format="%.1f"),
+        },
+    )
+
+
+def week_start_utc(now: pd.Timestamp) -> pd.Timestamp:
+    """Monday of the week containing now, as a calendar boundary."""
+    return (now - pd.Timedelta(days=int(now.weekday()))).normalize()
+
+
+def _render_throughput(
+    resolved: pd.DataFrame,
+    counts: dict[str, int],
+    weekly: dict[str, int],
+) -> None:
+    """How much work actually left the board recently.
+
+    Open-ticket counts alone cannot tell a stalled team from a busy one, so
+    resolution dates are read on their own rather than inferred from the open
+    backlog, which by definition contains none of them.
+    """
+    st.subheader("Resolved Work")
+    now = pd.Timestamp.now(tz="UTC")
+    week_start = week_start_utc(now)
+    month_start = now.normalize().replace(day=1)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric(
+        "Resolved this week",
+        counts.get("week", 0),
+        help=f"Resolved on or after {week_start.date()} (Monday)",
+    )
+    c2.metric(
+        "Resolved this month",
+        counts.get("month", 0),
+        help=f"Resolved on or after {month_start.date()}",
+    )
+    c3.metric("Last 30 days", counts.get("last_30", 0))
+
+    if weekly:
+        # Counted per week by Jira rather than derived from the sample: one bulk
+        # archive can fill the whole sample and flatten every earlier week to nil.
+        series = pd.Series(weekly, name="resolved")
+        st.caption("Resolved per week (week beginning Monday)")
+        st.bar_chart(series, height=240)
+
+    if resolved is None or resolved.empty or "resolved_at" not in resolved.columns:
+        return
+
+    resolved_at = pd.to_datetime(resolved["resolved_at"], errors="coerce", utc=True)
+    frame = resolved.assign(resolved_at=resolved_at).dropna(subset=["resolved_at"])
+    if frame.empty:
+        return
+
+    if "assignee" in frame.columns:
+        by_person = (
+            frame[frame["resolved_at"] >= month_start]["assignee"]
+            .fillna("Unassigned")
+            .value_counts()
+            .rename_axis("assignee")
+            .reset_index(name="resolved_this_month")
+        )
+        if not by_person.empty:
+            with st.expander("Who resolved them this month", expanded=False):
+                st.dataframe(by_person, width="stretch", hide_index=True)
 
 
 def _render_scope_breakdown(df: pd.DataFrame, scope: str, include_backlogs: bool) -> None:
@@ -2396,6 +2579,51 @@ def main() -> None:
         include_backlogs=include_backlogs,
         unassigned_source=unscoped if selected_assignees is not None else None,
     )
+
+    st.divider()
+    _render_mix(_metrics_df(filtered, include_backlogs))
+
+    st.divider()
+    resolved_df = pd.DataFrame()
+    resolved_counts: dict[str, int] = {}
+    now_utc = pd.Timestamp.now(tz="UTC")
+    windows = {
+        "week": week_start_utc(now_utc),
+        "month": now_utc.normalize().replace(day=1),
+        "last_30": (now_utc - pd.Timedelta(days=30)).normalize(),
+    }
+    weekly_counts: dict[str, int] = {}
+    try:
+        for name, start in windows.items():
+            resolved_counts[name] = count_resolved_since(
+                creds_path=CREDS_PATH,
+                profile_name=PROFILE_NAME,
+                since=start.strftime("%Y-%m-%d"),
+                until="",
+                schema_version=FETCH_SCHEMA_VERSION,
+            )
+        this_week_start = windows["week"]
+        for weeks_back in range(THROUGHPUT_WEEKS - 1, -1, -1):
+            start = this_week_start - pd.Timedelta(weeks=weeks_back)
+            end = start + pd.Timedelta(weeks=1)
+            weekly_counts[str(start.date())] = count_resolved_since(
+                creds_path=CREDS_PATH,
+                profile_name=PROFILE_NAME,
+                since=start.strftime("%Y-%m-%d"),
+                until=end.strftime("%Y-%m-%d"),
+                schema_version=FETCH_SCHEMA_VERSION,
+            )
+        resolved_df = fetch_resolved(
+            creds_path=CREDS_PATH,
+            profile_name=PROFILE_NAME,
+            days=RESOLVED_LOOKBACK_DAYS,
+            max_results=RESOLVED_SAMPLE_LIMIT,
+            schema_version=FETCH_SCHEMA_VERSION,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Throughput is an extra query; losing it must not cost the whole page.
+        st.warning(f"Could not load resolved tickets: {exc}")
+    _render_throughput(resolved_df, resolved_counts, weekly_counts)
 
     st.divider()
     _render_team_overview(_metrics_df(filtered, include_backlogs))
