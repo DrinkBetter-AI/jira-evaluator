@@ -55,6 +55,7 @@ from hygiene import (
 )
 from prioritization import add_priority_score, assignee_rollup
 from transformations import add_ticket_health_fields
+import write_access
 
 
 DEFAULT_JQL = """statusCategory != Done
@@ -864,6 +865,12 @@ def _render_triage_decisions(queue: pd.DataFrame, decisions: dict[str, str]) -> 
         return
 
     st.markdown(f"##### Apply {len(to_close)} closure(s) to Jira")
+    if not write_access.writes_enabled():
+        st.info(
+            f"{len(to_close)} ticket(s) marked Close are held as notes only. "
+            + write_access.READ_ONLY_MESSAGE
+        )
+        return
     st.caption(
         "Each project runs its own workflow, so the closing status is resolved per "
         "ticket from the transitions Jira actually offers it, preferring "
@@ -1188,7 +1195,10 @@ def _render_sprint_capacity(
 
     is_ml_sprint = str(selected_row["sprint_name"]).startswith("ML Sprint")
 
-    editable = str(selected_row["sprint_state"]).lower() in {"future", "active"}
+    editable = (
+        str(selected_row["sprint_state"]).lower() in {"future", "active"}
+        and write_access.writes_enabled()
+    )
     ticket_editor_df = df.copy()
 
     # Capture epics before filtering them out so we can show them in a separate table.
@@ -2349,6 +2359,24 @@ def main() -> None:
         include_backlogs = st.checkbox("Include Backlogs", value=False)
         color_by = st.radio("Bubble color", options=["priority", "assignee"], horizontal=True)
 
+        st.header("Jira writes")
+        # Reading the dashboard is the common case; changing Jira is a decision.
+        # Off on every page load so no report-reading session can edit by
+        # accident, and re-armed deliberately when the reviewer means it.
+        allow_writes = st.toggle(
+            "Allow Jira edits",
+            value=False,
+            help=(
+                "Off: the dashboard only reads Jira. On: closures, transitions, "
+                "assignee and sprint edits can be applied."
+            ),
+        )
+        write_access.set_writes_enabled(allow_writes)
+        if allow_writes:
+            st.warning("Edits armed - Apply buttons will change Jira.")
+        else:
+            st.caption("Read-only. Nothing here can change Jira.")
+
     filtered = df.copy()
     if selected_statuses:
         filtered = filtered[filtered["status"].isin(selected_statuses)]
@@ -2499,9 +2527,11 @@ def main() -> None:
 
         apply_suggestion = st.button(
             f"Apply to {len(selected_keys)} ticket(s)",
-            disabled=not selected_keys,
+            disabled=(not selected_keys) or (not write_access.writes_enabled()),
             type="primary",
         )
+        if not write_access.writes_enabled():
+            st.caption(write_access.READ_ONLY_MESSAGE)
 
     if apply_suggestion and selected_keys:
         client = JiraClient.resolve(
@@ -2564,7 +2594,12 @@ def main() -> None:
             selected_operation = op_options[selected_label]
             confirm_revert = st.checkbox("I understand revert may partially fail due to Jira workflow rules.")
 
-            revert_clicked = st.button("Revert selected operation", disabled=not confirm_revert)
+            revert_clicked = st.button(
+                "Revert selected operation",
+                disabled=(not confirm_revert) or (not write_access.writes_enabled()),
+            )
+            if not write_access.writes_enabled():
+                st.caption(write_access.READ_ONLY_MESSAGE)
 
             if revert_clicked:
                 client = JiraClient.resolve(
