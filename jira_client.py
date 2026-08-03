@@ -217,16 +217,32 @@ class JiraClient:
         return session
 
     def approximate_count(self, jql: str) -> int:
-        """Jira's fast approximate issue count for a JQL, independent of paging.
+        """Jira's fast issue count for a JQL, independent of paging.
 
-        Used where only the size of a result set matters (e.g. the resolved-in
-        window tiles) so the number is not silently capped by ``max_results``.
+        Uses ``/search/approximate-count`` (documented as approximate for large
+        result sets) so the number is not silently capped by ``max_results``. On
+        a tenant that doesn't expose that endpoint (404/405/410) it falls back to
+        the ``total`` of a ``maxResults=0`` search, mirroring ``search_issues``'
+        legacy fallback, so the resolved tiles still show a number rather than a
+        permanent "—".
         """
         url = f"{self.base_url}/rest/api/3/search/approximate-count"
         with self._session() as session:
             response = session.post(url, json={"jql": jql}, timeout=30)
+            if response.status_code in {404, 405, 410}:
+                return self._legacy_total(session, jql)
             response.raise_for_status()
             return int(response.json().get("count", 0))
+
+    def _legacy_total(self, session: requests.Session, jql: str) -> int:
+        """Total matches via the legacy search's ``total`` field (maxResults=0)."""
+        response = session.get(
+            f"{self.base_url}/rest/api/3/search",
+            params={"jql": jql, "maxResults": 0},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return int(response.json().get("total", 0))
 
     def search_issues(
         self,

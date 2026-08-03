@@ -2620,11 +2620,20 @@ def _apply_action_with_audit(
     return succeeded, failed, operation
 
 
-def _contribution_pie(labels: pd.Series, value_name: str, title: str) -> None:
-    """Render a 'who did how much' pie from a series of names, or a note if empty."""
+def _contribution_pie(
+    labels: pd.Series, value_name: str, title: str, unavailable: bool = False
+) -> None:
+    """Render a 'who did how much' pie from a series of names, or a note if empty.
+
+    ``unavailable`` distinguishes a failed lookup from a genuinely empty window so
+    an errored fetch doesn't masquerade as an authoritative "nobody did anything".
+    """
     counts = labels.value_counts()
     if counts.empty:
-        st.caption(f"No {value_name} in the last 30 days.")
+        if unavailable:
+            st.caption(f"Could not load {value_name} \u2014 try Refresh Data.")
+        else:
+            st.caption(f"No {value_name} in the last 30 days.")
         return
     frame = pd.DataFrame({"who": counts.index, value_name: counts.values})
     fig = px.pie(frame, names="who", values=value_name, title=title)
@@ -2641,7 +2650,7 @@ def _metric_value(count: int | None) -> str | int:
 def _render_resolved_summary(
     ticket_count_7: int | None,
     ticket_count_30: int | None,
-    resolved_30: pd.DataFrame,
+    resolved_30: pd.DataFrame | None,
     pr_count_7: int | None,
     pr_count_30: int | None,
     merged_prs: pd.DataFrame,
@@ -2661,15 +2670,27 @@ def _render_resolved_summary(
     c3.metric("PRs merged (7d)", _metric_value(pr_count_7))
     c4.metric("PRs merged (30d)", _metric_value(pr_count_30))
 
+    # None means the ticket fetch failed (distinct from an empty 30-day window),
+    # so the pie can say "could not load" instead of asserting nobody resolved any.
+    tickets_unavailable = resolved_30 is None
+    resolved_df = pd.DataFrame() if resolved_30 is None else resolved_30
+
     left, right = st.columns(2)
     with left:
         ticket_people = (
-            resolved_30["assignee"].fillna("Unassigned").astype(str).str.strip().replace("", "Unassigned")
-            if "assignee" in resolved_30.columns and not resolved_30.empty
+            resolved_df["assignee"].fillna("Unassigned").astype(str).str.strip().replace("", "Unassigned")
+            if "assignee" in resolved_df.columns and not resolved_df.empty
             else pd.Series(dtype=str)
         )
-        _contribution_pie(ticket_people, "tickets", "Who resolved tickets (30 days)")
-        if ticket_count_30 is not None and len(ticket_people) < int(ticket_count_30):
+        _contribution_pie(
+            ticket_people, "tickets", "Who resolved tickets (30 days)",
+            unavailable=tickets_unavailable,
+        )
+        if (
+            not tickets_unavailable
+            and ticket_count_30 is not None
+            and len(ticket_people) < int(ticket_count_30)
+        ):
             st.caption(
                 f"Pie shows a {len(ticket_people)}-ticket sample of ~{int(ticket_count_30)} "
                 "resolved (fetch limit); ticket tiles are Jira's approximate counts."
@@ -2865,7 +2886,9 @@ def main() -> None:
         except Exception:  # noqa: BLE001
             return None
 
-    def _resolved(days: int) -> pd.DataFrame:
+    def _resolved(days: int) -> pd.DataFrame | None:
+        # None (not an empty frame) signals a failed fetch, so the pie can say
+        # "could not load" instead of an authoritative "nobody resolved anything".
         try:
             return fetch_resolved_tickets(
                 creds_path=CREDS_PATH,
@@ -2877,7 +2900,7 @@ def main() -> None:
                 schema_version=FETCH_SCHEMA_VERSION,
             )
         except Exception:  # noqa: BLE001
-            return pd.DataFrame()
+            return None
 
     # GitHub PR data is optional: without a token the PR views degrade to a hint
     # rather than an error, so the Jira dashboard still works standalone.
