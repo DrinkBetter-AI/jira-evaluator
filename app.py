@@ -562,9 +562,14 @@ def _kw_hit(text: str, words: tuple[str, ...], prefixes: tuple[str, ...]) -> boo
 def _devin_can_handle(row: pd.Series) -> str:
     """Rough hint at whether Devin could take a ticket, from its text signals."""
     issue_type = str(row.get("issue_type") or "").strip().lower()
-    text = f"{row.get('summary') or ''} {issue_type}".lower()
-    yes = issue_type == "bug" or _kw_hit(text, _DEVIN_YES_WORDS, _DEVIN_YES_PREFIXES)
-    no = _kw_hit(text, _DEVIN_NO_WORDS, _DEVIN_NO_PREFIXES)
+    summary = str(row.get("summary") or "").lower()
+    # YES may use the issue type as a signal (e.g. a Bug), but the NO scan runs
+    # on the summary only: Jira type names like "Story"/"Design" collide with the
+    # NO keywords and would mislabel ordinary engineering tickets otherwise.
+    yes = issue_type == "bug" or _kw_hit(
+        f"{summary} {issue_type}", _DEVIN_YES_WORDS, _DEVIN_YES_PREFIXES
+    )
+    no = _kw_hit(summary, _DEVIN_NO_WORDS, _DEVIN_NO_PREFIXES)
     if yes and not no:
         return "Yes"
     if no and not yes:

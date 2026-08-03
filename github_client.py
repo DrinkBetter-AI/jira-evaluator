@@ -113,11 +113,16 @@ def _search_prs(token: str, query: str, max_prs: int) -> list[dict]:
     while len(nodes) < max_prs:
         data = _graphql(token, _SEARCH_QUERY, {"q": query, "after": after})
         search = data["search"]
-        nodes.extend(n for n in search["nodes"] if n)
+        added = [n for n in search["nodes"] if n]
+        nodes.extend(added)
         page = search["pageInfo"]
-        if not page["hasNextPage"]:
+        cursor = page["endCursor"]
+        # Stop if GitHub says there's no more, or defends against a pathological
+        # response (a page that adds nothing or a cursor that never advances)
+        # that would otherwise spin until the rate limit errors out.
+        if not page["hasNextPage"] or not added or cursor == after or not cursor:
             break
-        after = page["endCursor"]
+        after = cursor
     return nodes[:max_prs]
 
 
