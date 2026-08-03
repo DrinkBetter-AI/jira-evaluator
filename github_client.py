@@ -80,6 +80,7 @@ repository { name }
 approvingReviews: reviews(states: APPROVED) { totalCount }
 changesReviews: reviews(states: CHANGES_REQUESTED) { totalCount }
 allReviews: reviews { totalCount }
+reviewRequests(first: 1) { totalCount }
 """
 
 _SEARCH_QUERY = """
@@ -144,6 +145,7 @@ def _to_frame(nodes: list[dict]) -> pd.DataFrame:
                 "approving_reviews": (n.get("approvingReviews") or {}).get("totalCount", 0),
                 "changes_reviews": (n.get("changesReviews") or {}).get("totalCount", 0),
                 "total_reviews": (n.get("allReviews") or {}).get("totalCount", 0),
+                "review_requests": (n.get("reviewRequests") or {}).get("totalCount", 0),
             }
         )
     frame = pd.DataFrame(rows)
