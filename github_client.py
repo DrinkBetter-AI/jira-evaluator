@@ -1,0 +1,139 @@
+"""Minimal GitHub client for the dashboard's PR views.
+
+Only what the dashboard needs: org-wide open PRs (with their review decision) and
+recently-merged PRs (for the resolved counts and the per-author pie). Everything
+goes through a single GraphQL search endpoint so one token and a handful of
+requests cover the whole organisation, and results stay repo-agnostic -
+the dashboard reports overall numbers, never a per-repo breakdown.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import os
+
+import pandas as pd
+import requests
+
+GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
+DEFAULT_ORG = "DrinkBetter-AI"
+
+# Env var names, checked in order, so either a dedicated dashboard token or the
+# ambient GitHub token works.
+_TOKEN_ENV_VARS = ("GITHUB_TOKEN", "GH_TOKEN", "DASHBOARD_GITHUB_TOKEN")
+
+
+class GitHubConfigError(RuntimeError):
+    """Raised when GitHub access is not configured."""
+
+
+def load_github_env() -> tuple[str, str] | None:
+    """Return ``(token, org)`` from the environment, or ``None`` when unset."""
+    token = ""
+    for name in _TOKEN_ENV_VARS:
+        token = os.getenv(name, "").strip()
+        if token:
+            break
+    if not token:
+        return None
+    org = os.getenv("GITHUB_ORG", DEFAULT_ORG).strip() or DEFAULT_ORG
+    return token, org
+
+
+def _graphql(token: str, query: str, variables: dict) -> dict:
+    response = requests.post(
+        GITHUB_GRAPHQL_URL,
+        json={"query": query, "variables": variables},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("errors"):
+        messages = "; ".join(e.get("message", "") for e in payload["errors"])
+        raise GitHubConfigError(f"GitHub GraphQL error: {messages}")
+    return payload["data"]
+
+
+_PR_FIELDS = """
+number
+title
+url
+isDraft
+reviewDecision
+createdAt
+updatedAt
+mergedAt
+author { login }
+repository { name }
+"""
+
+_SEARCH_QUERY = """
+query($q: String!, $after: String) {
+  search(query: $q, type: ISSUE, first: 100, after: $after) {
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on PullRequest { %s } }
+  }
+}
+""" % _PR_FIELDS
+
+
+def _search_prs(token: str, query: str, max_prs: int) -> list[dict]:
+    nodes: list[dict] = []
+    after: str | None = None
+    while len(nodes) < max_prs:
+        data = _graphql(token, _SEARCH_QUERY, {"q": query, "after": after})
+        search = data["search"]
+        nodes.extend(n for n in search["nodes"] if n)
+        page = search["pageInfo"]
+        if not page["hasNextPage"]:
+            break
+        after = page["endCursor"]
+    return nodes[:max_prs]
+
+
+def _to_frame(nodes: list[dict]) -> pd.DataFrame:
+    rows = []
+    for n in nodes:
+        rows.append(
+            {
+                "number": n.get("number"),
+                "title": n.get("title") or "",
+                "url": n.get("url") or "",
+                "is_draft": bool(n.get("isDraft")),
+                "review_decision": n.get("reviewDecision"),
+                "created_at": n.get("createdAt"),
+                "updated_at": n.get("updatedAt"),
+                "merged_at": n.get("mergedAt"),
+                "author": (n.get("author") or {}).get("login") or "unknown",
+                "repo": (n.get("repository") or {}).get("name") or "",
+            }
+        )
+    frame = pd.DataFrame(rows)
+    for col in ("created_at", "updated_at", "merged_at"):
+        if col in frame.columns:
+            frame[col] = pd.to_datetime(frame[col], utc=True, errors="coerce")
+    return frame
+
+
+def fetch_open_prs(token: str, org: str, max_prs: int = 400) -> pd.DataFrame:
+    """Open, non-draft PRs across the org, oldest first, with review decision."""
+    query = f"org:{org} is:pr is:open draft:false sort:created-asc"
+    frame = _to_frame(_search_prs(token, query, max_prs))
+    if frame.empty:
+        return frame
+    now = pd.Timestamp.now(tz="UTC")
+    frame["age_days"] = (now - frame["created_at"]).dt.total_seconds() / 86400.0
+    frame["idle_days"] = (now - frame["updated_at"]).dt.total_seconds() / 86400.0
+    return frame
+
+
+def fetch_merged_prs(token: str, org: str, days: int, max_prs: int = 2000) -> pd.DataFrame:
+    """PRs merged anywhere in the org within the last ``days``."""
+    since = (_dt.datetime.utcnow() - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
+    query = f"org:{org} is:pr is:merged merged:>={since}"
+    return _to_frame(_search_prs(token, query, max_prs))
