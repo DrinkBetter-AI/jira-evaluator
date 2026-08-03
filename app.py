@@ -252,10 +252,12 @@ def fetch_resolved_count(
     statuses: tuple[str, ...],
     schema_version: int,
 ) -> int | None:
-    """Exact-as-Jira count of tickets resolved in the window, never paging-capped.
+    """Jira's server-side count of tickets resolved in the window, never paging-capped.
 
-    Returns ``None`` (rendered as "—") only if the count cannot be determined; an
-    empty result is a real ``0``. The caller distinguishes the two.
+    Uses ``/search/approximate-count``, which Jira documents as approximate for
+    large result sets, so treat it as "Jira's count" rather than a guaranteed
+    exact total. Returns ``None`` (rendered as "—") only if the count cannot be
+    determined; an empty result is a real ``0``. The caller distinguishes the two.
     """
     _ = schema_version
     if not statuses:
@@ -523,29 +525,46 @@ _TIER_YELLOW_IDLE = 30.0
 # with a clear code surface leans yes; product/design/content/coordination work
 # leans no. Mixed or empty signals stay "Maybe" so nobody trusts it blindly - it
 # is a hint to start the conversation, not an automated assignment.
-_DEVIN_YES_KEYWORDS = (
-    "bug", "fix", "error", "crash", "exception", "refactor", "migrat", "endpoint",
+# Matched as whole words (see ``_kw_hit``) so short tokens do not collide with
+# unrelated words ("test" in "latest", "api" in "capital", "search" in
+# "research"). Deliberately truncated stems live in ``_DEVIN_*_PREFIXES`` and
+# match as prefixes so "migrat" still catches "migration"/"migrate".
+_DEVIN_YES_WORDS = (
+    "bug", "fix", "error", "crash", "exception", "refactor", "endpoint",
     "api", "backend", "frontend", "unit test", "test", "upgrade", "dependency",
-    "integrat", "ssr", "cache", "database", "postgres", "mongo", "sql", "query",
+    "ssr", "cache", "database", "postgres", "mongo", "sql", "query",
     "script", "pipeline", "build", "lint", "typing", "performance", "latency",
     "resource", "config", "infra", "deploy", "ranker", "search", "index",
     "schema", "logging", "timeout", "rate limit", "webhook", "parser",
     "validation",
 )
-_DEVIN_NO_KEYWORDS = (
+_DEVIN_YES_PREFIXES = ("migrat", "integrat")
+_DEVIN_NO_WORDS = (
     "design", "mockup", "wireframe", "logo", "brand", "copywriting", "blog",
-    "article", "story:", "series:", "trend", "instagram", "social", "campaign",
+    "article", "story", "series", "trend", "instagram", "social", "campaign",
     "marketing", "video", "interview", "research", "survey", "meeting",
     "discussion", "strategy", "hiring", "roadmap", "pricing", "content",
 )
+_DEVIN_NO_PREFIXES: tuple[str, ...] = ()
+
+
+def _kw_hit(text: str, words: tuple[str, ...], prefixes: tuple[str, ...]) -> bool:
+    """True if any whole word in ``words`` or any stem in ``prefixes`` is in text."""
+    for p in prefixes:
+        if re.search(rf"\b{re.escape(p)}", text):
+            return True
+    for w in words:
+        if re.search(rf"\b{re.escape(w)}\b", text):
+            return True
+    return False
 
 
 def _devin_can_handle(row: pd.Series) -> str:
     """Rough hint at whether Devin could take a ticket, from its text signals."""
     issue_type = str(row.get("issue_type") or "").strip().lower()
     text = f"{row.get('summary') or ''} {issue_type}".lower()
-    yes = issue_type == "bug" or any(k in text for k in _DEVIN_YES_KEYWORDS)
-    no = any(k in text for k in _DEVIN_NO_KEYWORDS)
+    yes = issue_type == "bug" or _kw_hit(text, _DEVIN_YES_WORDS, _DEVIN_YES_PREFIXES)
+    no = _kw_hit(text, _DEVIN_NO_WORDS, _DEVIN_NO_PREFIXES)
     if yes and not no:
         return "Yes"
     if no and not yes:
@@ -2626,7 +2645,8 @@ def _render_resolved_summary(
 ) -> None:
     """Login landing snapshot: tickets and PRs resolved in the last 7 / 30 days,
     with a pie for who resolved tickets and who merged PRs. Tile counts come from
-    exact server-side counts; the dataframes only drive the pies. A ``None`` count
+    server-side counts (Jira's approximate count for tickets, GitHub's exact
+    issueCount for PRs); the dataframes only drive the pies. A ``None`` count
     means the lookup failed and renders as "—", distinct from a genuine 0."""
     st.subheader("Resolved in the Last 7 / 30 Days")
 
@@ -2646,8 +2666,8 @@ def _render_resolved_summary(
         _contribution_pie(ticket_people, "tickets", "Who resolved tickets (30 days)")
         if ticket_count_30 is not None and len(ticket_people) < int(ticket_count_30):
             st.caption(
-                f"Pie shows a {len(ticket_people)}-ticket sample of {int(ticket_count_30)} "
-                "resolved (fetch limit); tiles above are exact."
+                f"Pie shows a {len(ticket_people)}-ticket sample of ~{int(ticket_count_30)} "
+                "resolved (fetch limit); ticket tiles are Jira's approximate counts."
             )
     with right:
         if not github_ready:

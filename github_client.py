@@ -22,9 +22,11 @@ DEFAULT_ORG = "DrinkBetter-AI"
 # which is interpolated into the search query, cannot smuggle extra qualifiers.
 _ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 
-# Env var names, checked in order, so either a dedicated dashboard token or the
-# ambient GitHub token works.
-_TOKEN_ENV_VARS = ("GITHUB_TOKEN", "GH_TOKEN", "DASHBOARD_GITHUB_TOKEN")
+# Env var names, checked in order. The dedicated dashboard token comes first so
+# an ambient GITHUB_TOKEN/GH_TOKEN (Actions, Codespaces, gh CLI) - which often
+# has a narrower, repo-scoped permission set - does not shadow the token an
+# operator explicitly configured for org-wide PR search.
+_TOKEN_ENV_VARS = ("DASHBOARD_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")
 
 
 class GitHubConfigError(RuntimeError):
