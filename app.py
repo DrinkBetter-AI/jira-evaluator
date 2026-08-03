@@ -28,6 +28,7 @@ from jira_client import (
     load_jira_profile,
 )
 from access_gate import require_password
+import github_client
 from capacity import (
     capacity_table,
     same_person,
@@ -97,6 +98,24 @@ TRANSITION_LOOKUP_LIMIT = 50
 BULK_ACTION_DEFAULT_LIMIT = 25
 # Ceiling on tickets fetched per run; org-wide JQL can exceed the old fixed 1000.
 MAX_RESULTS = _positive_int(os.getenv("JIRA_MAX_RESULTS"), default=1000)
+# Statuses the team treats as "resolved" for the top-of-page snapshot. Spans
+# more than Jira's Done category (e.g. Ready for Production / Review in Staging
+# are In Progress), so it is matched by status name. Override with a
+# comma-separated JIRA_RESOLVED_STATUSES.
+_DEFAULT_RESOLVED_STATUSES = (
+    "Done",
+    "Released",
+    "Released to Production",
+    "Ready for Production",
+    "Review in Staging",
+)
+RESOLVED_STATUSES = tuple(
+    s.strip()
+    for s in os.getenv(
+        "JIRA_RESOLVED_STATUSES", ",".join(_DEFAULT_RESOLVED_STATUSES)
+    ).split(",")
+    if s.strip()
+)
 # Statuses hidden when "Include Backlogs" is off; projects name their backlog differently.
 BACKLOG_STATUSES = {
     name.strip().lower()
@@ -206,6 +225,100 @@ def fetch_tickets(
         if col not in result.columns:
             result[col] = pd.NA
     return result
+
+
+def _jql_status_list(statuses: tuple[str, ...]) -> str:
+    """Quote status names for a JQL ``IN``/``CHANGED TO`` clause.
+
+    Escapes backslashes before quotes so a status value cannot break out of the
+    quoted literal and inject JQL (values come from JIRA_RESOLVED_STATUSES).
+    """
+    return ", ".join(
+        '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"' for s in statuses
+    )
+
+
+def _resolved_jql(statuses: tuple[str, ...], days: int, ordered: bool = True) -> str:
+    """JQL for tickets that entered any ``statuses`` within the last ``days``."""
+    jql = f"status CHANGED TO ({_jql_status_list(statuses)}) AFTER -{int(days)}d"
+    return jql + " ORDER BY updated DESC" if ordered else jql
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_resolved_count(
+    creds_path: str,
+    profile_name: str,
+    days: int,
+    statuses: tuple[str, ...],
+    schema_version: int,
+) -> int | None:
+    """Jira's server-side count of tickets resolved in the window, never paging-capped.
+
+    Uses ``/search/approximate-count``, which Jira documents as approximate for
+    large result sets, so treat it as "Jira's count" rather than a guaranteed
+    exact total. Returns ``None`` (rendered as "—") only if the count cannot be
+    determined; an empty result is a real ``0``. The caller distinguishes the two.
+    """
+    _ = schema_version
+    if not statuses:
+        return 0
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.approximate_count(_resolved_jql(statuses, days, ordered=False))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_resolved_tickets(
+    creds_path: str,
+    profile_name: str,
+    days: int,
+    statuses: tuple[str, ...],
+    max_results: int,
+    page_size: int,
+    schema_version: int,
+) -> pd.DataFrame:
+    """Tickets that transitioned INTO a "resolved" status within the last ``days``.
+
+    "Resolved" here follows the team's definition (Done / Released / Ready for
+    Production / Review in Staging), which spans more than Jira's Done category,
+    so the query keys off the status-change event rather than status category.
+    ``CHANGED TO ... AFTER`` matches a ticket that entered any resolved status in
+    the window even if it later moved on. Used for the per-person pie; the
+    headline tiles use :func:`fetch_resolved_count` so they never cap.
+    """
+    _ = schema_version
+    if not statuses:
+        return pd.DataFrame()
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.search_issues(
+        jql=_resolved_jql(statuses, days),
+        fields=DEFAULT_FIELDS,
+        max_results=max_results,
+        page_size=page_size,
+    )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_open_prs_cached(token: str, org: str, schema_version: int) -> pd.DataFrame:
+    _ = schema_version
+    return github_client.fetch_open_prs(token, org)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_merged_prs_cached(token: str, org: str, days: int, schema_version: int) -> pd.DataFrame:
+    _ = schema_version
+    return github_client.fetch_merged_prs(token, org, days)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_merged_pr_count_cached(token: str, org: str, days: int, schema_version: int) -> int:
+    _ = schema_version
+    return github_client.merged_pr_count(token, org, days)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_open_pr_count_cached(token: str, org: str, schema_version: int) -> int:
+    _ = schema_version
+    return github_client.open_pr_count(token, org)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -408,6 +521,61 @@ _TIER_RED_IDLE = 90.0
 _TIER_YELLOW_SCORE = 30.0
 _TIER_YELLOW_IDLE = 30.0
 
+# Keyword heuristic for "could Devin pick this up?". Engineering execution work
+# with a clear code surface leans yes; product/design/content/coordination work
+# leans no. Mixed or empty signals stay "Maybe" so nobody trusts it blindly - it
+# is a hint to start the conversation, not an automated assignment.
+# Matched as whole words (see ``_kw_hit``) so short tokens do not collide with
+# unrelated words ("test" in "latest", "api" in "capital", "search" in
+# "research"). Deliberately truncated stems live in ``_DEVIN_*_PREFIXES`` and
+# match as prefixes so "migrat" still catches "migration"/"migrate".
+_DEVIN_YES_WORDS = (
+    "bug", "fix", "error", "crash", "exception", "refactor", "endpoint",
+    "api", "backend", "frontend", "unit test", "test", "upgrade", "dependency",
+    "ssr", "cache", "database", "postgres", "mongo", "sql", "query",
+    "script", "pipeline", "build", "lint", "typing", "performance", "latency",
+    "resource", "config", "infra", "deploy", "ranker", "search", "index",
+    "schema", "logging", "timeout", "rate limit", "webhook", "parser",
+    "validation",
+)
+_DEVIN_YES_PREFIXES = ("migrat", "integrat")
+_DEVIN_NO_WORDS = (
+    "design", "mockup", "wireframe", "logo", "brand", "copywriting", "blog",
+    "article", "story", "series", "trend", "instagram", "social", "campaign",
+    "marketing", "video", "interview", "research", "survey", "meeting",
+    "discussion", "strategy", "hiring", "roadmap", "pricing", "content",
+)
+_DEVIN_NO_PREFIXES: tuple[str, ...] = ()
+
+
+def _kw_hit(text: str, words: tuple[str, ...], prefixes: tuple[str, ...]) -> bool:
+    """True if any whole word in ``words`` or any stem in ``prefixes`` is in text."""
+    for p in prefixes:
+        if re.search(rf"\b{re.escape(p)}", text):
+            return True
+    for w in words:
+        if re.search(rf"\b{re.escape(w)}\b", text):
+            return True
+    return False
+
+
+def _devin_can_handle(row: pd.Series) -> str:
+    """Rough hint at whether Devin could take a ticket, from its text signals."""
+    issue_type = str(row.get("issue_type") or "").strip().lower()
+    summary = str(row.get("summary") or "").lower()
+    # YES may use the issue type as a signal (e.g. a Bug), but the NO scan runs
+    # on the summary only: Jira type names like "Story"/"Design" collide with the
+    # NO keywords and would mislabel ordinary engineering tickets otherwise.
+    yes = issue_type == "bug" or _kw_hit(
+        f"{summary} {issue_type}", _DEVIN_YES_WORDS, _DEVIN_YES_PREFIXES
+    )
+    no = _kw_hit(summary, _DEVIN_NO_WORDS, _DEVIN_NO_PREFIXES)
+    if yes and not no:
+        return "Yes"
+    if no and not yes:
+        return "No"
+    return "Maybe"
+
 
 def _attention_tier(row: pd.Series) -> str:
     """Bucket a ticket into one of four attention tiers for the drill-down."""
@@ -457,6 +625,7 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
     if "has_estimate" not in owned.columns:
         owned = estimate_policy(owned, BACKLOG_STATUSES)
     owned["tier"] = owned.apply(_attention_tier, axis=1)
+    owned["devin"] = owned.apply(_devin_can_handle, axis=1)
     owned["has_estimate_label"] = owned["has_estimate"].map(
         lambda value: "Yes" if bool(value) else "No"
     )
@@ -484,6 +653,7 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
         "Status": "status",
         "Severity (priority)": "priority",
         "Has estimate": "has_estimate_label",
+        "Devin-able?": "devin",
     }
     sort_options = {label: col for label, col in sort_options.items() if col in owned.columns}
     sort_col, dir_col = st.columns([3, 1])
@@ -508,6 +678,7 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
         "created",
         "updated",
         "has_estimate_label",
+        "devin",
     ]
     display_cols = [c for c in display_cols if c in owned.columns]
     display = owned[display_cols]
@@ -534,6 +705,14 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
             "created": st.column_config.TextColumn("Created"),
             "updated": st.column_config.TextColumn("Updated"),
             "has_estimate_label": st.column_config.TextColumn("Estimate?"),
+            "devin": st.column_config.TextColumn(
+                "Devin-able?",
+                help=(
+                    "Heuristic hint from the ticket text: Yes = clear engineering "
+                    "execution work, No = product/design/content, Maybe = unclear. "
+                    "A starting point, not an automated assignment."
+                ),
+            ),
         },
     )
 
@@ -2441,6 +2620,190 @@ def _apply_action_with_audit(
     return succeeded, failed, operation
 
 
+def _contribution_pie(labels: pd.Series, value_name: str, title: str) -> None:
+    """Render a 'who did how much' pie from a series of names, or a note if empty."""
+    counts = labels.value_counts()
+    if counts.empty:
+        st.caption(f"No {value_name} in the last 30 days.")
+        return
+    frame = pd.DataFrame({"who": counts.index, value_name: counts.values})
+    fig = px.pie(frame, names="who", values=value_name, title=title)
+    fig.update_traces(textposition="inside", textinfo="value+label")
+    fig.update_layout(height=340, margin=dict(t=48, b=8, l=8, r=8), showlegend=True)
+    st.plotly_chart(fig, width="stretch")
+
+
+def _metric_value(count: int | None) -> str | int:
+    """Show a real count, or an em dash when the number is unavailable (not 0)."""
+    return "—" if count is None else int(count)
+
+
+def _render_resolved_summary(
+    ticket_count_7: int | None,
+    ticket_count_30: int | None,
+    resolved_30: pd.DataFrame,
+    pr_count_7: int | None,
+    pr_count_30: int | None,
+    merged_prs: pd.DataFrame,
+    github_ready: bool,
+    github_error: str = "",
+) -> None:
+    """Login landing snapshot: tickets and PRs resolved in the last 7 / 30 days,
+    with a pie for who resolved tickets and who merged PRs. Tile counts come from
+    server-side counts (Jira's approximate count for tickets, GitHub's exact
+    issueCount for PRs); the dataframes only drive the pies. A ``None`` count
+    means the lookup failed and renders as "—", distinct from a genuine 0."""
+    st.subheader("Resolved in the Last 7 / 30 Days")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Tickets resolved (7d)", _metric_value(ticket_count_7))
+    c2.metric("Tickets resolved (30d)", _metric_value(ticket_count_30))
+    c3.metric("PRs merged (7d)", _metric_value(pr_count_7))
+    c4.metric("PRs merged (30d)", _metric_value(pr_count_30))
+
+    left, right = st.columns(2)
+    with left:
+        ticket_people = (
+            resolved_30["assignee"].fillna("Unassigned").astype(str).str.strip().replace("", "Unassigned")
+            if "assignee" in resolved_30.columns and not resolved_30.empty
+            else pd.Series(dtype=str)
+        )
+        _contribution_pie(ticket_people, "tickets", "Who resolved tickets (30 days)")
+        if ticket_count_30 is not None and len(ticket_people) < int(ticket_count_30):
+            st.caption(
+                f"Pie shows a {len(ticket_people)}-ticket sample of ~{int(ticket_count_30)} "
+                "resolved (fetch limit); ticket tiles are Jira's approximate counts."
+            )
+    with right:
+        if not github_ready:
+            st.caption(
+                "PR charts need a GitHub token. "
+                + (f"({github_error})" if github_error else "Set DASHBOARD_GITHUB_TOKEN.")
+            )
+        else:
+            pr_people = (
+                merged_prs["author"].fillna("unknown").astype(str)
+                if "author" in merged_prs.columns and not merged_prs.empty
+                else pd.Series(dtype=str)
+            )
+            _contribution_pie(pr_people, "PRs", "Who merged PRs (30 days)")
+
+    st.caption(
+        "Ticket resolved = transitioned into Done / Released / Ready for Production / Review in "
+        "Staging in the window (credited to current assignee). PR merged = merged anywhere in the "
+        "org in the window (credited to the PR author, by GitHub username)."
+    )
+
+
+# --- Pull requests -----------------------------------------------------------
+
+# A stuck PR is open with no approving review. We classify from the actual
+# review counts, not reviewDecision: GitHub only populates reviewDecision when
+# the base branch *requires* review (branch protection / CODEOWNERS), so in
+# repos without that rule it stays null even when approving reviews exist -
+# which would otherwise mark reviewed/approved PRs as stuck.
+def _pr_review_label(row: pd.Series) -> str:
+    if int(row.get("approving_reviews", 0) or 0) > 0:
+        return "Approved"
+    if int(row.get("changes_reviews", 0) or 0) > 0:
+        return "Changes requested"
+    if int(row.get("total_reviews", 0) or 0) > 0:
+        return "Reviewed, not approved"
+    return "No review yet"
+
+
+def _render_pr_section(
+    open_prs: pd.DataFrame,
+    github_ready: bool,
+    github_error: str = "",
+    open_count_exact: int | None = None,
+) -> None:
+    """Org-wide PR health: per-person open/stuck counts and the stuck PR queue."""
+    st.subheader("Pull Requests")
+    if not github_ready:
+        st.info(
+            "Connect GitHub to see PR status. Set a read-only DASHBOARD_GITHUB_TOKEN "
+            "on the deployment."
+            + (f" ({github_error})" if github_error else "")
+        )
+        return
+    if open_prs.empty:
+        st.success("No open PRs across the organization.")
+        return
+
+    prs = open_prs.copy()
+    prs["review"] = prs.apply(_pr_review_label, axis=1)
+    # Stuck = open, non-draft, with no approving review (the user's definition).
+    prs["stuck"] = prs["approving_reviews"].fillna(0).astype(int) == 0
+
+    fetched = int(len(prs))
+    # Exact org-wide open count isn't paging-capped; the frame is (max_prs), so
+    # fall back to the fetched size only if the exact count is unavailable.
+    open_count = fetched if open_count_exact is None else int(open_count_exact)
+    stuck = prs[prs["stuck"]]
+    no_review = prs[prs["total_reviews"].fillna(0).astype(int) == 0]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Open PRs", open_count)
+    c2.metric("Stuck (no approving review)", int(len(stuck)))
+    c3.metric("Never reviewed", int(len(no_review)))
+    if open_count_exact is not None and fetched < open_count_exact:
+        st.caption(
+            f"Per-person and stuck lists cover the {fetched} oldest of {open_count_exact} "
+            "open PRs (fetch limit); the Open PRs tile is exact."
+        )
+
+    # Per-person PR status: who is holding open and stuck work, and their oldest.
+    by_person = (
+        prs.groupby("author")
+        .agg(
+            open_prs=("number", "size"),
+            stuck_prs=("stuck", "sum"),
+            oldest_days=("age_days", "max"),
+            idle_days=("idle_days", "max"),
+        )
+        .reset_index()
+        .sort_values(["stuck_prs", "oldest_days"], ascending=[False, False])
+    )
+    by_person["stuck_prs"] = by_person["stuck_prs"].astype(int)
+    st.markdown("**PR status by person** (GitHub username)")
+    st.dataframe(
+        by_person,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "author": st.column_config.TextColumn("Person"),
+            "open_prs": st.column_config.NumberColumn("Open"),
+            "stuck_prs": st.column_config.NumberColumn("Stuck"),
+            "oldest_days": st.column_config.NumberColumn("Oldest (days)", format="%.0f"),
+            "idle_days": st.column_config.NumberColumn("Most idle (days)", format="%.0f"),
+        },
+    )
+
+    # The stuck queue itself, oldest first, so nobody has to hunt for the PRs
+    # that have been sitting unreviewed.
+    st.markdown("**Stuck PRs — open with no approving review, oldest first**")
+    stuck_display = stuck.sort_values("age_days", ascending=False)[
+        ["url", "title", "author", "review", "age_days", "idle_days"]
+    ]
+    st.dataframe(
+        stuck_display,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "url": st.column_config.LinkColumn("PR", display_text=r"/pull/(\d+)"),
+            "title": st.column_config.TextColumn("Title", width="large"),
+            "author": st.column_config.TextColumn("Author"),
+            "review": st.column_config.TextColumn("Review"),
+            "age_days": st.column_config.NumberColumn("Age (days)", format="%.0f"),
+            "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.0f"),
+        },
+    )
+    st.caption(
+        "Stuck = open PR without an approving review (no review yet, review pending, or changes "
+        "requested). Drafts are excluded. Counts are org-wide."
+    )
+
+
 def main() -> None:
     st.set_page_config(page_title="Jira Ticket Health Dashboard", layout="wide")
     require_password()
@@ -2485,6 +2848,74 @@ def main() -> None:
         )
 
     df = add_priority_score(add_ticket_health_fields(raw_df))
+
+    # Recently-resolved work lives outside the main (non-Done) fetch, so pull it
+    # separately for the top-of-page snapshot. Two windows keep the 7d/30d split
+    # exact without parsing each ticket's changelog. A failure here must not take
+    # the whole dashboard down.
+    def _resolved_count(days: int) -> int | None:
+        try:
+            return fetch_resolved_count(
+                creds_path=CREDS_PATH,
+                profile_name=PROFILE_NAME,
+                days=days,
+                statuses=RESOLVED_STATUSES,
+                schema_version=FETCH_SCHEMA_VERSION,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _resolved(days: int) -> pd.DataFrame:
+        try:
+            return fetch_resolved_tickets(
+                creds_path=CREDS_PATH,
+                profile_name=PROFILE_NAME,
+                days=days,
+                statuses=RESOLVED_STATUSES,
+                max_results=max_results,
+                page_size=page_size,
+                schema_version=FETCH_SCHEMA_VERSION,
+            )
+        except Exception:  # noqa: BLE001
+            return pd.DataFrame()
+
+    # GitHub PR data is optional: without a token the PR views degrade to a hint
+    # rather than an error, so the Jira dashboard still works standalone.
+    github_error = ""
+    open_prs = pd.DataFrame()
+    merged_prs = pd.DataFrame()
+    pr_count_7: int | None = None
+    pr_count_30: int | None = None
+    open_count_exact: int | None = None
+    try:
+        github_env = github_client.load_github_env()
+    except Exception as exc:  # noqa: BLE001
+        github_env = None
+        github_error = str(exc)[:200]
+    github_ready = github_env is not None
+    if github_ready:
+        token, org = github_env
+        try:
+            open_prs = fetch_open_prs_cached(token, org, FETCH_SCHEMA_VERSION)
+            open_count_exact = fetch_open_pr_count_cached(token, org, FETCH_SCHEMA_VERSION)
+            merged_prs = fetch_merged_prs_cached(token, org, 30, FETCH_SCHEMA_VERSION)
+            pr_count_7 = fetch_merged_pr_count_cached(token, org, 7, FETCH_SCHEMA_VERSION)
+            pr_count_30 = fetch_merged_pr_count_cached(token, org, 30, FETCH_SCHEMA_VERSION)
+        except Exception as exc:  # noqa: BLE001
+            github_ready = False
+            github_error = str(exc)[:200]
+
+    _render_resolved_summary(
+        _resolved_count(7),
+        _resolved_count(30),
+        _resolved(30),
+        pr_count_7,
+        pr_count_30,
+        merged_prs,
+        github_ready,
+        github_error,
+    )
+    st.divider()
 
     # "Unassigned" is Jira's placeholder, not a colleague: offering it here would
     # inflate the head-count and let someone "focus" on a person who does not
@@ -2554,6 +2985,9 @@ def main() -> None:
 
     st.divider()
     _render_scope_breakdown(filtered, scope=scope, include_backlogs=include_backlogs)
+
+    st.divider()
+    _render_pr_section(open_prs, github_ready, github_error, open_count_exact)
 
     st.divider()
     _render_priority_queue(filtered, include_backlogs=include_backlogs)
