@@ -2753,11 +2753,16 @@ def _metric_value(count: int | None) -> str | int:
     return "—" if count is None else int(count)
 
 
-def _render_ticket_list(df: pd.DataFrame | None, empty_msg: str) -> None:
+def _render_ticket_list(
+    df: pd.DataFrame | None, empty_msg: str, total_count: int | None = None
+) -> None:
     """Render a compact clickable ticket table (key/summary/status/assignee/age).
 
     ``None`` means the fetch failed (distinct from an empty result): say so
     rather than printing a reassuring "nothing here" that hides an outage.
+    ``total_count`` is Jira's uncapped count; when the fetched frame is smaller
+    (paging cap hit) a caption says so, so the list can't quietly disagree with
+    the headline tile.
     """
     if df is None:
         st.caption("Could not load — try Refresh Data.")
@@ -2791,6 +2796,11 @@ def _render_ticket_list(df: pd.DataFrame | None, empty_msg: str) -> None:
             "age_days": st.column_config.NumberColumn("Age (days)", format="%.0f"),
         },
     )
+    if total_count is not None and len(view) < int(total_count):
+        st.caption(
+            f"Showing the {len(view)} of {int(total_count)} matching tickets that fit "
+            "the fetch limit; the tile above is the exact count."
+        )
 
 
 def _render_new_and_triage(
@@ -2812,6 +2822,7 @@ def _render_new_and_triage(
         _render_ticket_list(
             triage_tickets,
             f"Nothing has been sitting in {', '.join(TRIAGE_STATUSES)} longer than {triage_hours}h.",
+            total_count=triage_stuck,
         )
         st.caption(
             "Stuck = currently in a triage status, created more than "
@@ -2819,7 +2830,11 @@ def _render_new_and_triage(
             "Configure with JIRA_TRIAGE_STATUSES / JIRA_TRIAGE_STUCK_HOURS."
         )
     with st.expander("New tickets in the last 7 days, newest first", expanded=False):
-        _render_ticket_list(new_tickets_7d, "No tickets created in the last 7 days.")
+        _render_ticket_list(
+            new_tickets_7d,
+            "No tickets created in the last 7 days.",
+            total_count=new_7d,
+        )
 
 
 def _render_resolved_summary(
