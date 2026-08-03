@@ -69,7 +69,7 @@ PROFILE_NAME = os.getenv("JIRA_PROFILE", DEFAULT_PROFILE_NAME)
 JQL = os.getenv("JIRA_DASHBOARD_JQL", DEFAULT_JQL)
 ORG_TEAM_MEMBERS = [
     name.strip()
-    for name in os.getenv("JIRA_TEAM_MEMBERS", "Tam,Shivanand,Mehdi Ordikhani").split(",")
+    for name in os.getenv("JIRA_TEAM_MEMBERS", "Tam,Mehdi Ordikhani").split(",")
     if name.strip()
 ]
 
@@ -137,7 +137,7 @@ BACKLOG_STATUSES = {
     for name in os.getenv("JIRA_BACKLOG_STATUSES", "Backlog").split(",")
     if name.strip()
 }
-# Weekly hours per person ("Tam=10,Shivanand=20"); Jira does not know who is part-time.
+# Weekly hours per person ("Tam=10,Jal=20"); Jira does not know who is part-time.
 WEEKLY_HOURS = parse_weekly_hours(os.getenv("JIRA_WEEKLY_HOURS", ""))
 # Which Jira projects make up each team ("Marketplace=MB;App=AS,OA").
 TEAM_PROJECTS = parse_team_projects(os.getenv("JIRA_TEAM_PROJECTS", ""))
@@ -828,12 +828,14 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
 
 
 def _render_mix(df: pd.DataFrame) -> None:
-    """Composition of the open backlog, as a share rather than a count.
+    """Composition of the tickets currently in view, as a share rather than a count.
 
     The other charts answer "how much" and "who"; this answers "of what" - which
-    part of the backlog a reader is looking at before they read any table.
+    part of the work a reader is looking at before they read any table. It shows
+    the filtered scope, Backlog statuses included only when the sidebar is, so it
+    always agrees with the headline tiles above it.
     """
-    st.subheader("Backlog Composition")
+    st.subheader("Ticket Composition")
     if df.empty:
         st.info("No tickets in the current scope.")
         return
@@ -861,6 +863,10 @@ def _render_mix(df: pd.DataFrame) -> None:
         options=list(available.keys()),
         horizontal=True,
         key="mix_dimension",
+    )
+    st.caption(
+        "Follows the sidebar scope and filters, including whether Backlog "
+        "statuses are shown."
     )
     counts = (
         df[available[label]]
@@ -1725,10 +1731,10 @@ def _render_sprint_capacity(
 
     is_ml_sprint = str(selected_row["sprint_name"]).startswith("ML Sprint")
 
-    editable = (
-        str(selected_row["sprint_state"]).lower() in {"future", "active"}
-        and write_access.writes_enabled()
-    )
+    # Two distinct reasons a sprint cannot be edited, kept apart so the reader is
+    # told which one applies: a closed sprint is permanent, read-only is a switch.
+    sprint_is_open = str(selected_row["sprint_state"]).lower() in {"future", "active"}
+    editable = sprint_is_open and write_access.writes_enabled()
     ticket_editor_df = df.copy()
 
     # Capture epics before filtering them out so we can show them in a separate table.
@@ -2202,8 +2208,10 @@ def _render_sprint_capacity(
         elif normalized_existing != existing_workload_statuses:
             st.session_state[workload_statuses_key] = normalized_existing
 
-    if not editable:
+    if not sprint_is_open:
         st.info("Sprint membership editing is only available for future or active sprints.")
+    elif not write_access.writes_enabled():
+        st.info(write_access.READ_ONLY_MESSAGE)
     else:
         st.caption("`Apply sprint selection` writes sprint membership and field edits to Jira.")
 
@@ -2500,7 +2508,7 @@ def _render_hourly_capacity(sprint_df: pd.DataFrame, in_sprint_df: pd.DataFrame)
     st.markdown("##### Availability vs Commitment")
     if not WEEKLY_HOURS:
         st.caption(
-            "Set JIRA_WEEKLY_HOURS (e.g. \"Tam=10,Shivanand=20\") to compare committed "
+            "Set JIRA_WEEKLY_HOURS (e.g. \"Tam=10,Jal=20\") to compare committed "
             "hours against what each person is actually available for."
         )
         return

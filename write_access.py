@@ -10,11 +10,7 @@ own script thread: one viewer enabling edits must not enable them for another.
 
 from __future__ import annotations
 
-import os
 import threading
-
-WRITES_ENV = "JIRA_ALLOW_WRITES"
-_ENABLED_VALUES = {"1", "true", "yes", "on"}
 
 _state = threading.local()
 
@@ -24,18 +20,20 @@ READ_ONLY_MESSAGE = (
 )
 
 
-def env_default() -> bool:
-    """Deployment-level default for the sidebar switch."""
-    return os.getenv(WRITES_ENV, "").strip().lower() in _ENABLED_VALUES
-
-
 def set_writes_enabled(enabled: bool) -> None:
     """Record the reviewer's choice for the rest of this script run."""
     _state.enabled = bool(enabled)
 
 
 def writes_enabled() -> bool:
-    return bool(getattr(_state, "enabled", env_default()))
+    """Closed until this run says otherwise.
+
+    There is deliberately no environment or config override: a deployment-level
+    "allow writes" setting would be on before the sidebar had run, so any write
+    path reached earlier - now or after a future edit - would go through with
+    nobody having asked for it.
+    """
+    return bool(getattr(_state, "enabled", False))
 
 
 def require_writes_enabled() -> None:
