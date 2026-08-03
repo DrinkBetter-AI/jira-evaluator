@@ -149,6 +149,60 @@ match the score buckets (e.g. "due date at risk" fires at `due_pressure >= 15`, 
 ticket still shows it). Assert score and reason independently rather than assuming they move
 together.
 
+## Live-data testing (when working credentials are available)
+
+When features depend on real Jira/GitHub numbers (e.g. the resolved-snapshot tiles, the Pull
+Requests section, or a Devin-able heuristic you want to check against real ticket summaries), test
+against live data rather than the synthetic harness. Two credential-plumbing gotchas bite here:
+
+- **A stale base-shell `JIRA_API_TOKEN` shadows your binding.** The environment may already export
+  a `JIRA_API_TOKEN` that 401s. Binding the working secret to a var literally named
+  `JIRA_API_TOKEN` via the tool `env` does not reliably override it. Instead bind the secret to a
+  **non-colliding** name (e.g. `MYTOK`) and, inside the launch command, assign
+  `JIRA_API_TOKEN="$MYTOK"` so it is set from the process's first moment. Verify with
+  `GET /rest/api/3/myself` → 200 before launching. Pair the session token with its matching
+  `JIRA_EMAIL` and the tenant's `JIRA_BASE_URL` (whatever the working credential belongs to — get
+  these from the session secret store / deployed env, not hardcoded here).
+- **GitHub token: don't blank it.** `github_client.load_github_env()` checks
+  `DASHBOARD_GITHUB_TOKEN` → `GITHUB_TOKEN` → `GH_TOKEN`, taking the first **non-empty** value
+  (blank/unset vars are skipped, so `GITHUB_TOKEN=""` falls through to `GH_TOKEN` rather than
+  breaking anything). Get a working token with `GITHUB_TOKEN=$(gh auth token)` (the box's `gh` is
+  authenticated to the org, read is enough). GraphQL calls 401 only if all three are blank/unset or
+  the found token is invalid — so leave the base `GH_TOKEN` intact as a fallback.
+
+Launch in its own process so a `pkill` in the same shell can't take out your session:
+`setsid venv/bin/streamlit run app.py --server.port 8501 --server.headless true > /tmp/log 2>&1 < /dev/null &`.
+
+**Pre-compute expected values with the real clients before the UI run** (small probe scripts using
+`JiraClient.approximate_count` and the GitHub client), so the UI numbers are checked against known
+values, not eyeballed. These numbers drift daily as tickets/PRs land, so **always re-derive them
+with the probe scripts** — never assert against a frozen figure. As one dated sanity snapshot
+(2026-08, order-of-magnitude only): Jira resolved 7d/30d ≈ 1900s/2100s (Jira *approximate* counts —
+the UI says so; not capped at `JIRA_MAX_RESULTS`), PRs merged 7d/30d in the ~90/~300 range,
+open/stuck/never-reviewed PRs ≈ 60s/50s/0.
+
+**Resolved tiles vs. pie sample caption.** The ticket tiles come from Jira's `approximate-count`
+endpoint and are independent of the fetched frame size. The "Pie shows a N-ticket sample of ~M
+resolved (fetch limit); ticket tiles are Jira's approximate counts." caption only renders when the
+fetched frame is **smaller** than the exact count. So at `JIRA_MAX_RESULTS=3000` (≥ the count) the
+caption does not appear — to demonstrate it, run a second instance with a small cap (e.g.
+`JIRA_MAX_RESULTS=150`) and confirm the tiles stay 1949/2134 while the caption shows a 150-sample.
+This dual run is also the cleanest anti-regression proof that the tile is not the paging cap.
+
+**Stuck-PR spot-check.** The browser is not signed into GitHub (private repos), so a clicked
+`/pull/N` link renders a GitHub sign-in page — the address bar still proves the link target is
+correct. To prove a stuck PR genuinely lacks an approving review, use the authenticated CLI:
+`gh api repos/<org>/<repo>/pulls/<n>/reviews --jq 'group_by(.state)|map({state:.[0].state,count:length})'`
+and confirm no `APPROVED` state (COMMENTED/CHANGES_REQUESTED still count as stuck).
+
+**Devin-able? Story-type regression.** The NO-keyword scan must run on the **summary only**; the
+Jira issue type ("Story", "Design") must not leak into it, or engineering Story tickets get
+mislabeled. A good live discriminator is a Story like MB-5591 "Migrate Axios to Fetch and refactor
+authService" which must read **Yes** (the `migrat` prefix on the summary wins; the "Story" type does
+not force it to No/Maybe). Sort the board by the Devin-able? column (Sort-by selectbox or header
+click) and confirm every value is one of Yes/No/Maybe. The board is wide — zoom the browser out
+(ctrl+minus) so the Key and Devin-able? columns are visible together in one screenshot.
+
 ## Gotchas
 
 - The Streamlit page has no browser chrome if the window is in fullscreen; press `F11` before using
