@@ -116,6 +116,20 @@ RESOLVED_STATUSES = tuple(
     ).split(",")
     if s.strip()
 )
+# Triage/intake statuses whose tickets shouldn't sit unattended. Override with a
+# comma-separated JIRA_TRIAGE_STATUSES; JIRA_TRIAGE_STUCK_HOURS sets the threshold.
+_DEFAULT_TRIAGE_STATUSES = ("Triage", "Backlog")
+TRIAGE_STATUSES = tuple(
+    s.strip()
+    for s in os.getenv(
+        "JIRA_TRIAGE_STATUSES", ",".join(_DEFAULT_TRIAGE_STATUSES)
+    ).split(",")
+    if s.strip()
+)
+try:
+    TRIAGE_STUCK_HOURS = int(os.getenv("JIRA_TRIAGE_STUCK_HOURS", "48"))
+except ValueError:
+    TRIAGE_STUCK_HOURS = 48
 # Statuses hidden when "Include Backlogs" is off; projects name their backlog differently.
 BACKLOG_STATUSES = {
     name.strip().lower()
@@ -264,6 +278,101 @@ def fetch_resolved_count(
         return 0
     client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
     return client.approximate_count(_resolved_jql(statuses, days, ordered=False))
+
+
+def _created_jql(days: int, ordered: bool = True) -> str:
+    """JQL for tickets created within the last ``days`` (org-wide, all projects)."""
+    jql = f"created >= -{int(days)}d"
+    return jql + " ORDER BY created DESC" if ordered else jql
+
+
+def _triage_stuck_jql(
+    statuses: tuple[str, ...], hours: int, ordered: bool = True
+) -> str:
+    """Tickets sitting in a triage status past ``hours``.
+
+    "Stuck" = currently in one of ``statuses``, created more than ``hours`` ago,
+    and with no status change in that window (so a just-created ticket, which has
+    no status-change event, isn't falsely flagged). Approximates time-in-status
+    without walking each changelog.
+    """
+    jql = (
+        f"status in ({_jql_status_list(statuses)}) "
+        f"AND created <= -{int(hours)}h AND NOT status CHANGED AFTER -{int(hours)}h"
+    )
+    return jql + " ORDER BY created ASC" if ordered else jql
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_created_count(
+    creds_path: str,
+    profile_name: str,
+    days: int,
+    schema_version: int,
+) -> int | None:
+    """Jira's server-side count of tickets created in the window (never paging-capped)."""
+    _ = schema_version
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.approximate_count(_created_jql(days, ordered=False))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_triage_stuck_count(
+    creds_path: str,
+    profile_name: str,
+    statuses: tuple[str, ...],
+    hours: int,
+    schema_version: int,
+) -> int | None:
+    """Server-side count of tickets stuck in triage past ``hours`` (never paging-capped)."""
+    _ = schema_version
+    if not statuses:
+        return 0
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.approximate_count(_triage_stuck_jql(statuses, hours, ordered=False))
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_triage_stuck_tickets(
+    creds_path: str,
+    profile_name: str,
+    statuses: tuple[str, ...],
+    hours: int,
+    max_results: int,
+    page_size: int,
+    schema_version: int,
+) -> pd.DataFrame:
+    """Tickets stuck in a triage status past ``hours``, oldest first (for the list)."""
+    _ = schema_version
+    if not statuses:
+        return pd.DataFrame()
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.search_issues(
+        jql=_triage_stuck_jql(statuses, hours),
+        fields=DEFAULT_FIELDS,
+        max_results=max_results,
+        page_size=page_size,
+    )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_created_tickets(
+    creds_path: str,
+    profile_name: str,
+    days: int,
+    max_results: int,
+    page_size: int,
+    schema_version: int,
+) -> pd.DataFrame:
+    """Tickets created within the last ``days``, newest first (for the list)."""
+    _ = schema_version
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.search_issues(
+        jql=_created_jql(days),
+        fields=DEFAULT_FIELDS,
+        max_results=max_results,
+        page_size=page_size,
+    )
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -2647,6 +2756,68 @@ def _metric_value(count: int | None) -> str | int:
     return "—" if count is None else int(count)
 
 
+def _render_ticket_list(df: pd.DataFrame, empty_msg: str) -> None:
+    """Render a compact clickable ticket table (key/summary/status/assignee/age)."""
+    if df is None or df.empty:
+        st.caption(empty_msg)
+        return
+    view = df.copy()
+    view["key_url"] = view["key"].map(_jira_ticket_url)
+    if "created" in view.columns:
+        created = pd.to_datetime(view["created"], utc=True, errors="coerce")
+        view["age_days"] = (
+            pd.Timestamp.now(tz="UTC") - created
+        ).dt.total_seconds() / 86400.0
+    else:
+        view["age_days"] = pd.NA
+    cols = ["key_url", "summary", "status", "priority", "assignee", "age_days"]
+    cols = [c for c in cols if c in view.columns]
+    st.dataframe(
+        view[cols],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "key_url": st.column_config.LinkColumn(
+                "Key", display_text=JIRA_KEY_DISPLAY_PATTERN
+            ),
+            "summary": st.column_config.TextColumn("Summary", width="large"),
+            "status": st.column_config.TextColumn("Status"),
+            "priority": st.column_config.TextColumn("Priority"),
+            "assignee": st.column_config.TextColumn("Assignee"),
+            "age_days": st.column_config.NumberColumn("Age (days)", format="%.0f"),
+        },
+    )
+
+
+def _render_new_and_triage(
+    new_24h: int | None,
+    new_7d: int | None,
+    triage_stuck: int | None,
+    new_tickets_7d: pd.DataFrame | None,
+    triage_tickets: pd.DataFrame | None,
+    triage_hours: int,
+) -> None:
+    """Intake health: brand-new work and tickets sitting in triage too long."""
+    st.subheader("New & Untriaged Work")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("New tickets (24h)", _metric_value(new_24h))
+    c2.metric("New tickets (7d)", _metric_value(new_7d))
+    c3.metric(f"Stuck in triage (> {triage_hours}h)", _metric_value(triage_stuck))
+
+    with st.expander(f"Stuck in triage — {', '.join(TRIAGE_STATUSES)} > {triage_hours}h, oldest first", expanded=True):
+        _render_ticket_list(
+            triage_tickets,
+            f"Nothing has been sitting in {', '.join(TRIAGE_STATUSES)} longer than {triage_hours}h.",
+        )
+        st.caption(
+            "Stuck = currently in a triage status, created more than "
+            f"{triage_hours}h ago, and no status change since. Org-wide. "
+            "Configure with JIRA_TRIAGE_STATUSES / JIRA_TRIAGE_STUCK_HOURS."
+        )
+    with st.expander("New tickets in the last 7 days, newest first", expanded=False):
+        _render_ticket_list(new_tickets_7d, "No tickets created in the last 7 days.")
+
+
 def _render_resolved_summary(
     ticket_count_7: int | None,
     ticket_count_30: int | None,
@@ -2928,6 +3099,58 @@ def main() -> None:
             github_ready = False
             github_error = str(exc)[:200]
 
+    # Intake snapshot: brand-new tickets and anything stuck in triage. Each call
+    # is independent and outage-safe so one failing query can't blank the page.
+    def _created_count(days: int) -> int | None:
+        try:
+            return fetch_created_count(
+                creds_path=CREDS_PATH,
+                profile_name=PROFILE_NAME,
+                days=days,
+                schema_version=FETCH_SCHEMA_VERSION,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _triage_stuck_count() -> int | None:
+        try:
+            return fetch_triage_stuck_count(
+                creds_path=CREDS_PATH,
+                profile_name=PROFILE_NAME,
+                statuses=TRIAGE_STATUSES,
+                hours=TRIAGE_STUCK_HOURS,
+                schema_version=FETCH_SCHEMA_VERSION,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _triage_stuck_list() -> pd.DataFrame | None:
+        try:
+            return fetch_triage_stuck_tickets(
+                creds_path=CREDS_PATH,
+                profile_name=PROFILE_NAME,
+                statuses=TRIAGE_STATUSES,
+                hours=TRIAGE_STUCK_HOURS,
+                max_results=max_results,
+                page_size=page_size,
+                schema_version=FETCH_SCHEMA_VERSION,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _created_list(days: int) -> pd.DataFrame | None:
+        try:
+            return fetch_created_tickets(
+                creds_path=CREDS_PATH,
+                profile_name=PROFILE_NAME,
+                days=days,
+                max_results=max_results,
+                page_size=page_size,
+                schema_version=FETCH_SCHEMA_VERSION,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+
     _render_resolved_summary(
         _resolved_count(7),
         _resolved_count(30),
@@ -2937,6 +3160,16 @@ def main() -> None:
         merged_prs,
         github_ready,
         github_error,
+    )
+    st.divider()
+
+    _render_new_and_triage(
+        _created_count(1),
+        _created_count(7),
+        _triage_stuck_count(),
+        _created_list(7),
+        _triage_stuck_list(),
+        TRIAGE_STUCK_HOURS,
     )
     st.divider()
 
