@@ -29,6 +29,7 @@ from jira_client import (
 )
 from access_gate import require_password
 import github_client
+import pr_hygiene
 from capacity import (
     capacity_table,
     same_person,
@@ -3149,6 +3150,137 @@ def _render_pr_section(
         )
 
 
+def _known_project_keys(df: pd.DataFrame) -> list[str]:
+    """Project keys a PR may legitimately reference.
+
+    Taken from the tickets on screen, plus JIRA_EXTRA_PROJECT_KEYS for projects
+    this account cannot see - a PR referencing one of those is still traceable,
+    and matching only known keys stops strings like "UTF-8" reading as tickets.
+    """
+    keys = set()
+    if "project_key" in df.columns:
+        keys.update(str(k).strip().upper() for k in df["project_key"].dropna())
+    keys.update(
+        part.strip().upper()
+        for part in os.getenv("JIRA_EXTRA_PROJECT_KEYS", "").split(",")
+        if part.strip()
+    )
+    return sorted(k for k in keys if k)
+
+
+def _render_pr_hygiene(
+    open_prs: pd.DataFrame,
+    github_ready: bool,
+    github_error: str = "",
+    project_keys: list[str] | None = None,
+) -> None:
+    """Open PRs that are untraceable, stalled, or nobody's job to review."""
+    st.subheader("PR Hygiene")
+    if not github_ready:
+        st.info(
+            "Connect GitHub to see PR hygiene. Set a read-only DASHBOARD_GITHUB_TOKEN "
+            "on the deployment."
+            + (f" ({github_error})" if github_error else "")
+        )
+        return
+    if open_prs.empty:
+        st.success("No open PRs across the organization.")
+        return
+
+    prs = pr_hygiene.add_hygiene_fields(open_prs, project_keys)
+    no_key = prs[~prs["has_jira_key"]]
+    stale = prs[prs["is_stale"]]
+    unowned = prs[prs["is_unowned"]]
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("No Jira key", int(len(no_key)))
+    c2.metric(
+        f"Stale (>{pr_hygiene.STALE_AGE_DAYS:.0f}d old or "
+        f">{pr_hygiene.STALE_IDLE_DAYS:.0f}d idle)",
+        int(len(stale)),
+    )
+    c3.metric("No reviewer", int(len(unowned)))
+    st.caption(
+        "A key is looked for in the PR title, branch name and description"
+        + (f", matched against {len(project_keys)} known project keys." if project_keys else ".")
+    )
+
+    columns = ["url", "title", "author", "repo", "age_days", "idle_days"]
+    config = {
+        "url": st.column_config.LinkColumn("PR", display_text=r"/pull/(\d+)"),
+        "title": st.column_config.TextColumn("Title", width="large"),
+        "author": st.column_config.TextColumn("Author"),
+        "repo": st.column_config.TextColumn("Repo"),
+        "age_days": st.column_config.NumberColumn("Age (days)", format="%.0f"),
+        "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.0f"),
+        "stale_reason": st.column_config.TextColumn("Why"),
+        "jira_key": st.column_config.TextColumn("Jira"),
+    }
+
+    key_tab, stale_tab, owner_tab, person_tab = st.tabs(
+        ["No Jira key", "Stale", "No reviewer", "By person"]
+    )
+    with key_tab:
+        if no_key.empty:
+            st.success("Every open PR references a Jira ticket.")
+        else:
+            st.dataframe(
+                no_key.sort_values("age_days", ascending=False)[columns],
+                width="stretch",
+                hide_index=True,
+                column_config=config,
+            )
+            st.caption("Nothing links these back to a ticket, so the work is invisible in Jira.")
+    with stale_tab:
+        if stale.empty:
+            st.success("No stale open PRs.")
+        else:
+            st.dataframe(
+                stale.sort_values("age_days", ascending=False)[columns + ["stale_reason"]],
+                width="stretch",
+                hide_index=True,
+                column_config=config,
+            )
+    with owner_tab:
+        if unowned.empty:
+            st.success("Every open PR has a reviewer or a review.")
+        else:
+            st.dataframe(
+                unowned.sort_values("age_days", ascending=False)[columns],
+                width="stretch",
+                hide_index=True,
+                column_config=config,
+            )
+            st.caption("Nobody was asked to review and nobody has - these stall silently.")
+    with person_tab:
+        st.dataframe(
+            pr_hygiene.hygiene_by_person(prs),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "author": st.column_config.TextColumn("Person"),
+                "open_prs": st.column_config.NumberColumn("Open"),
+                "no_jira_key": st.column_config.NumberColumn("No Jira key"),
+                "stale": st.column_config.NumberColumn("Stale"),
+                "unowned": st.column_config.NumberColumn("No reviewer"),
+                "problems": st.column_config.NumberColumn("Total flags"),
+                "oldest_days": st.column_config.NumberColumn("Oldest (days)", format="%.0f"),
+            },
+        )
+
+    flagged = prs[~prs["has_jira_key"] | prs["is_stale"] | prs["is_unowned"]]
+    st.download_button(
+        "Download flagged PRs (CSV)",
+        flagged[
+            ["repo", "number", "title", "author", "url", "jira_key", "age_days",
+             "idle_days", "is_stale", "stale_reason", "is_unowned"]
+        ].to_csv(index=False),
+        file_name="pr_hygiene.csv",
+        mime="text/csv",
+        disabled=flagged.empty,
+    )
+
+
 def main() -> None:
     st.set_page_config(page_title="Jira Ticket Health Dashboard", layout="wide")
     require_password()
@@ -3418,6 +3550,9 @@ def main() -> None:
 
     st.divider()
     _render_pr_section(open_prs, github_ready, github_error, open_count_exact)
+
+    st.divider()
+    _render_pr_hygiene(open_prs, github_ready, github_error, _known_project_keys(df))
 
     st.divider()
     _render_priority_queue(filtered, include_backlogs=include_backlogs)

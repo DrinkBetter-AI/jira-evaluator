@@ -71,6 +71,10 @@ number
 title
 url
 isDraft
+headRefName
+# Body is only read for a Jira key, so a prefix is enough and keeps the
+# response small across hundreds of PRs.
+bodyText
 reviewDecision
 createdAt
 updatedAt
@@ -136,6 +140,8 @@ def _to_frame(nodes: list[dict]) -> pd.DataFrame:
                 "title": n.get("title") or "",
                 "url": n.get("url") or "",
                 "is_draft": bool(n.get("isDraft")),
+                "branch": n.get("headRefName") or "",
+                "body": (n.get("bodyText") or "")[:2000],
                 "review_decision": n.get("reviewDecision"),
                 "created_at": n.get("createdAt"),
                 "updated_at": n.get("updatedAt"),
