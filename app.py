@@ -232,6 +232,28 @@ def _jql_status_list(statuses: tuple[str, ...]) -> str:
     return ", ".join('"' + s.replace('"', '\\"') + '"' for s in statuses)
 
 
+def _resolved_jql(statuses: tuple[str, ...], days: int, ordered: bool = True) -> str:
+    """JQL for tickets that entered any ``statuses`` within the last ``days``."""
+    jql = f"status CHANGED TO ({_jql_status_list(statuses)}) AFTER -{int(days)}d"
+    return jql + " ORDER BY updated DESC" if ordered else jql
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_resolved_count(
+    creds_path: str,
+    profile_name: str,
+    days: int,
+    statuses: tuple[str, ...],
+    schema_version: int,
+) -> int:
+    """Exact-as-Jira count of tickets resolved in the window, never paging-capped."""
+    _ = schema_version
+    if not statuses:
+        return 0
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.approximate_count(_resolved_jql(statuses, days, ordered=False))
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_resolved_tickets(
     creds_path: str,
@@ -248,18 +270,15 @@ def fetch_resolved_tickets(
     Production / Review in Staging), which spans more than Jira's Done category,
     so the query keys off the status-change event rather than status category.
     ``CHANGED TO ... AFTER`` matches a ticket that entered any resolved status in
-    the window even if it later moved on.
+    the window even if it later moved on. Used for the per-person pie; the
+    headline tiles use :func:`fetch_resolved_count` so they never cap.
     """
     _ = schema_version
     if not statuses:
         return pd.DataFrame()
     client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
-    jql = (
-        f"status CHANGED TO ({_jql_status_list(statuses)}) AFTER -{int(days)}d "
-        "ORDER BY updated DESC"
-    )
     return client.search_issues(
-        jql=jql,
+        jql=_resolved_jql(statuses, days),
         fields=DEFAULT_FIELDS,
         max_results=max_results,
         page_size=page_size,
@@ -276,6 +295,12 @@ def fetch_open_prs_cached(token: str, org: str, schema_version: int) -> pd.DataF
 def fetch_merged_prs_cached(token: str, org: str, days: int, schema_version: int) -> pd.DataFrame:
     _ = schema_version
     return github_client.fetch_merged_prs(token, org, days)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_merged_pr_count_cached(token: str, org: str, days: int, schema_version: int) -> int:
+    _ = schema_version
+    return github_client.merged_pr_count(token, org, days)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -2569,29 +2594,25 @@ def _contribution_pie(labels: pd.Series, value_name: str, title: str) -> None:
 
 
 def _render_resolved_summary(
-    resolved_7: pd.DataFrame,
+    ticket_count_7: int,
+    ticket_count_30: int,
     resolved_30: pd.DataFrame,
+    pr_count_7: int | None,
+    pr_count_30: int | None,
     merged_prs: pd.DataFrame,
     github_ready: bool,
     github_error: str = "",
 ) -> None:
     """Login landing snapshot: tickets and PRs resolved in the last 7 / 30 days,
-    with a pie for who resolved tickets and who merged PRs."""
+    with a pie for who resolved tickets and who merged PRs. Tile counts come from
+    exact server-side counts; the dataframes only drive the pies."""
     st.subheader("Resolved in the Last 7 / 30 Days")
 
-    now = pd.Timestamp.now(tz="UTC")
-    pr7 = pr30 = None
-    if github_ready and not merged_prs.empty and "merged_at" in merged_prs.columns:
-        pr30 = int(len(merged_prs))
-        pr7 = int((merged_prs["merged_at"] >= now - pd.Timedelta(days=7)).sum())
-    elif github_ready:
-        pr7 = pr30 = 0
-
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Tickets resolved (7d)", int(len(resolved_7)))
-    c2.metric("Tickets resolved (30d)", int(len(resolved_30)))
-    c3.metric("PRs merged (7d)", "—" if pr7 is None else pr7)
-    c4.metric("PRs merged (30d)", "—" if pr30 is None else pr30)
+    c1.metric("Tickets resolved (7d)", int(ticket_count_7))
+    c2.metric("Tickets resolved (30d)", int(ticket_count_30))
+    c3.metric("PRs merged (7d)", "—" if pr_count_7 is None else int(pr_count_7))
+    c4.metric("PRs merged (30d)", "—" if pr_count_30 is None else int(pr_count_30))
 
     left, right = st.columns(2)
     with left:
@@ -2601,6 +2622,11 @@ def _render_resolved_summary(
             else pd.Series(dtype=str)
         )
         _contribution_pie(ticket_people, "tickets", "Who resolved tickets (30 days)")
+        if len(ticket_people) < int(ticket_count_30):
+            st.caption(
+                f"Pie shows a {len(ticket_people)}-ticket sample of {int(ticket_count_30)} "
+                "resolved (fetch limit); tiles above are exact."
+            )
     with right:
         if not github_ready:
             st.caption(
@@ -2763,6 +2789,18 @@ def main() -> None:
     # separately for the top-of-page snapshot. Two windows keep the 7d/30d split
     # exact without parsing each ticket's changelog. A failure here must not take
     # the whole dashboard down.
+    def _resolved_count(days: int) -> int:
+        try:
+            return fetch_resolved_count(
+                creds_path=CREDS_PATH,
+                profile_name=PROFILE_NAME,
+                days=days,
+                statuses=RESOLVED_STATUSES,
+                schema_version=FETCH_SCHEMA_VERSION,
+            )
+        except Exception:  # noqa: BLE001
+            return 0
+
     def _resolved(days: int) -> pd.DataFrame:
         try:
             return fetch_resolved_tickets(
@@ -2779,21 +2817,38 @@ def main() -> None:
 
     # GitHub PR data is optional: without a token the PR views degrade to a hint
     # rather than an error, so the Jira dashboard still works standalone.
-    github_env = github_client.load_github_env()
-    github_ready = github_env is not None
     github_error = ""
     open_prs = pd.DataFrame()
     merged_prs = pd.DataFrame()
+    pr_count_7: int | None = None
+    pr_count_30: int | None = None
+    try:
+        github_env = github_client.load_github_env()
+    except Exception as exc:  # noqa: BLE001
+        github_env = None
+        github_error = str(exc)[:200]
+    github_ready = github_env is not None
     if github_ready:
         token, org = github_env
         try:
             open_prs = fetch_open_prs_cached(token, org, FETCH_SCHEMA_VERSION)
             merged_prs = fetch_merged_prs_cached(token, org, 30, FETCH_SCHEMA_VERSION)
+            pr_count_7 = fetch_merged_pr_count_cached(token, org, 7, FETCH_SCHEMA_VERSION)
+            pr_count_30 = fetch_merged_pr_count_cached(token, org, 30, FETCH_SCHEMA_VERSION)
         except Exception as exc:  # noqa: BLE001
             github_ready = False
             github_error = str(exc)[:200]
 
-    _render_resolved_summary(_resolved(7), _resolved(30), merged_prs, github_ready, github_error)
+    _render_resolved_summary(
+        _resolved_count(7),
+        _resolved_count(30),
+        _resolved(30),
+        pr_count_7,
+        pr_count_30,
+        merged_prs,
+        github_ready,
+        github_error,
+    )
     st.divider()
 
     # "Unassigned" is Jira's placeholder, not a colleague: offering it here would

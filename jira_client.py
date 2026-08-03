@@ -216,6 +216,18 @@ class JiraClient:
         session.headers.update({"Accept": "application/json"})
         return session
 
+    def approximate_count(self, jql: str) -> int:
+        """Jira's fast approximate issue count for a JQL, independent of paging.
+
+        Used where only the size of a result set matters (e.g. the resolved-in
+        window tiles) so the number is not silently capped by ``max_results``.
+        """
+        url = f"{self.base_url}/rest/api/3/search/approximate-count"
+        with self._session() as session:
+            response = session.post(url, json={"jql": jql}, timeout=30)
+            response.raise_for_status()
+            return int(response.json().get("count", 0))
+
     def search_issues(
         self,
         jql: str,

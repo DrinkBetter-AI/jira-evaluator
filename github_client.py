@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import datetime as _dt
 import os
+import re
 
 import pandas as pd
 import requests
 
 GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
 DEFAULT_ORG = "DrinkBetter-AI"
+# GitHub logins/orgs: alphanumeric and single hyphens only. Enforced so the org,
+# which is interpolated into the search query, cannot smuggle extra qualifiers.
+_ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
 
 # Env var names, checked in order, so either a dedicated dashboard token or the
 # ambient GitHub token works.
@@ -37,6 +41,8 @@ def load_github_env() -> tuple[str, str] | None:
     if not token:
         return None
     org = os.getenv("GITHUB_ORG", DEFAULT_ORG).strip() or DEFAULT_ORG
+    if not _ORG_RE.match(org):
+        raise GitHubConfigError(f"Invalid GITHUB_ORG: {org!r}")
     return token, org
 
 
@@ -80,6 +86,20 @@ query($q: String!, $after: String) {
   }
 }
 """ % _PR_FIELDS
+
+
+_COUNT_QUERY = """
+query($q: String!) { search(query: $q, type: ISSUE, first: 1) { issueCount } }
+"""
+
+
+def _search_count(token: str, query: str) -> int:
+    """Total matches for a search query, from GitHub's own ``issueCount``.
+
+    Not bounded by pagination, so it stays correct even past the point where
+    the result nodes themselves would be capped.
+    """
+    return int(_graphql(token, _COUNT_QUERY, {"q": query})["search"]["issueCount"])
 
 
 def _search_prs(token: str, query: str, max_prs: int) -> list[dict]:
@@ -132,8 +152,20 @@ def fetch_open_prs(token: str, org: str, max_prs: int = 400) -> pd.DataFrame:
     return frame
 
 
-def fetch_merged_prs(token: str, org: str, days: int, max_prs: int = 2000) -> pd.DataFrame:
-    """PRs merged anywhere in the org within the last ``days``."""
+def _merged_query(org: str, days: int) -> str:
     since = (_dt.datetime.utcnow() - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
-    query = f"org:{org} is:pr is:merged merged:>={since}"
-    return _to_frame(_search_prs(token, query, max_prs))
+    return f"org:{org} is:pr is:merged merged:>={since}"
+
+
+def merged_pr_count(token: str, org: str, days: int) -> int:
+    """Exact count of PRs merged org-wide in the window (never paging-capped)."""
+    return _search_count(token, _merged_query(org, days))
+
+
+def fetch_merged_prs(token: str, org: str, days: int, max_prs: int = 1000) -> pd.DataFrame:
+    """PRs merged anywhere in the org within the last ``days`` (for the pie).
+
+    Capped at ``max_prs`` (GitHub search only exposes the first 1,000 results);
+    the headline tile uses :func:`merged_pr_count` so it is not affected.
+    """
+    return _to_frame(_search_prs(token, _merged_query(org, days), max_prs))
