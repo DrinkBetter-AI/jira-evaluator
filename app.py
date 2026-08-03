@@ -56,6 +56,7 @@ from hygiene import (
 )
 from prioritization import add_priority_score, assignee_rollup
 from transformations import add_ticket_health_fields
+import write_access
 
 
 DEFAULT_JQL = """statusCategory != Done
@@ -68,7 +69,7 @@ PROFILE_NAME = os.getenv("JIRA_PROFILE", DEFAULT_PROFILE_NAME)
 JQL = os.getenv("JIRA_DASHBOARD_JQL", DEFAULT_JQL)
 ORG_TEAM_MEMBERS = [
     name.strip()
-    for name in os.getenv("JIRA_TEAM_MEMBERS", "Tam,Shivanand,Mehdi Ordikhani").split(",")
+    for name in os.getenv("JIRA_TEAM_MEMBERS", "Tam,Mehdi Ordikhani").split(",")
     if name.strip()
 ]
 
@@ -96,6 +97,8 @@ JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
 TRANSITION_LOOKUP_LIMIT = 50
 # Upper bound on how many tickets a bulk write-back pre-selects.
 BULK_ACTION_DEFAULT_LIMIT = 25
+# Slices a composition pie shows before the tail collapses into "Other".
+MIX_SLICE_LIMIT = 10
 # Ceiling on tickets fetched per run; org-wide JQL can exceed the old fixed 1000.
 MAX_RESULTS = _positive_int(os.getenv("JIRA_MAX_RESULTS"), default=1000)
 # Statuses the team treats as "resolved" for the top-of-page snapshot. Spans
@@ -134,7 +137,7 @@ BACKLOG_STATUSES = {
     for name in os.getenv("JIRA_BACKLOG_STATUSES", "Backlog").split(",")
     if name.strip()
 }
-# Weekly hours per person ("Tam=10,Shivanand=20"); Jira does not know who is part-time.
+# Weekly hours per person ("Tam=10,Jal=20"); Jira does not know who is part-time.
 WEEKLY_HOURS = parse_weekly_hours(os.getenv("JIRA_WEEKLY_HOURS", ""))
 # Which Jira projects make up each team ("Marketplace=MB;App=AS,OA").
 TEAM_PROJECTS = parse_team_projects(os.getenv("JIRA_TEAM_PROJECTS", ""))
@@ -824,6 +827,81 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
     )
 
 
+def _render_mix(df: pd.DataFrame) -> None:
+    """Composition of the tickets currently in view, as a share rather than a count.
+
+    The other charts answer "how much" and "who"; this answers "of what" - which
+    part of the work a reader is looking at before they read any table. It shows
+    the filtered scope, Backlog statuses included only when the sidebar is, so it
+    always agrees with the headline tiles above it.
+    """
+    st.subheader("Ticket Composition")
+    if df.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    # Team is derived, not a Jira field, so it has to be attached before it can
+    # be offered as a slice.
+    df = add_team(df, TEAM_PROJECTS, TEAM_PEOPLE)
+    dimensions = {
+        "Status": "status",
+        "Team": "team",
+        "Priority": "priority",
+        "Issue type": "issue_type",
+        "Assignee": "assignee",
+        "Project": "project_key",
+    }
+    available = {
+        label: column for label, column in dimensions.items() if column in df.columns
+    }
+    if not available:
+        st.info("No breakdown fields available in the current data.")
+        return
+
+    label = st.radio(
+        "Break down by",
+        options=list(available.keys()),
+        horizontal=True,
+        key="mix_dimension",
+    )
+    st.caption(
+        "Follows the sidebar scope and filters, including whether Backlog "
+        "statuses are shown."
+    )
+    counts = (
+        df[available[label]]
+        .fillna("Unknown")
+        .astype(str)
+        .str.strip()
+        .replace({"": "Unknown"})
+        .value_counts()
+    )
+    # A pie with forty slices is a colour wheel, not a chart: keep the shape of
+    # the backlog readable and let the tail sit in one honest "Other" slice.
+    top = counts.head(MIX_SLICE_LIMIT)
+    remainder = int(counts.iloc[MIX_SLICE_LIMIT:].sum())
+    if remainder:
+        top = pd.concat(
+            [top, pd.Series({f"Other ({len(counts) - MIX_SLICE_LIMIT})": remainder})]
+        )
+
+    mix = top.rename_axis(label).reset_index(name="tickets")
+    figure = px.pie(mix, names=label, values="tickets", hole=0.45)
+    figure.update_traces(textposition="inside", textinfo="percent+label")
+    figure.update_layout(height=420, legend_title_text=label)
+    left, right = st.columns([3, 2])
+    left.plotly_chart(figure, width="stretch")
+    right.dataframe(
+        mix.assign(share=(mix["tickets"] / mix["tickets"].sum() * 100).round(1)),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "tickets": st.column_config.NumberColumn("Tickets"),
+            "share": st.column_config.NumberColumn("Share %", format="%.1f"),
+        },
+    )
+
+
 def _render_scope_breakdown(df: pd.DataFrame, scope: str, include_backlogs: bool) -> None:
     """Render the per-assignee roll-up that backs org-wide and individual views."""
     scoped = _metrics_df(df, include_backlogs)
@@ -1323,6 +1401,12 @@ def _render_triage_decisions(queue: pd.DataFrame, decisions: dict[str, str]) -> 
         return
 
     st.markdown(f"##### Apply {len(to_close)} closure(s) to Jira")
+    if not write_access.writes_enabled():
+        st.info(
+            f"{len(to_close)} ticket(s) marked Close are held as notes only. "
+            + write_access.READ_ONLY_MESSAGE
+        )
+        return
     st.caption(
         "Each project runs its own workflow, so the closing status is resolved per "
         "ticket from the transitions Jira actually offers it, preferring "
@@ -1647,7 +1731,10 @@ def _render_sprint_capacity(
 
     is_ml_sprint = str(selected_row["sprint_name"]).startswith("ML Sprint")
 
-    editable = str(selected_row["sprint_state"]).lower() in {"future", "active"}
+    # Two distinct reasons a sprint cannot be edited, kept apart so the reader is
+    # told which one applies: a closed sprint is permanent, read-only is a switch.
+    sprint_is_open = str(selected_row["sprint_state"]).lower() in {"future", "active"}
+    editable = sprint_is_open and write_access.writes_enabled()
     ticket_editor_df = df.copy()
 
     # Capture epics before filtering them out so we can show them in a separate table.
@@ -2121,8 +2208,10 @@ def _render_sprint_capacity(
         elif normalized_existing != existing_workload_statuses:
             st.session_state[workload_statuses_key] = normalized_existing
 
-    if not editable:
+    if not sprint_is_open:
         st.info("Sprint membership editing is only available for future or active sprints.")
+    elif not write_access.writes_enabled():
+        st.info(write_access.READ_ONLY_MESSAGE)
     else:
         st.caption("`Apply sprint selection` writes sprint membership and field edits to Jira.")
 
@@ -2419,7 +2508,7 @@ def _render_hourly_capacity(sprint_df: pd.DataFrame, in_sprint_df: pd.DataFrame)
     st.markdown("##### Availability vs Commitment")
     if not WEEKLY_HOURS:
         st.caption(
-            "Set JIRA_WEEKLY_HOURS (e.g. \"Tam=10,Shivanand=20\") to compare committed "
+            "Set JIRA_WEEKLY_HOURS (e.g. \"Tam=10,Jal=20\") to compare committed "
             "hours against what each person is actually available for."
         )
         return
@@ -3273,6 +3362,24 @@ def main() -> None:
         include_backlogs = st.checkbox("Include Backlogs", value=False)
         color_by = st.radio("Bubble color", options=["priority", "assignee"], horizontal=True)
 
+        st.header("Jira writes")
+        # Reading the dashboard is the common case; changing Jira is a decision.
+        # Off on every page load so a reporting session cannot edit by accident,
+        # and re-armed deliberately when the reviewer means it.
+        allow_writes = st.toggle(
+            "Allow Jira edits",
+            value=False,
+            help=(
+                "Off: the dashboard only reads Jira. On: closures, transitions, "
+                "assignee and sprint edits can be applied."
+            ),
+        )
+        write_access.set_writes_enabled(allow_writes)
+        if allow_writes:
+            st.warning("Edits armed - Apply buttons will change Jira.")
+        else:
+            st.caption("Read-only. Nothing here can change Jira.")
+
     filtered = df.copy()
     if selected_statuses:
         filtered = filtered[filtered["status"].isin(selected_statuses)]
@@ -3292,6 +3399,9 @@ def main() -> None:
         include_backlogs=include_backlogs,
         unassigned_source=unscoped if selected_assignees is not None else None,
     )
+
+    st.divider()
+    _render_mix(_metrics_df(filtered, include_backlogs))
 
     st.divider()
     _render_team_overview(_metrics_df(filtered, include_backlogs))
@@ -3426,7 +3536,7 @@ def main() -> None:
 
         apply_suggestion = st.button(
             f"Apply to {len(selected_keys)} ticket(s)",
-            disabled=not selected_keys,
+            disabled=(not selected_keys) or (not write_access.writes_enabled()),
             type="primary",
         )
 
@@ -3491,7 +3601,10 @@ def main() -> None:
             selected_operation = op_options[selected_label]
             confirm_revert = st.checkbox("I understand revert may partially fail due to Jira workflow rules.")
 
-            revert_clicked = st.button("Revert selected operation", disabled=not confirm_revert)
+            revert_clicked = st.button(
+                "Revert selected operation",
+                disabled=(not confirm_revert) or (not write_access.writes_enabled()),
+            )
 
             if revert_clicked:
                 client = JiraClient.resolve(
