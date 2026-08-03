@@ -184,7 +184,7 @@ past changes matters:
    Backlog tickets are always included here regardless of *Include Backlogs*.
 11. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
    or unowned: no Jira key anywhere in the title, branch name or description
-   (matched against the project keys actually in use, plus `JIRA_EXTRA_PROJECT_KEYS`,
+   (matched against every project key Jira exposes, plus `JIRA_EXTRA_PROJECT_KEYS`,
    so a string like `UTF-8` does not read as a ticket); open past
    `PR_STALE_AGE_DAYS` or untouched past `PR_STALE_IDLE_DAYS`, with the reason
    named; and nobody requested to review with no review yet. Includes a per-author

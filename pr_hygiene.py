@@ -18,10 +18,20 @@ import re
 
 import pandas as pd
 
+
+def _positive_float(value: str | None, *, default: float) -> float:
+    """Read a positive number setting; a typo costs the setting, not the app."""
+    try:
+        parsed = float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
 # Default thresholds. Age is when a PR stops being "in progress" and starts
 # being a merge conflict waiting to happen; idle is when it stops moving at all.
-STALE_AGE_DAYS = float(os.getenv("PR_STALE_AGE_DAYS", "14"))
-STALE_IDLE_DAYS = float(os.getenv("PR_STALE_IDLE_DAYS", "7"))
+STALE_AGE_DAYS = _positive_float(os.getenv("PR_STALE_AGE_DAYS"), default=14.0)
+STALE_IDLE_DAYS = _positive_float(os.getenv("PR_STALE_IDLE_DAYS"), default=7.0)
 
 # Jira keys: uppercase project key, hyphen, number. Bounded so "A-1" inside a
 # longer token, or a lowercase word, does not count.

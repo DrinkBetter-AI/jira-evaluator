@@ -71,10 +71,6 @@ number
 title
 url
 isDraft
-headRefName
-# Body is only read for a Jira key, so a prefix is enough and keeps the
-# response small across hundreds of PRs.
-bodyText
 reviewDecision
 createdAt
 updatedAt
@@ -87,7 +83,15 @@ allReviews: reviews { totalCount }
 reviewRequests(first: 1) { totalCount }
 """
 
-_SEARCH_QUERY = """
+# Only the open-PR path looks for a Jira key, and a body can be thousands of
+# words: asking for it on the merged query too would multiply that payload by
+# the 1,000 PRs it pages through for a chart that never reads it.
+_HYGIENE_FIELDS = _PR_FIELDS + """
+headRefName
+bodyText
+"""
+
+_SEARCH_TEMPLATE = """
 query($q: String!, $after: String) {
   search(query: $q, type: ISSUE, first: 100, after: $after) {
     issueCount
@@ -95,7 +99,10 @@ query($q: String!, $after: String) {
     nodes { ... on PullRequest { %s } }
   }
 }
-""" % _PR_FIELDS
+"""
+
+_SEARCH_QUERY = _SEARCH_TEMPLATE % _PR_FIELDS
+_HYGIENE_SEARCH_QUERY = _SEARCH_TEMPLATE % _HYGIENE_FIELDS
 
 
 _COUNT_QUERY = """
@@ -112,11 +119,13 @@ def _search_count(token: str, query: str) -> int:
     return int(_graphql(token, _COUNT_QUERY, {"q": query})["search"]["issueCount"])
 
 
-def _search_prs(token: str, query: str, max_prs: int) -> list[dict]:
+def _search_prs(
+    token: str, query: str, max_prs: int, gql: str = _SEARCH_QUERY
+) -> list[dict]:
     nodes: list[dict] = []
     after: str | None = None
     while len(nodes) < max_prs:
-        data = _graphql(token, _SEARCH_QUERY, {"q": query, "after": after})
+        data = _graphql(token, gql, {"q": query, "after": after})
         search = data["search"]
         added = [n for n in search["nodes"] if n]
         nodes.extend(added)
@@ -140,7 +149,9 @@ def _to_frame(nodes: list[dict]) -> pd.DataFrame:
                 "title": n.get("title") or "",
                 "url": n.get("url") or "",
                 "is_draft": bool(n.get("isDraft")),
+                # Absent on the merged-PR query, which does not request them.
                 "branch": n.get("headRefName") or "",
+                # Truncated because only the first Jira key in it is ever read.
                 "body": (n.get("bodyText") or "")[:2000],
                 "review_decision": n.get("reviewDecision"),
                 "created_at": n.get("createdAt"),
@@ -172,7 +183,9 @@ def open_pr_count(token: str, org: str) -> int:
 
 def fetch_open_prs(token: str, org: str, max_prs: int = 400) -> pd.DataFrame:
     """Open, non-draft PRs across the org, oldest first, with review counts."""
-    frame = _to_frame(_search_prs(token, _open_query(org), max_prs))
+    frame = _to_frame(
+        _search_prs(token, _open_query(org), max_prs, _HYGIENE_SEARCH_QUERY)
+    )
     if frame.empty:
         return frame
     now = pd.Timestamp.now(tz="UTC")

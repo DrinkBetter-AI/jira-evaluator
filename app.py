@@ -432,6 +432,12 @@ def fetch_open_pr_count_cached(token: str, org: str, schema_version: int) -> int
     return github_client.open_pr_count(token, org)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_project_keys(creds_path: str, profile_name: str) -> list[str]:
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.get_project_keys()
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_all_priorities(creds_path: str, profile_name: str) -> list[str]:
     client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
@@ -3153,11 +3159,19 @@ def _render_pr_section(
 def _known_project_keys(df: pd.DataFrame) -> list[str]:
     """Project keys a PR may legitimately reference.
 
-    Taken from the tickets on screen, plus JIRA_EXTRA_PROJECT_KEYS for projects
-    this account cannot see - a PR referencing one of those is still traceable,
-    and matching only known keys stops strings like "UTF-8" reading as tickets.
+    Every project Jira exposes, not just the ones with a ticket on screen: a
+    project whose work is all Done still has PRs pointing at it. The tickets are
+    a fallback for when the project list cannot be read, and
+    JIRA_EXTRA_PROJECT_KEYS covers projects this account cannot see at all.
+    Matching only known keys stops strings like "UTF-8" reading as tickets.
     """
     keys = set()
+    try:
+        keys.update(fetch_project_keys(CREDS_PATH, PROFILE_NAME))
+    except Exception:
+        # A missing project list only costs precision, so fall back rather than
+        # taking the section down.
+        pass
     if "project_key" in df.columns:
         keys.update(str(k).strip().upper() for k in df["project_key"].dropna())
     keys.update(
