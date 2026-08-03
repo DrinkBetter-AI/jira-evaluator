@@ -1,0 +1,49 @@
+# Auto-deploy the dashboard to Cloud Run on merge to develop.
+# Wire this up once as a Cloud Build trigger (branch = ^develop$); thereafter
+# every merge builds the image and rolls a new Cloud Run revision with no manual
+# `gcloud run deploy`. Env vars and secrets already set on the service
+# (DASHBOARD_PASSWORD, JIRA_*, DASHBOARD_GITHUB_TOKEN) are preserved across
+# --image deploys, so they don't need to be repeated here.
+substitutions:
+  _SERVICE: jira-dashboard
+  _REGION: us-central1
+  # Artifact Registry repo Cloud Run source-deploys use by default; reused here.
+  _REPO: cloud-run-source-deploy
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - --region
+      - ${_REGION}
+      - --quiet
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
