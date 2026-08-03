@@ -1,0 +1,75 @@
+# Auto-deploy the dashboard to Cloud Run on merge to develop.
+# Wire this up once as a Cloud Build trigger (branch = ^develop$); thereafter
+# every merge builds the image and rolls a new Cloud Run revision with no manual
+# `gcloud run deploy`.
+#
+# IMPORTANT: this pipeline updates an ALREADY-EXISTING service. The dashboard's
+# secrets/env (DASHBOARD_PASSWORD, JIRA_* / DASHBOARD_GITHUB_TOKEN) must be set
+# when the service is first created (see README "Deploying to Cloud Run") — a
+# `--image` deploy preserves them but does not create them, so a from-scratch
+# service would come up unconfigured and refuse to serve. The scaling flags the
+# app needs for Streamlit's websocket state (--session-affinity, --max-instances 1)
+# ARE reasserted on every deploy below, so those can't drift.
+substitutions:
+  _SERVICE: jira-dashboard
+  _REGION: us-central1
+  # Artifact Registry repo Cloud Run source-deploys use by default; reused here.
+  _REPO: cloud-run-source-deploy
+
+steps:
+  # Warm the layer cache from the last :latest image (best effort on first build).
+  - id: pull-cache
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - docker pull ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest || exit 0
+
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --cache-from
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+      - .
+
+  # Push the SHA tag explicitly (deploy needs it in the registry before it runs);
+  # the :latest tag is pushed by the images: block at the end of the build.
+  # Avoids `docker push --all-tags`, which requires Docker CLI 20.10+.
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - --region
+      - ${_REGION}
+      # Streamlit keeps per-session websocket state in memory; pin to one sticky
+      # instance so a reconnect lands on the same container (see README).
+      - --session-affinity
+      - --max-instances
+      - "1"
+      - --quiet
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+
+# Cold pip install (streamlit/pandas) can approach the 10-minute default; give headroom.
+timeout: 1200s
+
+options:
+  logging: CLOUD_LOGGING_ONLY
