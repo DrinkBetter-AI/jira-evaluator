@@ -21,12 +21,14 @@ steps:
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
       - .
 
+  # Push the SHA tag explicitly (deploy needs it in the registry before it runs);
+  # the :latest tag is pushed by the images: block at the end of the build.
+  # Avoids `docker push --all-tags`, which requires Docker CLI 20.10+.
   - id: push
     name: gcr.io/cloud-builders/docker
     args:
       - push
-      - --all-tags
-      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
 
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
