@@ -2824,6 +2824,50 @@ def _render_pr_section(
         "requested). Drafts are excluded. Counts are org-wide."
     )
 
+    # Waiting on a reviewer: open PRs with nobody assigned to review AND no review
+    # yet — these fall through the cracks because no one is on the hook for them.
+    # "review_requests" may be absent if the client predates the field; treat
+    # missing as 0 so an older cache degrades to "no reviewer" rather than crashing.
+    requests_series = (
+        prs["review_requests"] if "review_requests" in prs.columns else 0
+    )
+    no_reviewer = prs[
+        (pd.Series(requests_series, index=prs.index).fillna(0).astype(int) == 0)
+        & (prs["total_reviews"].fillna(0).astype(int) == 0)
+    ]
+    st.markdown("**Waiting on a reviewer — nobody assigned, no review yet**")
+    min_age = st.slider(
+        "Only show PRs older than (days)",
+        min_value=0,
+        max_value=30,
+        value=2,
+        key="no_reviewer_min_age",
+    )
+    waiting = no_reviewer[no_reviewer["age_days"] > float(min_age)].sort_values(
+        "age_days", ascending=False
+    )
+    if waiting.empty:
+        st.success(
+            f"No unassigned, unreviewed PRs older than {min_age} day(s)."
+        )
+    else:
+        st.dataframe(
+            waiting[["url", "title", "author", "age_days", "idle_days"]],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "url": st.column_config.LinkColumn("PR", display_text=r"/pull/(\d+)"),
+                "title": st.column_config.TextColumn("Title", width="large"),
+                "author": st.column_config.TextColumn("Author"),
+                "age_days": st.column_config.NumberColumn("Age (days)", format="%.0f"),
+                "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.0f"),
+            },
+        )
+        st.caption(
+            f"{len(waiting)} open PR(s) older than {min_age} day(s) with no reviewer "
+            "requested and no review yet — assign someone so they don't stall."
+        )
+
 
 def main() -> None:
     st.set_page_config(page_title="Jira Ticket Health Dashboard", layout="wide")
