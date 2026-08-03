@@ -126,10 +126,7 @@ TRIAGE_STATUSES = tuple(
     ).split(",")
     if s.strip()
 )
-try:
-    TRIAGE_STUCK_HOURS = int(os.getenv("JIRA_TRIAGE_STUCK_HOURS", "48"))
-except ValueError:
-    TRIAGE_STUCK_HOURS = 48
+TRIAGE_STUCK_HOURS = _positive_int(os.getenv("JIRA_TRIAGE_STUCK_HOURS"), default=48)
 # Statuses hidden when "Include Backlogs" is off; projects name their backlog differently.
 BACKLOG_STATUSES = {
     name.strip().lower()
@@ -2756,9 +2753,16 @@ def _metric_value(count: int | None) -> str | int:
     return "—" if count is None else int(count)
 
 
-def _render_ticket_list(df: pd.DataFrame, empty_msg: str) -> None:
-    """Render a compact clickable ticket table (key/summary/status/assignee/age)."""
-    if df is None or df.empty:
+def _render_ticket_list(df: pd.DataFrame | None, empty_msg: str) -> None:
+    """Render a compact clickable ticket table (key/summary/status/assignee/age).
+
+    ``None`` means the fetch failed (distinct from an empty result): say so
+    rather than printing a reassuring "nothing here" that hides an outage.
+    """
+    if df is None:
+        st.caption("Could not load — try Refresh Data.")
+        return
+    if df.empty:
         st.caption(empty_msg)
         return
     view = df.copy()
