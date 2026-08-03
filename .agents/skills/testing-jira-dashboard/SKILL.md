@@ -160,22 +160,26 @@ against live data rather than the synthetic harness. Two credential-plumbing got
   `JIRA_API_TOKEN` via the tool `env` does not reliably override it. Instead bind the secret to a
   **non-colliding** name (e.g. `MYTOK`) and, inside the launch command, assign
   `JIRA_API_TOKEN="$MYTOK"` so it is set from the process's first moment. Verify with
-  `GET /rest/api/3/myself` → 200 before launching. Pair the session token with
-  `JIRA_EMAIL=vossough@gmail.com` and `JIRA_BASE_URL=https://vinovoss.atlassian.net`.
+  `GET /rest/api/3/myself` → 200 before launching. Pair the session token with its matching
+  `JIRA_EMAIL` and the tenant's `JIRA_BASE_URL` (whatever the working credential belongs to — get
+  these from the session secret store / deployed env, not hardcoded here).
 - **GitHub token: don't blank it.** `github_client.load_github_env()` checks
-  `DASHBOARD_GITHUB_TOKEN` → `GITHUB_TOKEN` → `GH_TOKEN`. Get a working token with
-  `GITHUB_TOKEN=$(gh auth token)` (the box's `gh` is authenticated to `DrinkBetter-AI`, read is
-  enough). A subprocess env that sets `GITHUB_TOKEN=""` will 401 the GraphQL calls — leave the
-  base `GH_TOKEN` intact.
+  `DASHBOARD_GITHUB_TOKEN` → `GITHUB_TOKEN` → `GH_TOKEN`, taking the first **non-empty** value
+  (blank/unset vars are skipped, so `GITHUB_TOKEN=""` falls through to `GH_TOKEN` rather than
+  breaking anything). Get a working token with `GITHUB_TOKEN=$(gh auth token)` (the box's `gh` is
+  authenticated to the org, read is enough). GraphQL calls 401 only if all three are blank/unset or
+  the found token is invalid — so leave the base `GH_TOKEN` intact as a fallback.
 
 Launch in its own process so a `pkill` in the same shell can't take out your session:
 `setsid venv/bin/streamlit run app.py --server.port 8501 --server.headless true > /tmp/log 2>&1 < /dev/null &`.
 
 **Pre-compute expected values with the real clients before the UI run** (small probe scripts using
 `JiraClient.approximate_count` and the GitHub client), so the UI numbers are checked against known
-values, not eyeballed. Independently confirmed live sanity targets at time of writing: Jira
-resolved 7d/30d = 1949/2134 (Jira *approximate* counts — the UI says so; not capped at
-`JIRA_MAX_RESULTS`), PRs merged 7d/30d = 94/305, open/stuck/never-reviewed PRs = 64/57/0.
+values, not eyeballed. These numbers drift daily as tickets/PRs land, so **always re-derive them
+with the probe scripts** — never assert against a frozen figure. As one dated sanity snapshot
+(2026-08, order-of-magnitude only): Jira resolved 7d/30d ≈ 1900s/2100s (Jira *approximate* counts —
+the UI says so; not capped at `JIRA_MAX_RESULTS`), PRs merged 7d/30d in the ~90/~300 range,
+open/stuck/never-reviewed PRs ≈ 60s/50s/0.
 
 **Resolved tiles vs. pie sample caption.** The ticket tiles come from Jira's `approximate-count`
 endpoint and are independent of the fetched frame size. The "Pie shows a N-ticket sample of ~M
