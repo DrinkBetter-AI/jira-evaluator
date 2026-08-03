@@ -32,7 +32,10 @@ DEFAULT_TEAM_PEOPLE = (
     "ML=Tam,Mehdi,Jim;"
     "Business=Zoe,Praveen,Igor,Jason,Kenesha,Whitney,Jennifer,Nancy,Matthew,Sylvia,Evmorfia;"
     "Leadership=Angel,Arsalan,Mihai,Jeff;"
-    f"{FORMER_TEAM}=Armine,Saji,Sai,Saeid,Haichen,Yantao,Dan"
+    # Full Jira display names, verified against the instance: a bare "Dan" would
+    # file a future Dan Someone-Else's tickets under people who have left.
+    f"{FORMER_TEAM}=Armine Aproyan,Saji,Sai Shankar,Saeid Parsa,Haichen Song,"
+    "Yantao He,Dan O'Sullivan,Ramin Shahid,Shivanand"
 )
 
 
