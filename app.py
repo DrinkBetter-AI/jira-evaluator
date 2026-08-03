@@ -116,9 +116,10 @@ RESOLVED_STATUSES = tuple(
     ).split(",")
     if s.strip()
 )
-# Triage/intake statuses whose tickets shouldn't sit unattended. Override with a
-# comma-separated JIRA_TRIAGE_STATUSES; JIRA_TRIAGE_STUCK_HOURS sets the threshold.
-_DEFAULT_TRIAGE_STATUSES = ("Triage", "Backlog")
+# Triage-only by default: Backlog is a deliberate parking lot, not neglected intake,
+# so it stays out of "stuck in triage". Override with a comma-separated
+# JIRA_TRIAGE_STATUSES; JIRA_TRIAGE_STUCK_HOURS sets the threshold.
+_DEFAULT_TRIAGE_STATUSES = ("Triage",)
 TRIAGE_STATUSES = tuple(
     s.strip()
     for s in os.getenv(
