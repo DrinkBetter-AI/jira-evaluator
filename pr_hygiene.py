@@ -39,18 +39,28 @@ _GENERIC_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9]{1,9})-(\d+)\b")
 
 
 def _key_pattern(project_keys: list[str] | None) -> re.Pattern[str]:
+    """Match a key from ``project_keys``, or any key-shaped token if none given.
+
+    The known-key match ignores case, because branch tooling routinely lowers it
+    (``mb-1234-fix-login``) and that branch is one of the three places the key is
+    looked for. The explicit key list is what keeps ``utf-8`` out; the generic
+    fallback stays case-sensitive, where nothing constrains it.
+    """
     if not project_keys:
         return _GENERIC_KEY_RE
     keys = sorted({k.strip().upper() for k in project_keys if k and k.strip()}, key=len, reverse=True)
     if not keys:
         return _GENERIC_KEY_RE
-    return re.compile(r"\b(" + "|".join(re.escape(k) for k in keys) + r")-(\d+)\b")
+    return re.compile(
+        r"\b(" + "|".join(re.escape(k) for k in keys) + r")-(\d+)\b",
+        re.IGNORECASE,
+    )
 
 
 def find_jira_key(text: str, pattern: re.Pattern[str]) -> str:
-    """First Jira key in ``text``, or an empty string."""
+    """First Jira key in ``text``, upper-cased, or an empty string."""
     match = pattern.search(text or "")
-    return f"{match.group(1)}-{match.group(2)}" if match else ""
+    return f"{match.group(1).upper()}-{match.group(2)}" if match else ""
 
 
 def add_hygiene_fields(

@@ -568,7 +568,13 @@ class JiraClient:
             while True:
                 response = session.get(
                     url,
-                    params={"startAt": start_at, "maxResults": page_size},
+                    params={
+                        "startAt": start_at,
+                        "maxResults": page_size,
+                        # An archived project's PRs are still traceable, so its
+                        # key has to be matchable.
+                        "status": "live,archived",
+                    },
                     timeout=30,
                 )
                 if response.status_code >= 400:
