@@ -75,6 +75,9 @@ updatedAt
 mergedAt
 author { login }
 repository { name }
+approvingReviews: reviews(states: APPROVED) { totalCount }
+changesReviews: reviews(states: CHANGES_REQUESTED) { totalCount }
+allReviews: reviews { totalCount }
 """
 
 _SEARCH_QUERY = """
@@ -131,6 +134,9 @@ def _to_frame(nodes: list[dict]) -> pd.DataFrame:
                 "merged_at": n.get("mergedAt"),
                 "author": (n.get("author") or {}).get("login") or "unknown",
                 "repo": (n.get("repository") or {}).get("name") or "",
+                "approving_reviews": (n.get("approvingReviews") or {}).get("totalCount", 0),
+                "changes_reviews": (n.get("changesReviews") or {}).get("totalCount", 0),
+                "total_reviews": (n.get("allReviews") or {}).get("totalCount", 0),
             }
         )
     frame = pd.DataFrame(rows)
@@ -140,10 +146,18 @@ def _to_frame(nodes: list[dict]) -> pd.DataFrame:
     return frame
 
 
+def _open_query(org: str) -> str:
+    return f"org:{org} is:pr is:open draft:false sort:created-asc"
+
+
+def open_pr_count(token: str, org: str) -> int:
+    """Exact count of open, non-draft PRs org-wide (never paging-capped)."""
+    return _search_count(token, _open_query(org))
+
+
 def fetch_open_prs(token: str, org: str, max_prs: int = 400) -> pd.DataFrame:
-    """Open, non-draft PRs across the org, oldest first, with review decision."""
-    query = f"org:{org} is:pr is:open draft:false sort:created-asc"
-    frame = _to_frame(_search_prs(token, query, max_prs))
+    """Open, non-draft PRs across the org, oldest first, with review counts."""
+    frame = _to_frame(_search_prs(token, _open_query(org), max_prs))
     if frame.empty:
         return frame
     now = pd.Timestamp.now(tz="UTC")
@@ -153,7 +167,11 @@ def fetch_open_prs(token: str, org: str, max_prs: int = 400) -> pd.DataFrame:
 
 
 def _merged_query(org: str, days: int) -> str:
-    since = (_dt.datetime.utcnow() - _dt.timedelta(days=days)).strftime("%Y-%m-%d")
+    # ISO timestamp (not a bare date) so the window is an exact rolling -Nd,
+    # matching Jira's "AFTER -Nd" rather than spanning up to an extra day.
+    since = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
     return f"org:{org} is:pr is:merged merged:>={since}"
 
 

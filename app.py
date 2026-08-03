@@ -228,8 +228,14 @@ def fetch_tickets(
 
 
 def _jql_status_list(statuses: tuple[str, ...]) -> str:
-    """Quote status names for a JQL ``IN``/``CHANGED TO`` clause."""
-    return ", ".join('"' + s.replace('"', '\\"') + '"' for s in statuses)
+    """Quote status names for a JQL ``IN``/``CHANGED TO`` clause.
+
+    Escapes backslashes before quotes so a status value cannot break out of the
+    quoted literal and inject JQL (values come from JIRA_RESOLVED_STATUSES).
+    """
+    return ", ".join(
+        '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"' for s in statuses
+    )
 
 
 def _resolved_jql(statuses: tuple[str, ...], days: int, ordered: bool = True) -> str:
@@ -245,8 +251,12 @@ def fetch_resolved_count(
     days: int,
     statuses: tuple[str, ...],
     schema_version: int,
-) -> int:
-    """Exact-as-Jira count of tickets resolved in the window, never paging-capped."""
+) -> int | None:
+    """Exact-as-Jira count of tickets resolved in the window, never paging-capped.
+
+    Returns ``None`` (rendered as "—") only if the count cannot be determined; an
+    empty result is a real ``0``. The caller distinguishes the two.
+    """
     _ = schema_version
     if not statuses:
         return 0
@@ -301,6 +311,12 @@ def fetch_merged_prs_cached(token: str, org: str, days: int, schema_version: int
 def fetch_merged_pr_count_cached(token: str, org: str, days: int, schema_version: int) -> int:
     _ = schema_version
     return github_client.merged_pr_count(token, org, days)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_open_pr_count_cached(token: str, org: str, schema_version: int) -> int:
+    _ = schema_version
+    return github_client.open_pr_count(token, org)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -2593,9 +2609,14 @@ def _contribution_pie(labels: pd.Series, value_name: str, title: str) -> None:
     st.plotly_chart(fig, width="stretch")
 
 
+def _metric_value(count: int | None) -> str | int:
+    """Show a real count, or an em dash when the number is unavailable (not 0)."""
+    return "—" if count is None else int(count)
+
+
 def _render_resolved_summary(
-    ticket_count_7: int,
-    ticket_count_30: int,
+    ticket_count_7: int | None,
+    ticket_count_30: int | None,
     resolved_30: pd.DataFrame,
     pr_count_7: int | None,
     pr_count_30: int | None,
@@ -2605,14 +2626,15 @@ def _render_resolved_summary(
 ) -> None:
     """Login landing snapshot: tickets and PRs resolved in the last 7 / 30 days,
     with a pie for who resolved tickets and who merged PRs. Tile counts come from
-    exact server-side counts; the dataframes only drive the pies."""
+    exact server-side counts; the dataframes only drive the pies. A ``None`` count
+    means the lookup failed and renders as "—", distinct from a genuine 0."""
     st.subheader("Resolved in the Last 7 / 30 Days")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Tickets resolved (7d)", int(ticket_count_7))
-    c2.metric("Tickets resolved (30d)", int(ticket_count_30))
-    c3.metric("PRs merged (7d)", "—" if pr_count_7 is None else int(pr_count_7))
-    c4.metric("PRs merged (30d)", "—" if pr_count_30 is None else int(pr_count_30))
+    c1.metric("Tickets resolved (7d)", _metric_value(ticket_count_7))
+    c2.metric("Tickets resolved (30d)", _metric_value(ticket_count_30))
+    c3.metric("PRs merged (7d)", _metric_value(pr_count_7))
+    c4.metric("PRs merged (30d)", _metric_value(pr_count_30))
 
     left, right = st.columns(2)
     with left:
@@ -2622,7 +2644,7 @@ def _render_resolved_summary(
             else pd.Series(dtype=str)
         )
         _contribution_pie(ticket_people, "tickets", "Who resolved tickets (30 days)")
-        if len(ticket_people) < int(ticket_count_30):
+        if ticket_count_30 is not None and len(ticket_people) < int(ticket_count_30):
             st.caption(
                 f"Pie shows a {len(ticket_people)}-ticket sample of {int(ticket_count_30)} "
                 "resolved (fetch limit); tiles above are exact."
@@ -2650,19 +2672,27 @@ def _render_resolved_summary(
 
 # --- Pull requests -----------------------------------------------------------
 
-# A stuck PR is open with no approving review. GitHub's reviewDecision is null
-# when nobody has reviewed, REVIEW_REQUIRED when a review is still pending, and
-# CHANGES_REQUESTED when someone blocked it - none of which is "good to merge".
-_PR_APPROVED = "APPROVED"
-_PR_REVIEW_LABELS = {
-    None: "No review yet",
-    "REVIEW_REQUIRED": "Review pending",
-    "CHANGES_REQUESTED": "Changes requested",
-    "APPROVED": "Approved",
-}
+# A stuck PR is open with no approving review. We classify from the actual
+# review counts, not reviewDecision: GitHub only populates reviewDecision when
+# the base branch *requires* review (branch protection / CODEOWNERS), so in
+# repos without that rule it stays null even when approving reviews exist -
+# which would otherwise mark reviewed/approved PRs as stuck.
+def _pr_review_label(row: pd.Series) -> str:
+    if int(row.get("approving_reviews", 0) or 0) > 0:
+        return "Approved"
+    if int(row.get("changes_reviews", 0) or 0) > 0:
+        return "Changes requested"
+    if int(row.get("total_reviews", 0) or 0) > 0:
+        return "Reviewed, not approved"
+    return "No review yet"
 
 
-def _render_pr_section(open_prs: pd.DataFrame, github_ready: bool, github_error: str = "") -> None:
+def _render_pr_section(
+    open_prs: pd.DataFrame,
+    github_ready: bool,
+    github_error: str = "",
+    open_count_exact: int | None = None,
+) -> None:
     """Org-wide PR health: per-person open/stuck counts and the stuck PR queue."""
     st.subheader("Pull Requests")
     if not github_ready:
@@ -2677,16 +2707,25 @@ def _render_pr_section(open_prs: pd.DataFrame, github_ready: bool, github_error:
         return
 
     prs = open_prs.copy()
-    prs["review"] = prs["review_decision"].map(_PR_REVIEW_LABELS).fillna("No review yet")
-    prs["stuck"] = prs["review_decision"] != _PR_APPROVED
+    prs["review"] = prs.apply(_pr_review_label, axis=1)
+    # Stuck = open, non-draft, with no approving review (the user's definition).
+    prs["stuck"] = prs["approving_reviews"].fillna(0).astype(int) == 0
 
-    open_count = int(len(prs))
+    fetched = int(len(prs))
+    # Exact org-wide open count isn't paging-capped; the frame is (max_prs), so
+    # fall back to the fetched size only if the exact count is unavailable.
+    open_count = fetched if open_count_exact is None else int(open_count_exact)
     stuck = prs[prs["stuck"]]
-    no_review = prs[prs["review_decision"].isna()]
+    no_review = prs[prs["total_reviews"].fillna(0).astype(int) == 0]
     c1, c2, c3 = st.columns(3)
     c1.metric("Open PRs", open_count)
-    c2.metric("Stuck (not approved)", int(len(stuck)))
+    c2.metric("Stuck (no approving review)", int(len(stuck)))
     c3.metric("Never reviewed", int(len(no_review)))
+    if open_count_exact is not None and fetched < open_count_exact:
+        st.caption(
+            f"Per-person and stuck lists cover the {fetched} oldest of {open_count_exact} "
+            "open PRs (fetch limit); the Open PRs tile is exact."
+        )
 
     # Per-person PR status: who is holding open and stuck work, and their oldest.
     by_person = (
@@ -2789,7 +2828,7 @@ def main() -> None:
     # separately for the top-of-page snapshot. Two windows keep the 7d/30d split
     # exact without parsing each ticket's changelog. A failure here must not take
     # the whole dashboard down.
-    def _resolved_count(days: int) -> int:
+    def _resolved_count(days: int) -> int | None:
         try:
             return fetch_resolved_count(
                 creds_path=CREDS_PATH,
@@ -2799,7 +2838,7 @@ def main() -> None:
                 schema_version=FETCH_SCHEMA_VERSION,
             )
         except Exception:  # noqa: BLE001
-            return 0
+            return None
 
     def _resolved(days: int) -> pd.DataFrame:
         try:
@@ -2822,6 +2861,7 @@ def main() -> None:
     merged_prs = pd.DataFrame()
     pr_count_7: int | None = None
     pr_count_30: int | None = None
+    open_count_exact: int | None = None
     try:
         github_env = github_client.load_github_env()
     except Exception as exc:  # noqa: BLE001
@@ -2832,6 +2872,7 @@ def main() -> None:
         token, org = github_env
         try:
             open_prs = fetch_open_prs_cached(token, org, FETCH_SCHEMA_VERSION)
+            open_count_exact = fetch_open_pr_count_cached(token, org, FETCH_SCHEMA_VERSION)
             merged_prs = fetch_merged_prs_cached(token, org, 30, FETCH_SCHEMA_VERSION)
             pr_count_7 = fetch_merged_pr_count_cached(token, org, 7, FETCH_SCHEMA_VERSION)
             pr_count_30 = fetch_merged_pr_count_cached(token, org, 30, FETCH_SCHEMA_VERSION)
@@ -2921,7 +2962,7 @@ def main() -> None:
     _render_scope_breakdown(filtered, scope=scope, include_backlogs=include_backlogs)
 
     st.divider()
-    _render_pr_section(open_prs, github_ready, github_error)
+    _render_pr_section(open_prs, github_ready, github_error, open_count_exact)
 
     st.divider()
     _render_priority_queue(filtered, include_backlogs=include_backlogs)
