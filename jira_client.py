@@ -10,6 +10,8 @@ import pandas as pd
 import requests
 import yaml
 
+from write_access import require_writes_enabled
+
 
 DEFAULT_FIELDS = [
     "summary",
@@ -346,6 +348,7 @@ class JiraClient:
 
     def update_issue(self, key: str, fields: dict[str, Any]) -> None:
         """Update arbitrary fields on a single Jira issue."""
+        require_writes_enabled()
         url = f"{self.base_url}/rest/api/3/issue/{key}"
         with self._session() as session:
             session.headers["Content-Type"] = "application/json"
@@ -359,6 +362,7 @@ class JiraClient:
         """Add issues to a Jira sprint via the Agile API."""
         if not issue_keys:
             return
+        require_writes_enabled()
 
         normalized_sprint_id = _coerce_sprint_id(sprint_id)
         url = f"{self.base_url}/rest/agile/1.0/sprint/{normalized_sprint_id}/issue"
@@ -376,6 +380,7 @@ class JiraClient:
         """Move issues out of their current non-closed sprint and back to backlog."""
         if not issue_keys:
             return
+        require_writes_enabled()
 
         url = f"{self.base_url}/rest/agile/1.0/backlog/issue"
         payload = {"issues": issue_keys}
@@ -468,6 +473,7 @@ class JiraClient:
 
     def transition_issue(self, key: str, transition_id: str) -> None:
         """Transition a Jira issue using a transition id."""
+        require_writes_enabled()
         url = f"{self.base_url}/rest/api/3/issue/{key}/transitions"
         with self._session() as session:
             session.headers["Content-Type"] = "application/json"
