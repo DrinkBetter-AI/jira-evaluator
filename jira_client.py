@@ -15,6 +15,7 @@ from write_access import require_writes_enabled
 
 DEFAULT_FIELDS = [
     "summary",
+    "description",
     "status",
     "priority",
     "assignee",
@@ -93,6 +94,40 @@ def _extract_last_meaningful_activity(issue: dict[str, Any]) -> Any:
 
 class JiraConfigError(ValueError):
     """Raised when Jira config is missing or invalid."""
+
+
+def _adf_to_text(value: Any) -> str:
+    """Plain text out of a Jira description.
+
+    Jira Cloud returns rich text as Atlassian Document Format - a nested tree of
+    nodes - so reading a description means walking it. Block-level nodes are
+    separated by newlines, because whether a description has acceptance criteria
+    is usually a question about its lines.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(part for part in (_adf_to_text(v) for v in value) if part)
+    if not isinstance(value, dict):
+        return ""
+
+    node_type = value.get("type")
+    if node_type == "text":
+        return str(value.get("text") or "")
+    if node_type == "hardBreak":
+        return "\n"
+    inner = _adf_to_text(value.get("content"))
+    block_types = {
+        "paragraph",
+        "heading",
+        "listItem",
+        "blockquote",
+        "codeBlock",
+        "tableRow",
+    }
+    return f"{inner}\n" if node_type in block_types and inner else inner
 
 
 def _coerce_sprint_id(sprint_id: int | str) -> str:
@@ -698,6 +733,7 @@ class JiraClient:
                 {
                     "key": issue.get("key"),
                     "summary": fields.get("summary"),
+                    "description": _adf_to_text(fields.get("description")),
                     "status": status.get("name"),
                     "status_category": status_category.get("name"),
                     "priority": priority.get("name"),
