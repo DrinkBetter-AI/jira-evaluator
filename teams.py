@@ -80,9 +80,11 @@ def _active_aliases(
     """The merges that still apply once the deployment has had its say.
 
     A team someone names in ``JIRA_TEAM_PEOPLE`` or ``JIRA_TEAM_PROJECTS`` is a
-    deliberate answer to "who owns this", so a historical merge here must not
-    quietly rename it. The alias survives only where the config is silent -
-    notably the bare project key a ticket falls back to.
+    deliberate answer to "who owns this", so a historical merge must neither
+    rename a team the roster still keeps nor invent one it has never heard of.
+    An alias therefore needs both ends to agree: the old name absent from the
+    roster and the new one present. Where it survives it catches what the roster
+    cannot - the bare project key a ticket with an off-roster owner falls back to.
     """
     configured = {
         str(team).strip().lower()
@@ -91,7 +93,7 @@ def _active_aliases(
     return {
         name: target
         for name, target in TEAM_ALIASES.items()
-        if name not in configured
+        if name not in configured and target.lower() in configured
     }
 
 
