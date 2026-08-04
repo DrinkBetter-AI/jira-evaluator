@@ -56,6 +56,7 @@ from hygiene import (
     stale_candidates,
 )
 from prioritization import add_priority_score, assignee_rollup
+import ticket_quality
 from transformations import add_ticket_health_fields
 import write_access
 
@@ -91,7 +92,7 @@ SCOPE_ORG = "Organization"
 SCOPE_TEAM = "Team"
 SCOPE_INDIVIDUAL = "Individual"
 
-FETCH_SCHEMA_VERSION = 6
+FETCH_SCHEMA_VERSION = 7
 JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
 
 # One Jira request per key, so bound how many the sprint editor asks about.
@@ -3295,6 +3296,120 @@ def _render_pr_hygiene(
     )
 
 
+def _render_ticket_quality(df: pd.DataFrame) -> None:
+    """How well tickets are written, and which are clear enough to hand off."""
+    st.subheader("Ticket Quality & Ready for Devin")
+    if df.empty:
+        st.info("No tickets in the current scope.")
+        return
+
+    scored = ticket_quality.score_tickets(df)
+    gradable = scored[scored["quality_score"].notna()]
+    if gradable.empty:
+        st.info("No gradable tickets in the current scope (epics and initiatives are exempt).")
+        return
+
+    ready = gradable[gradable["devinable"] == "Yes"]
+    maybe = gradable[gradable["devinable"] == "Maybe"]
+    unclear = gradable[gradable["quality_score"] <= 2]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Ready for Devin", int(len(ready)))
+    c2.metric("Nearly ready", int(len(maybe)))
+    c3.metric("Unclear (score ≤2)", int(len(unclear)))
+    c4.metric("Average score", f"{gradable['quality_score'].mean():.1f} / 5")
+    st.caption(
+        "Scored out of 5: a summary that says what the work is, a real description, "
+        "acceptance criteria, an estimate, and an epic. Epics and initiatives are exempt. "
+        "Ready for Devin needs the goal and the finish line written down, and work that "
+        "does not hinge on a conversation. Backlog tickets are always included here, "
+        "regardless of *Include Backlogs*."
+    )
+
+    columns = ["key", "summary", "status", "assignee", "reporter", "quality_score", "missing"]
+    config = {
+        "key": st.column_config.TextColumn("Key"),
+        "summary": st.column_config.TextColumn("Summary", width="large"),
+        "status": st.column_config.TextColumn("Status"),
+        "assignee": st.column_config.TextColumn("Assignee"),
+        "reporter": st.column_config.TextColumn("Reporter"),
+        "quality_score": st.column_config.NumberColumn("Score", format="%d"),
+        "missing": st.column_config.TextColumn("Missing", width="medium"),
+        "devinable": st.column_config.TextColumn("Devin-able?"),
+    }
+
+    ready_tab, maybe_tab, unclear_tab, person_tab, all_tab = st.tabs(
+        ["Ready for Devin", "Nearly ready", "Unclear", "By reporter", "All scored"]
+    )
+    with ready_tab:
+        if ready.empty:
+            st.info("No ticket currently states both its goal and its acceptance criteria.")
+        else:
+            st.dataframe(
+                ready.sort_values("quality_score", ascending=False)[columns],
+                width="stretch",
+                hide_index=True,
+                column_config=config,
+            )
+            st.caption("Hand these off rather than spending an engineer on them.")
+    with maybe_tab:
+        if maybe.empty:
+            st.success("Nothing sitting just short of ready.")
+        else:
+            st.dataframe(
+                maybe.sort_values("quality_score", ascending=False)[columns],
+                width="stretch",
+                hide_index=True,
+                column_config=config,
+            )
+            st.caption(
+                "One gap away, usually the acceptance criteria - the cheapest tickets to fix."
+            )
+    with unclear_tab:
+        if unclear.empty:
+            st.success("No ticket scores 2 or below.")
+        else:
+            st.dataframe(
+                unclear.sort_values("quality_score")[columns],
+                width="stretch",
+                hide_index=True,
+                column_config=config,
+            )
+            st.caption("Nobody outside the original conversation can pick these up.")
+    with person_tab:
+        st.dataframe(
+            ticket_quality.quality_by_person(scored),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Reporter": st.column_config.TextColumn("Reporter"),
+                "tickets": st.column_config.NumberColumn("Tickets"),
+                "avg_score": st.column_config.NumberColumn("Avg score", format="%.1f"),
+                "ready_for_devin": st.column_config.NumberColumn("Ready for Devin"),
+                "no_acceptance_criteria": st.column_config.NumberColumn("No criteria"),
+                "no_description": st.column_config.NumberColumn("No description"),
+            },
+        )
+        st.caption(
+            "The tickets currently in scope, grouped by the person who wrote them - "
+            "they are the one who can say what done means."
+        )
+    with all_tab:
+        st.dataframe(
+            gradable.sort_values("quality_score")[columns + ["devinable"]],
+            width="stretch",
+            hide_index=True,
+            column_config=config,
+        )
+
+    st.download_button(
+        "Download ticket scores (CSV)",
+        gradable[columns + ["devinable"]].to_csv(index=False),
+        file_name="ticket_quality.csv",
+        mime="text/csv",
+    )
+
+
 def main() -> None:
     st.set_page_config(page_title="Jira Ticket Health Dashboard", layout="wide")
     require_password()
@@ -3567,6 +3682,11 @@ def main() -> None:
 
     st.divider()
     _render_pr_hygiene(open_prs, github_ready, github_error, _known_project_keys(df))
+
+    st.divider()
+    # Backlog-inclusive on purpose: a backlog ticket is the best kind to hand off,
+    # and it is where badly written tickets accumulate unseen.
+    _render_ticket_quality(filtered)
 
     st.divider()
     _render_priority_queue(filtered, include_backlogs=include_backlogs)

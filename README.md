@@ -189,9 +189,22 @@ past changes matters:
    `PR_STALE_AGE_DAYS` or untouched past `PR_STALE_IDLE_DAYS`, with the reason
    named; and nobody requested to review with no review yet. Includes a per-author
    table and a CSV of everything flagged. Needs `DASHBOARD_GITHUB_TOKEN`.
-12. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
+12. **Ticket Quality & Ready for Devin** — every ticket graded out of 5 on whether
+   someone outside the original conversation could pick it up: a summary of at
+   least four words, a description of at least 120 characters, explicit acceptance
+   criteria (the words, or a checklist of three or more items), an estimate, and an
+   epic. Each row names what is missing. *Devin-able* is stricter and separate from
+   the score: **Yes** needs the goal and the finish line written down and work that
+   does not hinge on being in the room, **Maybe** is one gap short or reads as a
+   conversation (design, research, an outage), **No** is neither. Epics and
+   initiatives are exempt and score *n/a*. The per-person table groups by reporter,
+   since the person who wrote the ticket is the one who can say what done means.
+   Backlog tickets are always included regardless of *Include Backlogs* — an unowned
+   backlog ticket is the best kind to hand off, and the worst-written ones collect
+   there unseen.
+13. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
    age-vs-idle chart, sprint planning tables, and bulk Jira write-back actions.
-13. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
+14. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
    per person against what they are actually available for, which matters when most
    contributors are part-time: `JIRA_WEEKLY_HOURS` is spread over the weekdays
    between the sprint's start and end dates, so 20h/week across a 10-working-day
