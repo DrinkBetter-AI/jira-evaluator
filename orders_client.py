@@ -137,7 +137,11 @@ def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFra
     if not rows:
         return pd.DataFrame(columns=COLUMNS)
 
+    # Offset paging over a list the shop is still adding to can hand back the
+    # same order twice: a sale made mid-read pushes every row down a place.
     frame = pd.DataFrame(rows)
+    if "id" in frame.columns:
+        frame = frame.drop_duplicates(subset="id")
     # Every figure is defined by these three. Filling a missing one in would not
     # give a smaller answer, it would give a wrong one - a confident $0 for a
     # shop that took money - so the section refuses instead.
