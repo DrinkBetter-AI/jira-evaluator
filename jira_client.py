@@ -118,16 +118,50 @@ def _adf_to_text(value: Any) -> str:
         return str(value.get("text") or "")
     if node_type == "hardBreak":
         return "\n"
+    if node_type in _ADF_LIST_TYPES:
+        return _adf_list_to_text(value)
     inner = _adf_to_text(value.get("content"))
-    block_types = {
-        "paragraph",
-        "heading",
-        "listItem",
-        "blockquote",
-        "codeBlock",
-        "tableRow",
-    }
-    return f"{inner}\n" if node_type in block_types and inner else inner
+    return f"{inner}\n" if node_type in _ADF_BLOCK_TYPES and inner else inner
+
+
+# In ADF a list is structure, not characters, so flattening one loses the very
+# markers that make a checklist recognizable as acceptance criteria.
+_ADF_LIST_TYPES = {"bulletList", "orderedList", "taskList"}
+
+_ADF_BLOCK_TYPES = {
+    "paragraph",
+    "heading",
+    "listItem",
+    "taskItem",
+    "blockquote",
+    "codeBlock",
+    "tableRow",
+}
+
+
+def _adf_list_to_text(node: dict[str, Any]) -> str:
+    """Render an ADF list back to marked-up lines."""
+    node_type = node.get("type")
+    items = node.get("content") or []
+    lines: list[str] = []
+    for index, item in enumerate(items, start=int(node.get("attrs", {}).get("order", 1) or 1)):
+        if not isinstance(item, dict):
+            continue
+        text = _adf_to_text(item.get("content")).strip()
+        if not text:
+            continue
+        if node_type == "orderedList":
+            marker = f"{index}. "
+        elif node_type == "taskList":
+            done = (item.get("attrs") or {}).get("state") == "DONE"
+            marker = "- [x] " if done else "- [ ] "
+        else:
+            marker = "- "
+        # A wrapped item keeps its marker on the first line only.
+        first, *rest = text.splitlines()
+        lines.append(f"{marker}{first}")
+        lines.extend(rest)
+    return "\n".join(lines) + "\n" if lines else ""
 
 
 def _coerce_sprint_id(sprint_id: int | str) -> str:

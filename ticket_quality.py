@@ -44,14 +44,19 @@ _MIN_CHECKLIST_ITEMS = 3
 
 # Work that needs a human in the room. Matched on the summary, where the intent
 # of a ticket is usually stated.
+#
+# Deliberately narrow: a word earns its place only if it names the activity
+# rather than describing the subject. "align" and "policy" were tried and
+# dropped - they demoted "Rename schemas (permanent Medusa schema alignment)"
+# and "Define cost-control policy", where only the second is a conversation.
 _HUMAN_ONLY_RE = re.compile(
-    r"\b(?:discuss|decide|decision|align|alignment|meeting|sync|workshop|"
-    r"research|investigate|explore|spike|proposal|propose|plan|planning|"
-    r"design|ux|ui design|mockup|wireframe|brainstorm|interview|hiring|"
+    r"\b(?:discuss|decide|decision|meeting|sync|workshop|"
+    r"research|investigate|explore|spike|proposal|propose|planning|"
+    r"design|mockup|wireframe|brainstorm|interview|hiring|"
     r"onboard|offboard|coordinate|follow up|followup|review with|"
-    r"roadmap|strategy|kick ?off|kickoff|retro|retrospective|prioriti[sz]e|"
-    r"present|presentation|training|policy|approve|approval|"
-    r"outage|incident|escalat|urgent|p0|customer call|demo)\b",
+    r"roadmap|strategy|kick ?off|kickoff|retrospective|prioriti[sz]e|"
+    r"presentation|training|"
+    r"outage|incident|escalat|customer call|demo)\b",
     re.IGNORECASE,
 )
 
