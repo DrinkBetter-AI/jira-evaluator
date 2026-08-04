@@ -22,16 +22,25 @@ FORMER_TEAM = "Former staff"
 
 _NO_OWNER = {"", "unassigned", "none"}
 
+# Teams that used to be tracked separately and are now one. Applied last, so a
+# ticket routed by project key lands in the same row as one routed by assignee.
+TEAM_ALIASES = {
+    "crm": "Marketplace",
+    "leadership": "Business strategy",
+    "business": "Business strategy",
+}
+
 # The VinoVoss roster as of this writing; overridden wholesale by JIRA_TEAM_PEOPLE.
 DEFAULT_TEAM_PEOPLE = (
-    "Marketplace=Shawn,Shown,David,Mohsen,Gaston;"
-    "CRM=Anouar,Jal;"
+    # The CRM is the merchant side of the marketplace, and leadership sets the
+    # business direction: two rows each would split one team's work in half.
+    "Marketplace=Shawn,Shown,David,Mohsen,Gaston,Anouar,Jal;"
     "App=Ali,Farid;"
     "Design=Robert,Alesya;"
     "QA=Santi,Dina;"
     "ML=Tam,Mehdi,Jim;"
-    "Business=Zoe,Praveen,Igor,Jason,Kenesha,Whitney,Jennifer,Nancy,Matthew,Sylvia,Evmorfia;"
-    "Leadership=Angel,Arsalan,Mihai,Jeff;"
+    "Business strategy=Zoe,Praveen,Igor,Jason,Kenesha,Whitney,Jennifer,Nancy,"
+    "Matthew,Sylvia,Evmorfia,Angel,Arsalan,Mihai,Jeff;"
     # Full Jira display names, verified against the instance: a bare "Dan" would
     # file a future Dan Someone-Else's tickets under people who have left.
     f"{FORMER_TEAM}=Armine Aproyan,Saji,Sai Shankar,Saeid Parsa,Haichen Song,"
@@ -113,7 +122,8 @@ def add_team(
     # An unowned ticket has no team of its own; it belongs to whoever picks it up,
     # so it is called out rather than silently attributed to a project's team.
     no_owner = owners.str.strip().str.lower().isin(_NO_OWNER)
-    out["team"] = by_person.fillna(by_project).mask(no_owner, NO_OWNER_TEAM)
+    team = by_person.fillna(by_project).mask(no_owner, NO_OWNER_TEAM).astype(str)
+    out["team"] = team.map(lambda name: TEAM_ALIASES.get(name.strip().lower(), name))
     return out
 
 
