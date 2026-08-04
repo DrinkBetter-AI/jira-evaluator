@@ -57,6 +57,7 @@ from hygiene import (
     stale_candidates,
 )
 from prioritization import add_priority_score, assignee_rollup
+import sprint_planner
 import ticket_quality
 from transformations import add_ticket_health_fields
 import write_access
@@ -1811,6 +1812,259 @@ def _transition_sample_keys(editor_df: pd.DataFrame) -> tuple[str, ...]:
     keys = reserved + sorted(frame.loc[in_sprint, "key"].unique().tolist())[:budget]
 
     return tuple(sorted(set(keys)))
+
+
+_PLAN_EDITOR_KEY = "_sprint_plan_editor"
+
+
+def _render_sprint_plan(df: pd.DataFrame) -> None:
+    """Propose a sprint for one team from a few named goals and real hours."""
+    st.caption(
+        "A sprint is decided as two or three goals - \"finish onboarding, finalise "
+        "the quiz, checkout\" - not as the top rows of a priority list. Name the "
+        "goals, and the tickets that serve them are filled into each person's "
+        "hours in that order, highest priority first within each goal. Every row "
+        "is editable before anything is written."
+    )
+    scored = add_team(
+        add_priority_score(estimate_policy(df, BACKLOG_STATUSES)),
+        TEAM_PROJECTS,
+        TEAM_PEOPLE,
+    )
+    teams = sorted(scored["team"].dropna().astype(str).unique())
+    if not teams:
+        st.info("No teams to plan for. Set JIRA_TEAM_PEOPLE to define them.")
+        return
+
+    top = st.columns([2, 3])
+    with top[0]:
+        team = st.selectbox("Team", options=teams, key="plan_team")
+    with top[1]:
+        goal_spec = st.text_input(
+            "Sprint goals (comma separated, most important first)",
+            value=st.session_state.get("plan_goals", ""),
+            key="plan_goals",
+            placeholder="Onboarding, Quiz, Checkout",
+        )
+    goals = sprint_planner.parse_goals(goal_spec)
+
+    team_df = scored[scored["team"].astype(str) == team]
+    if "issue_type" in team_df.columns:
+        kinds = team_df["issue_type"].fillna("").astype(str).str.strip().str.lower()
+        team_df = team_df[~kinds.isin({"epic", "initiative"})]
+    if team_df.empty:
+        st.info(f"No open tickets for {team}.")
+        return
+
+    states = team_df["sprint_state"].fillna("").astype(str).str.lower()
+    dated = team_df[states.isin(["active", "future"])]
+    start, end = _sprint_window(dated if not dated.empty else team_df)
+    knobs = st.columns(4)
+    with knobs[0]:
+        sprint_days = st.number_input(
+            "Sprint length (working days)",
+            min_value=1,
+            max_value=30,
+            value=int(working_days(start, end)) or 10,
+            key="plan_days",
+            help="Taken from the team's current sprint dates when Jira has them.",
+        )
+    with knobs[1]:
+        overhead = st.number_input(
+            "Overhead per person (h/week)",
+            min_value=0.0,
+            max_value=40.0,
+            value=sprint_planner.DEFAULT_OVERHEAD_HOURS_PER_WEEK,
+            step=0.5,
+            key="plan_overhead",
+            help="Code review, Slack, meetings - hours spent every week on no ticket.",
+        )
+    with knobs[2]:
+        assumed = st.number_input(
+            "Assume unestimated ticket is (h)",
+            min_value=0.5,
+            max_value=40.0,
+            value=sprint_planner.DEFAULT_TICKET_HOURS,
+            step=0.5,
+            key="plan_assumed",
+        )
+    with knobs[3]:
+        only_goals = st.checkbox(
+            "Only goal work",
+            value=bool(goals),
+            key="plan_only_goals",
+            help="Off: tickets serving no goal are planned last with whatever hours remain.",
+        )
+
+    if not WEEKLY_HOURS:
+        st.warning(
+            "Nobody has declared hours, so there is nothing to plan against. Set "
+            'JIRA_WEEKLY_HOURS (e.g. "Ali=40,Farid=20") to use this section.'
+        )
+        return
+
+    # The window is a length, not two dates: a plan is often drawn before the
+    # sprint has dates in Jira, and the arithmetic only ever needs the days.
+    window_start = pd.Timestamp.utcnow().normalize()
+    window_end = window_start + pd.Timedelta(days=int(sprint_days) / 5.0 * 7.0)
+    people = sorted(team_df["assignee"].dropna().astype(str).unique())
+    capacity = sprint_planner.person_capacity(
+        people, WEEKLY_HOURS, window_start, window_end, overhead_per_week=overhead
+    )
+    if capacity.empty:
+        st.warning(
+            f"None of {team}'s people appear in JIRA_WEEKLY_HOURS, so their "
+            "available hours are unknown. Add them to plan this team."
+        )
+        return
+
+    candidates = team_df.assign(goal=sprint_planner.match_goals(team_df, goals))
+    if goals and only_goals:
+        candidates = candidates[candidates["goal"].ne(sprint_planner.NO_GOAL)]
+    if candidates.empty:
+        st.info("No ticket matches those goals. Try different words, or untick *Only goal work*.")
+        return
+
+    plan = sprint_planner.plan_sprint(candidates, capacity, goals=goals, default_hours=assumed)
+
+    if goals:
+        st.markdown("**Goals**")
+        st.dataframe(
+            sprint_planner.goal_load(plan, goals),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "goal": st.column_config.TextColumn("Goal", width="large"),
+                "tickets": st.column_config.NumberColumn("Tickets"),
+                "hours": st.column_config.NumberColumn("Hours needed", format="%.1f"),
+                "planned_tickets": st.column_config.NumberColumn("Fits"),
+                "planned_hours": st.column_config.NumberColumn("Hours planned", format="%.1f"),
+                "left_out": st.column_config.NumberColumn("Left over"),
+            },
+        )
+
+    st.markdown("**Proposed plan** - change any row; the load below follows your edits.")
+    editable = plan.assign(include=plan["plan"].eq(sprint_planner.PLANNED))
+    edited = st.data_editor(
+        editable[
+            ["include", "key", "goal", "summary", "assignee", "status", "hours", "why"]
+        ],
+        width="stretch",
+        hide_index=True,
+        key=_PLAN_EDITOR_KEY,
+        column_config={
+            "include": st.column_config.CheckboxColumn("In sprint"),
+            "key": st.column_config.TextColumn("Key", disabled=True),
+            "goal": st.column_config.TextColumn("Goal", disabled=True),
+            "summary": st.column_config.TextColumn("Summary", width="large", disabled=True),
+            "assignee": st.column_config.TextColumn("Assignee", disabled=True),
+            "status": st.column_config.TextColumn("Status", disabled=True),
+            "hours": st.column_config.NumberColumn("Hours", format="%.1f"),
+            "why": st.column_config.TextColumn("Why", width="medium", disabled=True),
+        },
+    )
+
+    # The proposal is a starting point, so the load has to answer for what the
+    # reviewer decided rather than for what was proposed.
+    decided = plan.drop(columns=["hours", "plan"]).merge(
+        edited[["key", "include", "hours"]], on="key", how="left"
+    )
+    decided["plan"] = decided["include"].map(
+        lambda chosen: sprint_planner.PLANNED if chosen else sprint_planner.NEXT_UP
+    )
+    load = sprint_planner.plan_load(decided, capacity)
+    over = load[load["left_hours"].lt(0)]
+    st.markdown("**Who it lands on**")
+    st.dataframe(
+        load,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "assignee": st.column_config.TextColumn("Person"),
+            "planning_hours": st.column_config.NumberColumn("Available (h)", format="%.1f"),
+            "planned_hours": st.column_config.NumberColumn("Planned (h)", format="%.1f"),
+            "left_hours": st.column_config.NumberColumn("Left (h)", format="%.1f"),
+            "planned_tickets": st.column_config.NumberColumn("Tickets"),
+            "waiting_tickets": st.column_config.NumberColumn("Not in sprint"),
+        },
+    )
+    if not over.empty:
+        st.warning(
+            "Over their hours: "
+            + ", ".join(
+                f"{row['assignee']} by {abs(row['left_hours']):.1f}h"
+                for _, row in over.iterrows()
+            )
+        )
+    st.caption(
+        f"Available hours are each person's weekly hours over {int(sprint_days)} working "
+        f"day(s), minus {overhead:g}h/week of overhead. Unestimated tickets are assumed "
+        f"to be {assumed:g}h and say so in *Why*."
+    )
+    st.download_button(
+        "Download plan (CSV)",
+        data=decided.to_csv(index=False).encode("utf-8"),
+        file_name="jira_sprint_plan.csv",
+        mime="text/csv",
+    )
+    _apply_sprint_plan(decided, team_df)
+
+
+def _apply_sprint_plan(plan: pd.DataFrame, team_df: pd.DataFrame) -> None:
+    """Write the chosen tickets into a real sprint, once someone asks for it."""
+    chosen = plan[plan["plan"].eq(sprint_planner.PLANNED)]["key"].astype(str).tolist()
+    sprints = (
+        team_df[team_df["sprint_state"].fillna("").astype(str).str.lower().isin(["future", "active"])]
+        [["sprint_id", "sprint_name", "sprint_state"]]
+        .dropna(subset=["sprint_id"])
+        .drop_duplicates()
+    )
+    if sprints.empty:
+        st.caption(
+            "This team has no active or future sprint in Jira, so the plan can only "
+            "be exported. Create the sprint on the board to apply it here."
+        )
+        return
+
+    labels = {
+        f"{row['sprint_name']} ({str(row['sprint_state']).title()})": _normalize_sprint_id(
+            row["sprint_id"]
+        )
+        for _, row in sprints.iterrows()
+    }
+    columns = st.columns([3, 2])
+    with columns[0]:
+        label = st.selectbox("Apply to sprint", options=sorted(labels), key="plan_target_sprint")
+    sprint_id = labels.get(label)
+    if not write_access.writes_enabled():
+        st.info(write_access.READ_ONLY_MESSAGE)
+    with columns[1]:
+        apply = st.button(
+            f"Add {len(chosen)} ticket(s) to sprint",
+            type="primary",
+            disabled=not (chosen and sprint_id and write_access.writes_enabled()),
+            key="plan_apply",
+        )
+    if not apply:
+        return
+
+    client = JiraClient.resolve(creds_path=CREDS_PATH, profile_name=PROFILE_NAME)
+    # Tickets already in the target sprint are left alone: re-adding them is a
+    # no-op to Jira but noise in the board's history.
+    already = set(
+        team_df[team_df["sprint_id"].map(_normalize_sprint_id) == sprint_id]["key"].astype(str)
+    )
+    to_add = [key for key in chosen if key not in already]
+    if not to_add:
+        st.info("Every chosen ticket is already in that sprint.")
+        return
+    with st.spinner(f"Adding {len(to_add)} ticket(s) to {label}..."):
+        try:
+            client.add_issues_to_sprint(sprint_id, to_add)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Failed to add tickets to the sprint: {exc}")
+            return
+    st.success(f"Added {len(to_add)} ticket(s) to {label}. Refresh Data to see it.")
 
 
 def _render_sprint_capacity(
@@ -3848,6 +4102,10 @@ def main() -> None:
         active_sprint_ticket_key = None
     else:
         active_sprint_ticket_key = selected_key if selected_key and selected_key in filtered["key"].values else None
+
+    st.divider()
+    st.subheader("Sprint Planner")
+    _render_sprint_plan(df)
 
     st.divider()
     st.subheader("Sprint Capacity")
