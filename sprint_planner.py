@@ -17,12 +17,7 @@ import re
 
 import pandas as pd
 
-from capacity import (
-    WORKING_DAYS_PER_WEEK,
-    available_hours,
-    resolve_weekly_hours,
-    working_days,
-)
+from capacity import WORKING_DAYS_PER_WEEK, resolve_weekly_hours
 
 
 # Meetings, code review, Slack: hours that are spent every week and appear on no
@@ -116,26 +111,27 @@ def match_goals(df: pd.DataFrame, goals: list[str]) -> pd.Series:
 def person_capacity(
     names: list[str],
     weekly_hours: dict[str, float],
-    start: object,
-    end: object,
+    days: float,
     overhead_per_week: float = DEFAULT_OVERHEAD_HOURS_PER_WEEK,
 ) -> pd.DataFrame:
-    """Hours each person can actually spend on tickets in this sprint window.
+    """Hours each person can actually spend on tickets over this many working days.
 
-    Overhead is deducted per week and pro-rated over the sprint's own working
-    days, so a two-week sprint takes out twice what a one-week sprint does. A
-    part-timer's overhead is not scaled down: someone on ten hours a week still
+    A sprint is measured in working days rather than in two dates, because a plan
+    is usually drawn before the sprint exists in Jira and the arithmetic never
+    needs more than the length. Overhead is deducted per week and pro-rated over
+    those days, so a two-week sprint takes out twice what a one-week sprint does;
+    a part-timer's is not scaled down, since someone on ten hours a week still
     sits in the same standup.
     """
     columns = ["assignee", "weekly_hours", "gross_hours", "overhead_hours", "planning_hours"]
-    days = working_days(start, end)
+    days = max(float(days), 0.0)
     declared, _ambiguous = resolve_weekly_hours(sorted(set(names)), weekly_hours)
     rows = []
     for name in sorted(set(names)):
         weekly = declared.get(name)
         if weekly is None:
             continue
-        gross = available_hours(weekly, start, end)
+        gross = round(float(weekly) / WORKING_DAYS_PER_WEEK * days, 1)
         overhead = round(max(float(overhead_per_week), 0.0) / WORKING_DAYS_PER_WEEK * days, 1)
         rows.append(
             {

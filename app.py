@@ -1865,7 +1865,10 @@ def _render_sprint_plan(df: pd.DataFrame) -> None:
             "Sprint length (working days)",
             min_value=1,
             max_value=30,
-            value=int(working_days(start, end)) or 10,
+            # A stale or quarter-long sprint row in Jira would otherwise seed the
+            # box with a value its own ceiling rejects, and the section would not
+            # render at all.
+            value=min(int(working_days(start, end)) or 10, 30),
             key="plan_days",
             help="Taken from the team's current sprint dates when Jira has them.",
         )
@@ -1889,10 +1892,15 @@ def _render_sprint_plan(df: pd.DataFrame) -> None:
             key="plan_assumed",
         )
     with knobs[3]:
+        # Streamlit honours `value` only when a keyed widget is first created, so
+        # a box keyed once would be stored as unticked from the first render -
+        # when no goals had been typed yet - and would stay that way after they
+        # were. Naming the widget after whether goals exist gives each state its
+        # own default while still remembering a deliberate change within it.
         only_goals = st.checkbox(
             "Only goal work",
             value=bool(goals),
-            key="plan_only_goals",
+            key=f"plan_only_goals_{bool(goals)}",
             help="Off: tickets serving no goal are planned last with whatever hours remain.",
         )
 
@@ -1903,13 +1911,15 @@ def _render_sprint_plan(df: pd.DataFrame) -> None:
         )
         return
 
-    # The window is a length, not two dates: a plan is often drawn before the
-    # sprint has dates in Jira, and the arithmetic only ever needs the days.
-    window_start = pd.Timestamp.utcnow().normalize()
-    window_end = window_start + pd.Timedelta(days=int(sprint_days) / 5.0 * 7.0)
-    people = sorted(team_df["assignee"].dropna().astype(str).unique())
+    # Anyone on the team's roster is planned for, not only whoever already holds
+    # a ticket: someone with hours and nothing assigned is the spare capacity the
+    # plan exists to find.
+    people = sorted(
+        set(team_df["assignee"].dropna().astype(str))
+        | {name for name, owner in TEAM_PEOPLE.items() if owner == team}
+    )
     capacity = sprint_planner.person_capacity(
-        people, WEEKLY_HOURS, window_start, window_end, overhead_per_week=overhead
+        people, WEEKLY_HOURS, sprint_days, overhead_per_week=overhead
     )
     if capacity.empty:
         st.warning(
@@ -1951,7 +1961,22 @@ def _render_sprint_plan(df: pd.DataFrame) -> None:
         ],
         width="stretch",
         hide_index=True,
-        key=_PLAN_EDITOR_KEY,
+        # Streamlit remembers edits by row position under the widget's key, so a
+        # key that outlived the plan would re-apply a tick made on row 3 of the
+        # old plan to whatever ticket is row 3 of the new one - and those are the
+        # rows that get written to Jira. Every input that can reorder the plan is
+        # therefore part of its identity.
+        key="|".join(
+            [
+                _PLAN_EDITOR_KEY,
+                team,
+                goal_spec,
+                str(sprint_days),
+                str(overhead),
+                str(assumed),
+                str(only_goals),
+            ]
+        ),
         column_config={
             "include": st.column_config.CheckboxColumn("In sprint"),
             "key": st.column_config.TextColumn("Key", disabled=True),
