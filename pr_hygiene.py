@@ -112,6 +112,60 @@ def add_hygiene_fields(
     return frame
 
 
+# The priorities worth interrupting someone for. Both names exist in this
+# instance, and "urgent" is here because a renamed top priority should not
+# quietly stop being urgent.
+CRITICAL_PRIORITIES = frozenset({"highest", "high", "urgent", "critical", "blocker"})
+
+# Where work is close enough to shipping that a stalled PR holds up a release
+# rather than merely sitting in someone's branch.
+# "In Progress" is deliberately absent: it means someone is writing the code,
+# not that the code is somewhere it can hold up a release.
+IN_FLIGHT_STATUSES = frozenset(
+    {
+        "in dev env",
+        "code review",
+        "review",
+        "design review",
+        "review in staging",
+        "ready for production",
+    }
+)
+
+
+def _normalized(series: pd.Series) -> pd.Series:
+    return series.fillna("").astype(str).str.strip().str.lower()
+
+
+def critical_in_flight(prs: pd.DataFrame, tickets: pd.DataFrame) -> pd.DataFrame:
+    """Open PRs whose ticket is high priority and already in dev, review or staging.
+
+    The PR list on its own cannot say which PRs matter - GitHub knows nothing
+    about priority - so the ticket each PR names supplies it. A PR with no key
+    cannot be judged this way at all and is left to the untraceable tab.
+    """
+    columns = ["priority", "ticket_status"]
+    if prs.empty or "jira_key" not in prs.columns:
+        return prs.iloc[0:0].assign(**{column: "" for column in columns})
+    keyed = prs[prs["jira_key"].astype(bool)]
+    if keyed.empty or tickets.empty or "key" not in tickets.columns:
+        return keyed.iloc[0:0].assign(**{column: "" for column in columns})
+
+    facts = (
+        tickets[["key", "priority", "status"]]
+        .drop_duplicates(subset="key", keep="last")
+        .rename(columns={"status": "ticket_status"})
+    )
+    merged = keyed.merge(
+        facts, left_on="jira_key", right_on="key", how="inner", suffixes=("", "_ticket")
+    )
+    if merged.empty:
+        return merged.assign(**{column: "" for column in columns if column not in merged})
+    critical = _normalized(merged["priority"]).isin(CRITICAL_PRIORITIES)
+    in_flight = _normalized(merged["ticket_status"]).isin(IN_FLIGHT_STATUSES)
+    return merged[critical & in_flight].drop(columns=["key"], errors="ignore")
+
+
 def hygiene_by_person(prs: pd.DataFrame) -> pd.DataFrame:
     """Per-author counts of each problem, worst offender first."""
     if prs.empty:
