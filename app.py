@@ -3389,7 +3389,10 @@ def _render_ticket_quality(df: pd.DataFrame) -> None:
                 "no_description": st.column_config.NumberColumn("No description"),
             },
         )
-        st.caption("By the person who wrote the ticket - they are the one who can say what done means.")
+        st.caption(
+            "The tickets currently in scope, grouped by the person who wrote them - "
+            "they are the one who can say what done means."
+        )
     with all_tab:
         st.dataframe(
             gradable.sort_values("quality_score")[columns + ["devinable"]],
