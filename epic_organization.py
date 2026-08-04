@@ -121,16 +121,25 @@ def suggest_parents(
         "confidence",
         "why",
     ]
+
+    # Typed even when empty: the confidence column is rendered as a number, and
+    # an all-object empty frame is a state the caller can reach (every ticket
+    # filed, some epic still sitting empty).
+    def _blank() -> pd.DataFrame:
+        return pd.DataFrame(
+            {column: pd.Series(dtype="float" if column == "confidence" else "object")
+             for column in columns}
+        )
     if df.empty or "epic_key" not in df.columns:
-        return pd.DataFrame(columns=columns)
+        return _blank()
 
     children = _open_children(df).copy()
     if children.empty:
-        return pd.DataFrame(columns=columns)
+        return _blank()
     children["epic_key"] = children["epic_key"].fillna("").astype(str).str.strip()
     orphans = children[children["epic_key"].eq("")]
     if orphans.empty:
-        return pd.DataFrame(columns=columns)
+        return _blank()
 
     vocabulary = _epic_vocabulary(children)
     weights = _weights(vocabulary)

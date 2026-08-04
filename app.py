@@ -1130,50 +1130,51 @@ def _render_epics(df: pd.DataFrame, organization_source: pd.DataFrame | None = N
     scored = estimate_policy(df, BACKLOG_STATUSES)
     rollup = epic_health_flags(epic_rollup(scored))
     if rollup.empty:
+        # The rollup answers a scoped question and can be empty while the instance
+        # still has orphans to file, so the unscoped section below outlives it.
         st.info("No tickets in the current scope.")
-        return
+    else:
+        orphans = int(rollup.loc[rollup["epic"] == "No epic", "open_children"].sum())
+        drifting = int((rollup["issue_count"] > 0).sum() - (1 if orphans else 0))
+        e1, e2, e3 = st.columns(3)
+        e1.metric("Epics with open work", int((rollup["epic"] != "No epic").sum()))
+        e2.metric("Epics needing attention", max(drifting, 0))
+        e3.metric("Tickets with no epic", orphans)
 
-    orphans = int(rollup.loc[rollup["epic"] == "No epic", "open_children"].sum())
-    drifting = int((rollup["issue_count"] > 0).sum() - (1 if orphans else 0))
-    e1, e2, e3 = st.columns(3)
-    e1.metric("Epics with open work", int((rollup["epic"] != "No epic").sum()))
-    e2.metric("Epics needing attention", max(drifting, 0))
-    e3.metric("Tickets with no epic", orphans)
-
-    # "No epic" is a bucket rather than an issue, so it gets no link to follow.
-    display = rollup.copy()
-    display["epic_url"] = display["epic_key"].map(
-        lambda key: _jira_ticket_url(key) if str(key).strip() else ""
-    )
-    display = display.drop(columns=["epic_key"])
-    display.insert(0, "epic_url", display.pop("epic_url"))
-    st.dataframe(
-        display,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "epic_url": st.column_config.LinkColumn(
-                "Key", display_text=JIRA_KEY_DISPLAY_PATTERN
-            ),
-            "epic": st.column_config.TextColumn("Epic", width="large"),
-            "open_children": st.column_config.NumberColumn("Open"),
-            "owners": st.column_config.NumberColumn("Owners"),
-            "avg_idle": st.column_config.NumberColumn("Avg idle (days)", format="%.1f"),
-            "max_idle": st.column_config.NumberColumn("Max idle (days)", format="%.1f"),
-            "unassigned": st.column_config.NumberColumn("Unassigned"),
-            "no_estimate": st.column_config.NumberColumn("No estimate"),
-            "estimated_hours": st.column_config.NumberColumn("Estimated (h)", format="%.1f"),
-            "sprints": st.column_config.NumberColumn("Sprints"),
-            "issues": st.column_config.TextColumn("What is wrong"),
-            "issue_count": st.column_config.NumberColumn("Signals"),
-        },
-    )
-    st.download_button(
-        "Download epic rollup (CSV)",
-        data=rollup.to_csv(index=False).encode("utf-8"),
-        file_name="jira_epic_rollup.csv",
-        mime="text/csv",
-    )
+        # "No epic" is a bucket rather than an issue, so it gets no link to follow.
+        display = rollup.copy()
+        display["epic_url"] = display["epic_key"].map(
+            lambda key: _jira_ticket_url(key) if str(key).strip() else ""
+        )
+        display = display.drop(columns=["epic_key"])
+        display.insert(0, "epic_url", display.pop("epic_url"))
+        st.dataframe(
+            display,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "epic_url": st.column_config.LinkColumn(
+                    "Key", display_text=JIRA_KEY_DISPLAY_PATTERN
+                ),
+                "epic": st.column_config.TextColumn("Epic", width="large"),
+                "open_children": st.column_config.NumberColumn("Open"),
+                "owners": st.column_config.NumberColumn("Owners"),
+                "avg_idle": st.column_config.NumberColumn("Avg idle (days)", format="%.1f"),
+                "max_idle": st.column_config.NumberColumn("Max idle (days)", format="%.1f"),
+                "unassigned": st.column_config.NumberColumn("Unassigned"),
+                "no_estimate": st.column_config.NumberColumn("No estimate"),
+                "estimated_hours": st.column_config.NumberColumn("Estimated (h)", format="%.1f"),
+                "sprints": st.column_config.NumberColumn("Sprints"),
+                "issues": st.column_config.TextColumn("What is wrong"),
+                "issue_count": st.column_config.NumberColumn("Signals"),
+            },
+        )
+        st.download_button(
+            "Download epic rollup (CSV)",
+            data=rollup.to_csv(index=False).encode("utf-8"),
+            file_name="jira_epic_rollup.csv",
+            mime="text/csv",
+        )
 
     # Where a ticket belongs is a question about the whole instance, not about
     # what the sidebar is currently showing: judged on the filtered frame, an
