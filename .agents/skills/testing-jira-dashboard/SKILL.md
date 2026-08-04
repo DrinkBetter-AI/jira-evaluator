@@ -235,6 +235,34 @@ click) and confirm every value is one of Yes/No/Maybe. The board is wide — zoo
   right-hand margin (e.g. x≈990) to scroll the page, and over the table only when you deliberately
   want more rows.
 
+## Testing the Ticket Quality / scoring section (and any per-ticket derived column)
+
+- The section is rendered from `ticket_quality.score_tickets(filtered)` and is passed **`filtered`**,
+  not `_metrics_df(...)`, so Backlog tickets are always included regardless of *Include Backlogs* —
+  don't expect the tiles to move with that checkbox.
+- Build the expectation offline by importing the app's own modules against the live fetch:
+  `PYTHONPATH=<repo> python expect.py` with
+  `app.fetch_tickets(creds_path=..., profile_name=..., jql=app.JQL, max_results=app.MAX_RESULTS,
+  page_size=100, schema_version=app.FETCH_SCHEMA_VERSION)` then `ticket_quality.score_tickets(df)`.
+  Note the script's own directory (not the cwd) goes on `sys.path`, so `PYTHONPATH` is required if
+  the script lives outside the repo.
+- **The strongest single check for a description-dependent feature is the description coverage
+  itself** (e.g. "638/699 tickets have a non-empty description"). If ADF conversion or the fetched
+  field list silently broke, every ticket loses `has_description`/`has_acceptance`, the tiles
+  collapse toward 0 and the average toward ~2 — so non-zero, plausible tiles are meaningful.
+- Scoring invariants are cheaper to prove from the exported CSV than from the UI: download the CSV
+  and assert row count == gradable, the value mix (Yes/Maybe/No), absence of exempt container keys,
+  and structural relations such as *number of named gaps == 5 − score* across **all** rows. Use the
+  UI for a handful of visible rows and the CSV for exhaustiveness.
+- Exemption checks (Epics/Initiatives must not be graded) are best done with the `st.dataframe`
+  **search** in the table toolbar: hover the table, click the magnifier (icons sit just above the
+  table's top-right corner, ~x=910/924/937/950 at 1024px width), then click the *"Type to search"*
+  text itself before typing — clicking elsewhere in the toolbar leaves focus on the tab and the
+  keystrokes go nowhere. `0 results` for a known Epic key is direct evidence of the exemption.
+- Long text columns (`Missing`) are truncated by column width and **cannot** be widened by dragging
+  the header separator or by `ctrl+-`; the table's fullscreen button helps a little, but plan to
+  confirm the full strings from the CSV.
+
 ## Gotchas
 
 - The Streamlit page has no browser chrome if the window is in fullscreen; press `F11` before using
