@@ -3440,8 +3440,9 @@ def _render_orders() -> None:
     if truncated:
         st.warning(
             "The CRM has more orders in this period than one read can carry, so "
-            "the oldest of them are missing and the 30-day comparison understates "
-            "the month before last. The 7-day figures are unaffected."
+            "the oldest of them are missing. The figures below are a floor, not a "
+            "count: the comparison windows lose most, and the 30-day window too "
+            "if the shop now takes more than 4,000 orders a month."
         )
     week = orders.window_metrics(book, 7)
     month = orders.window_metrics(book, 30)
