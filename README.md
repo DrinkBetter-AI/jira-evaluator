@@ -41,6 +41,9 @@ profile when they are not all set.
 | `JIRA_BROWSE_BASE` | no | `<resolved Jira site>/browse` | Base URL for ticket hyperlinks; defaults to the site the credentials resolve to |
 | `JIRA_TEAM_PROJECTS` | no | — | Which Jira projects form each team, e.g. `Marketplace=MB;App=AS,OA;Design=MAR`; used only where the assignee roster has no answer |
 | `JIRA_TEAM_PEOPLE` | no | the VinoVoss roster in `teams.py` | Who sits on each team, e.g. `Design=Robert,Alesya;App=Ali,Farid`; first names match Jira display names, and a `Former staff` team surfaces work still owned by leavers |
+| `JIRA_EXTRA_PROJECT_KEYS` | no | — | Extra project keys a PR may reference, e.g. `MDP,WT2`, for projects the account cannot see; used by *PR Hygiene* |
+| `PR_STALE_AGE_DAYS` | no | `14` | A PR open longer than this counts as stale |
+| `PR_STALE_IDLE_DAYS` | no | `7` | A PR untouched for longer than this counts as stale |
 | `DASHBOARD_PASSWORD` | no locally, **yes on Cloud Run** | — | Shared password visitors must enter; unset locally means no gate, unset on Cloud Run (`K_SERVICE` present) refuses to serve at all |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
@@ -179,9 +182,16 @@ past changes matters:
    estimate, no due date, never started, no priority, carried over 3+ sprints. Read
    only — it recommends what to close or send back to Backlog, it never writes.
    Backlog tickets are always included here regardless of *Include Backlogs*.
-11. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
+11. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
+   or unowned: no Jira key anywhere in the title, branch name or description
+   (matched against every project key Jira exposes, plus `JIRA_EXTRA_PROJECT_KEYS`,
+   so a string like `UTF-8` does not read as a ticket); open past
+   `PR_STALE_AGE_DAYS` or untouched past `PR_STALE_IDLE_DAYS`, with the reason
+   named; and nobody requested to review with no review yet. Includes a per-author
+   table and a CSV of everything flagged. Needs `DASHBOARD_GITHUB_TOKEN`.
+12. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
    age-vs-idle chart, sprint planning tables, and bulk Jira write-back actions.
-12. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
+13. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
    per person against what they are actually available for, which matters when most
    contributors are part-time: `JIRA_WEEKLY_HOURS` is spread over the weekdays
    between the sprint's start and end dates, so 20h/week across a 10-working-day

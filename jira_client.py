@@ -555,6 +555,41 @@ class JiraClient:
         items = payload.get("values", payload) if isinstance(payload, dict) else payload
         return [p["name"] for p in items if p.get("name")]
 
+    def get_project_keys(self, page_size: int = 100) -> list[str]:
+        """Every project key visible to these credentials, including archived ones.
+
+        Inferring keys from the tickets on screen misses any project whose work is
+        all finished, so a PR referencing one would look untraceable.
+        """
+        url = f"{self.base_url}/rest/api/3/project/search"
+        keys: list[str] = []
+        start_at = 0
+        with self._session() as session:
+            while True:
+                response = session.get(
+                    url,
+                    params={
+                        "startAt": start_at,
+                        "maxResults": page_size,
+                        # An archived project's PRs are still traceable, so its
+                        # key has to be matchable.
+                        "status": "live,archived",
+                    },
+                    timeout=30,
+                )
+                if response.status_code >= 400:
+                    raise RuntimeError(
+                        f"Failed to fetch projects ({response.status_code}): "
+                        f"{response.text[:300]}"
+                    )
+                payload = response.json()
+                values = payload.get("values", [])
+                keys.extend(str(p["key"]).upper() for p in values if p.get("key"))
+                if payload.get("isLast", True) or not values:
+                    break
+                start_at += len(values)
+        return sorted(set(keys))
+
     def get_all_users(self, page_size: int = 1000) -> list[dict[str, str]]:
         """Return Jira users with display names and account ids."""
         url = f"{self.base_url}/rest/api/3/users/search"
