@@ -59,6 +59,7 @@ from hygiene import (
     policy_compliance_by_owner,
     stale_candidates,
 )
+import amplitude_client
 import orders
 import orders_client
 from prioritization import add_priority_score, assignee_rollup
@@ -3475,33 +3476,47 @@ def _money(amount: float, currency: str = "usd") -> str:
 BUSINESS_OPENED_KEY = "business_opened"
 
 
+def _business_readable() -> bool:
+    """Whether either the CRM or Amplitude can be read at all.
+
+    Reading the environment costs nothing, so a deployment with no keys is told
+    so plainly rather than offered a button that goes on to admit it cannot read
+    anything.
+    """
+    for load in (orders_client.load_medusa_env, amplitude_client.load_amplitude_env):
+        try:
+            if load() is not None:
+                return True
+        except (orders_client.MedusaConfigError, amplitude_client.AmplitudeConfigError):
+            # Configured but wrongly - which is still worth rendering, because
+            # the section is where the error message belongs.
+            return True
+    return False
+
+
 def _render_business() -> None:
-    """The shop's numbers: orders and revenue, what sold, and how each merchant did.
+    """The shop's numbers, and how far visitors get towards being one of them.
 
     Behind a button on the first visit. Streamlit runs the body of every tab on
     every rerun, whichever one the browser is showing, so reading a year of
-    orders here would cost everyone several seconds of cold start for a tab most
-    of them never open. Once opened it stays open for the session.
+    orders and a month of events here would cost everyone several seconds of cold
+    start for a tab most of them never open. Once opened it stays open for the
+    session.
     """
-    # Reading the environment costs nothing, so a missing key is reported instead
-    # of offered as a button that goes on to admit it cannot read anything.
-    misconfigured = True
-    try:
-        misconfigured = orders_client.load_medusa_env() is None
-    except orders_client.MedusaConfigError:
-        pass
-    if not misconfigured and not st.session_state.get(BUSINESS_OPENED_KEY):
-        st.subheader("Orders, Revenue & AOV")
+    if _business_readable() and not st.session_state.get(BUSINESS_OPENED_KEY):
+        st.subheader("Business")
         st.caption(
-            "A year of the order book, read from the CRM on request so the rest of "
-            "the dashboard opens straight away. It stays loaded afterwards, and "
-            "refreshes only what has changed."
+            "A year of the order book and a month of product analytics, read on "
+            "request so the rest of the dashboard opens straight away. They stay "
+            "loaded afterwards, and the order book refreshes only what changed."
         )
         if st.button("Read the shop's figures", key="business_open"):
             st.session_state[BUSINESS_OPENED_KEY] = True
             st.rerun()
         return
     _render_business_sections()
+    st.divider()
+    _render_product_funnel()
 
 
 def _render_business_sections() -> None:
@@ -3680,6 +3695,209 @@ def _render_wines_and_merchants(
                 f"{', '.join(code.upper() for code in other_currencies)} is left "
                 "out rather than added to a total in another currency."
             )
+
+
+# How far back the funnel looks. A week is what a sprint changes; a month is
+# what a board meeting asks about; a quarter is the only one big enough for the
+# checkout steps, which a hundred-odd people a month reach.
+FUNNEL_WINDOWS = (7, 30, 90)
+FUNNEL_TTL_SECONDS = 900
+
+
+@st.cache_data(ttl=FUNNEL_TTL_SECONDS, show_spinner=False)
+def _funnel_cached(
+    credentials: tuple[str, str, str], funnel_spec: str, days: int
+) -> pd.DataFrame:
+    steps = amplitude_client.parse_funnel(funnel_spec)
+    return amplitude_client.funnel(credentials, steps, days)
+
+
+@st.cache_data(ttl=FUNNEL_TTL_SECONDS, show_spinner=False)
+def _event_users_cached(
+    credentials: tuple[str, str, str],
+    events: tuple[tuple[str, str], ...],
+    days: int,
+) -> pd.DataFrame:
+    """Events as plain pairs, because Streamlit hashes its cache keys itself and
+    is not obliged to know how to hash this module's dataclass."""
+    steps = tuple(amplitude_client.Step(label, event) for label, event in events)
+    return amplitude_client.event_users(credentials, steps, days)
+
+
+def _percent(value: float) -> str:
+    """A conversion rate, at the precision the number can carry.
+
+    A step two thousandths of the way down the funnel rounds to 0% at one decimal
+    place, which reads as broken instrumentation rather than as a hard step.
+    """
+    if 0 < value < 0.001:
+        return "<0.1%"
+    return f"{value * 100:.1f}%"
+
+
+def _render_product_funnel() -> None:
+    """How far visitors get towards an order, and what goes wrong on the way.
+
+    The order book says what the shop sold. It cannot say how many people tried
+    and gave up, which is the number that says whether the product is working.
+    """
+    st.subheader("Product Funnel & Friction")
+    try:
+        credentials = amplitude_client.load_amplitude_env()
+    except amplitude_client.AmplitudeConfigError as exc:
+        st.caption(f"Product analytics are misconfigured: {exc}")
+        return
+    if credentials is None:
+        st.caption(
+            "The funnel needs an Amplitude project API key and secret key "
+            "(Settings -> Projects -> your project). Set AMPLITUDE_API_KEY and "
+            "AMPLITUDE_SECRET_KEY."
+        )
+        return
+
+    days = st.radio(
+        "Window",
+        options=list(FUNNEL_WINDOWS),
+        format_func=lambda value: f"{value} days",
+        index=1,
+        horizontal=True,
+        key="funnel_window_days",
+    )
+    funnel_spec = os.getenv("AMPLITUDE_FUNNEL", "")
+    try:
+        with st.spinner("Reading the product funnel..."):
+            steps = _funnel_cached(credentials, funnel_spec, days)
+    except amplitude_client.AmplitudeConfigError as exc:
+        st.warning(str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Could not read the funnel from Amplitude: {str(exc)[:200]}")
+        return
+
+    if steps.empty or not steps["users"].iloc[0]:
+        st.info(f"Amplitude recorded nobody at the first step in the last {days} days.")
+        return
+
+    top = steps.iloc[0]
+    end = steps.iloc[-1]
+    # The step that loses the most people, ignoring the first: it has nothing
+    # before it to have lost anybody from.
+    worst = steps.iloc[1:].sort_values("lost", ascending=False).iloc[0]
+    tiles = st.columns(4)
+    tiles[0].metric(f"{top['step']} ({days}d)", f"{int(top['users']):,}")
+    tiles[1].metric(f"{end['step']} ({days}d)", f"{int(end['users']):,}")
+    tiles[2].metric("Visit to order", _percent(float(end["from_start"])))
+    tiles[3].metric(
+        "Biggest drop-off",
+        worst["step"],
+        delta=f"-{int(worst['lost']):,} people",
+        delta_color="inverse",
+    )
+
+    figure = px.bar(
+        steps,
+        x="users",
+        y="step",
+        orientation="h",
+        title=f"People reaching each step ({days} days)",
+    )
+    figure.update_yaxes(autorange="reversed")
+    figure.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
+    st.plotly_chart(figure, width="stretch", key="funnel_steps")
+
+    table = steps.assign(
+        from_previous=steps["from_previous"].map(_percent),
+        from_start=steps["from_start"].map(_percent),
+        lost=steps["lost"].map(lambda count: f"{int(count):,}"),
+    )
+    # The first step has nothing before it, and printing 0% there reads as a step
+    # that loses everybody rather than as the top of the funnel.
+    table.loc[table.index[0], ["from_previous", "lost"]] = "\u2014"
+    st.dataframe(
+        table.rename(
+            columns={
+                "step": "Step",
+                "event": "Event",
+                "users": "People",
+                "from_previous": "From previous step",
+                "from_start": "From the start",
+                "lost": "Lost here",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption(
+        "People, not visits, and the steps must happen in this order within "
+        f"{amplitude_client.DEFAULT_CONVERSION_DAYS} days of each other - wine is "
+        "read about and bought later, so a shorter window would report the shop as "
+        "worse than it is. 'From previous step' is the one to act on: it names the "
+        "screen costing the most. The window ends yesterday, because today is "
+        "still being recorded and would read as a slump. Configure the steps with "
+        "AMPLITUDE_FUNNEL."
+    )
+
+    friction_tab, ai_tab = st.tabs(["What went wrong", "Voss AI"])
+    with friction_tab:
+        _render_event_counts(
+            credentials,
+            amplitude_client.FRICTION_EVENTS,
+            days,
+            int(top["users"]),
+            "Nothing went wrong in this window, which is worth a second look at "
+            "whether these events are being sent.",
+            "Share of everyone who visited. An error one person met ten times is "
+            "one person here, not ten.",
+        )
+    with ai_tab:
+        _render_event_counts(
+            credentials,
+            amplitude_client.AI_EVENTS,
+            days,
+            int(top["users"]),
+            "Amplitude recorded no Voss AI use in this window.",
+            "Share of everyone who visited, so this is reach rather than "
+            "engagement: it says how many people found it, not how much they used "
+            "it.",
+        )
+
+
+def _render_event_counts(
+    credentials: tuple[str, str, str],
+    events: tuple[amplitude_client.Step, ...],
+    days: int,
+    visitors: int,
+    empty_note: str,
+    caption: str,
+) -> None:
+    """A count of people per event, beside what share of all visitors that is."""
+    pairs = tuple((step.label, step.event) for step in events)
+    try:
+        with st.spinner("Counting..."):
+            counts = _event_users_cached(credentials, pairs, days)
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Could not read these counts from Amplitude: {str(exc)[:200]}")
+        return
+    if counts.empty or not counts["users"].sum():
+        st.info(empty_note)
+        return
+    share = counts["users"] / visitors if visitors else 0.0
+    table = counts.assign(share=pd.Series(share).map(_percent)).sort_values(
+        "users", ascending=False
+    )
+    st.dataframe(
+        table.rename(
+            columns={
+                "label": "What happened",
+                "event": "Event",
+                "users": "People",
+                "share": "Of all visitors",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption(caption)
 
 
 def _render_resolved_summary(
