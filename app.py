@@ -3426,7 +3426,7 @@ def _render_orders() -> None:
         with st.spinner("Reading the order book..."):
             book = fetch_orders_cached(api_key, base_url, 61)
     except Exception as exc:  # noqa: BLE001
-        st.warning(f"Could not read orders from the CRM: {exc}")
+        st.warning(f"Could not read orders from the CRM: {str(exc)[:200]}")
         return
 
     # Totals in different currencies cannot be added; the shop bills in one, and
@@ -3464,7 +3464,8 @@ def _render_orders() -> None:
     st.caption(
         "Revenue and AOV count captured payments only, so an order placed but not "
         "yet paid raises the order count and not the revenue; cancelled orders are "
-        "excluded from both. Deltas compare with the equivalent window before it. "
+        "excluded from both. Deltas compare with the equivalent window before it, "
+        "and the daily bars break the day at UTC midnight. "
         f"Read read-only from {base_url}, cached for 15 minutes."
     )
     if other_currencies:

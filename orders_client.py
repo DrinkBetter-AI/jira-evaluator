@@ -36,6 +36,11 @@ _ORDER_FIELDS = "id,display_id,created_at,status,payment_status,total,currency_c
 # correction to revenue already earned, not a sale that never happened.
 PAID_PAYMENT_STATUSES = frozenset({"captured", "partially_refunded", "refunded"})
 
+# Without any one of these the arithmetic is not merely incomplete, it is wrong:
+# no total is $0 of revenue, no payment state is every order unpaid, no date is
+# an empty window.
+REQUIRED_FIELDS = ("created_at", "payment_status", "total")
+
 COLUMNS = [
     "id",
     "display_id",
@@ -108,13 +113,14 @@ def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFra
     if not rows:
         return pd.DataFrame(columns=COLUMNS)
     frame = pd.DataFrame(rows)
-    # Revenue is defined by payment state, so an order book without it is not a
-    # smaller answer, it is a wrong one - every order would read as unpaid.
-    if "payment_status" not in frame.columns:
+    # Every figure is defined by these three. Filling a missing one in would not
+    # give a smaller answer, it would give a wrong one - a confident $0 for a
+    # shop that took money - so the section refuses instead.
+    missing = [name for name in REQUIRED_FIELDS if name not in frame.columns]
+    if missing:
         raise MedusaConfigError(
-            "The CRM returned orders with no payment_status, so paid and unpaid "
-            "orders cannot be told apart. Check the Medusa version behind "
-            f"{base_url}."
+            f"The CRM returned orders with no {', '.join(missing)}, so the order "
+            f"figures cannot be trusted. Check the Medusa version behind {base_url}."
         )
     for column in COLUMNS:
         if column not in frame.columns:
@@ -129,6 +135,7 @@ def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFra
 
 __all__ = [
     "COLUMNS",
+    "REQUIRED_FIELDS",
     "DEFAULT_BASE_URL",
     "MedusaConfigError",
     "PAID_PAYMENT_STATUSES",
