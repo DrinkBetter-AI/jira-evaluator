@@ -344,7 +344,12 @@ def sync_order_book(
     if incremental and previous is not None:
         changed = set(fresh_orders["id"].tolist())
         kept_orders = previous.orders[~previous.orders["id"].isin(changed)]
-        kept_items = previous.items[~previous.items["order_id"].isin(changed)]
+        # Only an order whose lines came back is re-stated. Medusa returns line
+        # items whatever `fields` asks for, but if that ever stops being true the
+        # book would otherwise quietly shed the lines of every order it refreshed
+        # until the wine table was empty.
+        restated = set(fresh_items["order_id"].tolist())
+        kept_items = previous.items[~previous.items["order_id"].isin(restated)]
         order_frame = _stack(kept_orders, fresh_orders, COLUMNS)
         item_frame = _stack(kept_items, fresh_items, ITEM_COLUMNS)
         truncated = truncated or previous.truncated
@@ -360,7 +365,11 @@ def sync_order_book(
         .sort_values("created_at")
         .reset_index(drop=True)
     )
-    item_frame = item_frame.sort_values("created_at").reset_index(drop=True)
+    item_frame = (
+        item_frame.drop_duplicates(subset=["order_id", "item_id"], keep="last")
+        .sort_values("created_at")
+        .reset_index(drop=True)
+    )
     order_frame.attrs["truncated"] = truncated
     return OrderBook(
         orders=order_frame,
