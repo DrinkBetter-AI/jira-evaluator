@@ -47,6 +47,10 @@ profile when they are not all set.
 | `MEDUSA_ADMIN_API_KEY` | no | — | Medusa secret API key (Settings → Secret API Keys in the CRM); without it the *Orders, Revenue & AOV* section says so and everything else works |
 | `MEDUSA_ADMIN_URL` | no | `https://merchants.vinovoss.com` | CRM admin API the order figures are read from |
 | `MEDUSA_STORE_PREFIX_ALIASES` | no | — | Retired product-handle prefixes mapped to a merchant, e.g. `oldprefix=Store Name`; without it that merchant's older sales show as *Unattributed* |
+| `AMPLITUDE_API_KEY` | no | — | Amplitude project API key (Settings → Projects → your project); needed with the secret key for *Product Funnel & Friction* |
+| `AMPLITUDE_SECRET_KEY` | no | — | The same project's secret key; Amplitude's Dashboard API authenticates on the pair, and the API key alone is refused |
+| `AMPLITUDE_API_URL` | no | `https://amplitude.com` | Set to `https://analytics.eu.amplitude.com` for an EU-region project, whose keys the US host refuses |
+| `AMPLITUDE_FUNNEL` | no | visit → product page → cart → checkout → payment → order | The funnel's steps as `Label=event_name` pairs, in order, e.g. `Visited=_active,Bought=checkout_order_completed` |
 | `DASHBOARD_PASSWORD` | no locally, **yes on Cloud Run** | — | Shared password visitors must enter; unset locally means no gate, unset on Cloud Run (`K_SERVICE` present) refuses to serve at all |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
@@ -234,7 +238,29 @@ engineering numbers would still wait for the shop's.
    per merchant, over 30, 90, 180 or 360 days. Bottles count what customers chose,
    so an order awaiting payment counts there while revenue still waits for
    capture; ice packs are add-ons and are kept out of the wine ranking.
-12. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
+12. **Product Funnel & Friction** (*Business* tab) — how far visitors get towards
+   being one of those orders, read from Amplitude. The default funnel starts at any
+   activity and runs product page → cart → checkout → payment → order, deliberately
+   *not* home page → search → product: on this shop the overwhelming majority of
+   visitors arrive on a product page from a search engine and never see the home
+   page, so a funnel starting there would describe a few hundred people out of tens
+   of thousands. Counted in people rather than visits, steps must happen in that
+   order within 7 days of each other (wine is read about and bought later, so a
+   one-day window would report the shop as worse than it is), and the window ends
+   *yesterday*, because today is still being recorded and always reads as a slump.
+   *From previous step* is the column to act on — it names the single screen costing
+   the most — while *from the start* is what people mean by "conversion rate".
+   Beside it, **What went wrong** counts the people who hit an app error, a failed
+   add-to-cart, a blocked checkout, a failed payment or an empty search, as a share
+   of everyone who visited; one person meeting the same error ten times is one
+   person to apologise to, not ten. **Voss AI** is reach rather than engagement: how
+   many people opened it, asked it something, and got nothing back. Needs
+   `AMPLITUDE_API_KEY` and `AMPLITUDE_SECRET_KEY`; read-only, every call is a
+   `GET /api/2/funnels`. Those two counts are asked as two-step funnels rather than
+   of the segmentation endpoint, whose interval only comes in days, weeks or months:
+   no interval spans an arbitrary window, so a count from it is a sum of buckets, and
+   adding buckets counts somebody who came back next week as two people.
+13. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
    or unowned: no Jira key anywhere in the title, branch name or description
    (matched against every project key Jira exposes, plus `JIRA_EXTRA_PROJECT_KEYS`,
    so a string like `UTF-8` does not read as a ticket); open past
@@ -245,7 +271,7 @@ engineering numbers would still wait for the shop's.
    first, because that is work one review away from shipping. Tickets merely In
    Progress are excluded: the code is still being written. Includes a per-author
    table and a CSV of everything flagged. Needs `DASHBOARD_GITHUB_TOKEN`.
-13. **Ticket Quality & Ready for Devin** — every ticket graded out of 5 on whether
+14. **Ticket Quality & Ready for Devin** — every ticket graded out of 5 on whether
    someone outside the original conversation could pick it up: a summary of at
    least four words, a description of at least 120 characters, explicit acceptance
    criteria (the words, or a checklist of three or more items), an estimate, and an
@@ -258,7 +284,7 @@ engineering numbers would still wait for the shop's.
    Backlog tickets are always included regardless of *Include Backlogs* — an unowned
    backlog ticket is the best kind to hand off, and the worst-written ones collect
    there unseen.
-14. **Sprint Planner** — a first draft of one team's next sprint, built from goals
+15. **Sprint Planner** — a first draft of one team's next sprint, built from goals
    rather than from the top of a priority list. Name two or three goals for the
    sprint ("Onboarding, Quiz, Checkout", most important first) and every ticket
    that shares a word with one — in its summary, its epic's name or its labels —
@@ -278,9 +304,9 @@ engineering numbers would still wait for the shop's.
    armed, and it only adds tickets to an active or future sprint. Jira moves an
    issue between sprints rather than copying it, so a ticket already on another
    open sprint leaves it; the section names those tickets before the button.
-15. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
+16. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
    age-vs-idle chart, sprint planning tables, and bulk Jira write-back actions.
-16. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
+17. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
    per person against what they are actually available for, which matters when most
    contributors are part-time: `JIRA_WEEKLY_HOURS` is spread over the weekdays
    between the sprint's start and end dates, so 20h/week across a 10-working-day
