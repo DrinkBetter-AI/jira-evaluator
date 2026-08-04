@@ -54,9 +54,9 @@ _HUMAN_ONLY_RE = re.compile(
     r"research|investigate|explore|spike|proposal|propose|planning|"
     r"design|mockup|wireframe|brainstorm|interview|hiring|"
     r"onboard|offboard|coordinate|follow up|followup|review with|"
-    r"roadmap|strategy|kick ?off|kickoff|retrospective|prioriti[sz]e|"
+    r"roadmap|strategy|kick ?off|kickoff|retrospective|prioriti[sz]\w*|"
     r"presentation|training|"
-    r"outage|incident|escalat|customer call|demo)\b",
+    r"outage|incident|escalat\w*|customer call|demo)\b",
     re.IGNORECASE,
 )
 
