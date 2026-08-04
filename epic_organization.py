@@ -78,10 +78,14 @@ def _epic_vocabulary(children: pd.DataFrame) -> dict[str, dict[str, set[str]]]:
         key = str(epic_key).strip()
         if not key:
             continue
-        entry = vocabulary.setdefault(
-            key, {"name": str(epic_name or key).strip() or key, "words": set()}
-        )
-        entry["words"] |= _words(epic_name)
+        # A missing parent summary arrives as NaN, which is truthy: named from it
+        # directly, the epic would be displayed as the word "nan" and would carry
+        # "nan" into its vocabulary as if it were a word the epic is about.
+        name = "" if pd.isna(epic_name) else str(epic_name).strip()
+        entry = vocabulary.setdefault(key, {"name": name or key, "words": set()})
+        if name:
+            entry["name"] = name
+            entry["words"] |= _words(name)
         for summary in group["summary"]:
             entry["words"] |= _words(summary)
     return vocabulary

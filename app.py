@@ -1119,7 +1119,7 @@ def _render_team_overview(df: pd.DataFrame) -> None:
     )
 
 
-def _render_epics(df: pd.DataFrame) -> None:
+def _render_epics(df: pd.DataFrame, organization_source: pd.DataFrame | None = None) -> None:
     """Group open work by epic and name what is wrong with each one."""
     st.subheader("Epics")
     st.caption(
@@ -1175,7 +1175,11 @@ def _render_epics(df: pd.DataFrame) -> None:
         mime="text/csv",
     )
 
-    _render_epic_organization(df)
+    # Where a ticket belongs is a question about the whole instance, not about
+    # what the sidebar is currently showing: judged on the filtered frame, an
+    # epic whose children are all in the Backlog reads as empty, and an epic
+    # loses the child summaries its suggestions are built from.
+    _render_epic_organization(df if organization_source is None else organization_source)
 
 
 def _render_epic_organization(df: pd.DataFrame) -> None:
@@ -1196,6 +1200,8 @@ def _render_epic_organization(df: pd.DataFrame) -> None:
         "Suggestions come from the words a ticket shares with an epic and with the "
         "tickets already in it, scored so that a word common to every epic counts "
         "for nothing. Only epics in the ticket's own project are considered. "
+        "Every loaded ticket counts here, backlog included and whatever the scope "
+        "and filters are: filing is a question about the whole instance. "
         "Nothing is filed automatically - *Why* is there so the guess can be judged."
     )
 
@@ -3790,7 +3796,7 @@ def main() -> None:
     _render_team_overview(_metrics_df(filtered, include_backlogs))
 
     st.divider()
-    _render_epics(_metrics_df(filtered, include_backlogs))
+    _render_epics(_metrics_df(filtered, include_backlogs), organization_source=df)
 
     st.divider()
     # Backlog-inclusive on purpose: the backlog is what this section clears out.
