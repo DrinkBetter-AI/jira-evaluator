@@ -229,8 +229,9 @@ past changes matters:
    Everything is a proposal: tick or untick any row, change any ticket's hours,
    and the per-person load follows the decision rather than the suggestion.
    Nothing reaches Jira until *Add to sprint* is pressed with the edit switch
-   armed, and it only adds tickets to an active or future sprint — it never
-   removes anything.
+   armed, and it only adds tickets to an active or future sprint. Jira moves an
+   issue between sprints rather than copying it, so a ticket already on another
+   open sprint leaves it; the section names those tickets before the button.
 14. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
    age-vs-idle chart, sprint planning tables, and bulk Jira write-back actions.
 15. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours

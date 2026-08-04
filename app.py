@@ -2076,8 +2076,9 @@ def _apply_sprint_plan(plan: pd.DataFrame, team_df: pd.DataFrame) -> None:
     )
     if sprints.empty:
         st.caption(
-            "This team has no active or future sprint in Jira, so the plan can only "
-            "be exported. Create the sprint on the board to apply it here."
+            "This team has no active or future sprint holding any of its tickets, "
+            "so the plan can only be exported. A sprint appears here once it has at "
+            "least one of the team's tickets on it."
         )
         return
 
@@ -2091,6 +2092,26 @@ def _apply_sprint_plan(plan: pd.DataFrame, team_df: pd.DataFrame) -> None:
     with columns[0]:
         label = st.selectbox("Apply to sprint", options=sorted(labels), key="plan_target_sprint")
     sprint_id = labels.get(label)
+    # Jira's add-to-sprint moves an issue rather than copying it, so applying a
+    # plan to the future sprint takes in-flight work out of the active one - and
+    # in-flight work is exactly what the planner ticks first. Say so by name
+    # before the button, since the section otherwise promises only to add.
+    open_elsewhere = team_df[
+        team_df["key"].astype(str).isin(chosen)
+        & team_df["sprint_state"].fillna("").astype(str).str.lower().isin(["active", "future"])
+        & team_df["sprint_id"].map(_normalize_sprint_id).ne(sprint_id)
+    ]
+    moving = sorted(set(open_elsewhere["key"].astype(str)))
+    if moving:
+        leaving = ", ".join(
+            sorted(set(open_elsewhere["sprint_name"].dropna().astype(str)))
+        )
+        st.warning(
+            f"{len(moving)} of the chosen tickets are on another open sprint "
+            f"({leaving}) and Jira moves rather than copies them, so they would "
+            f"leave it: {', '.join(moving[:10])}"
+            + (" ..." if len(moving) > 10 else "")
+        )
     if not write_access.writes_enabled():
         st.info(write_access.READ_ONLY_MESSAGE)
     with columns[1]:

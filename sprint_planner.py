@@ -240,11 +240,19 @@ def plan_sprint(
                 if ticket["_in_flight"]
                 else f"fits in {left:.1f}h left"
             )
+        elif ticket["_in_flight"]:
+            # Work under way is spent whether or not it fits: leaving it out
+            # would hand the hours it is already consuming to something else
+            # and call the sprint affordable. It stays, and the person shows
+            # as over their hours, which is the true position.
+            budget[owner] = 0.0
+            plan = PLANNED
+            why = f"already in flight, {cost:.1f}h against {left:.1f}h left"
         else:
             plan = NEXT_UP
             why = f"needs {cost:.1f}h, only {left:.1f}h left"
         if not ticket["estimated"]:
-            why = f"{why} (assumed {cost:.0f}h, unestimated)"
+            why = f"{why} (assumed {cost:.1f}h, unestimated)"
         rows.append(
             {
                 "key": ticket.get("key"),
