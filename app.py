@@ -3413,7 +3413,11 @@ def _money(amount: float, currency: str = "usd") -> str:
 def _render_orders() -> None:
     """Orders, revenue and AOV for the last 7 and 30 days, straight from the CRM."""
     st.subheader("Orders, Revenue & AOV")
-    config = orders_client.load_medusa_env()
+    try:
+        config = orders_client.load_medusa_env()
+    except orders_client.MedusaConfigError as exc:
+        st.caption(f"Order figures are misconfigured: {exc}")
+        return
     if config is None:
         st.caption(
             "Order figures need a Medusa admin key. Create a secret key in the CRM "
