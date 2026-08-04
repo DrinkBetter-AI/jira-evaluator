@@ -371,15 +371,22 @@ def sync_order_book(
     )
 
 
+# Prefixes the CRM no longer registers but which are still on wine it has sold.
+# TheWinesGood's store record says `thewinesgood`, its products say
+# `thewinegood` - a letter's difference that would otherwise leave a year of its
+# sales credited to nobody. Confirmed as the same shop by Angel.
+_DEFAULT_PREFIX_ALIASES = {"thewinegood": "TheWinesGood"}
+
+
 def _prefix_aliases() -> dict[str, str]:
     """Retired handle prefixes mapped to the merchant they belonged to.
 
     A merchant that changed its prefix keeps the old one on everything it has
     already sold, and the store record only remembers the current one, so that
-    history would otherwise be attributed to nobody. Set as
+    history would otherwise be attributed to nobody. Add more with
     ``MEDUSA_STORE_PREFIX_ALIASES="oldprefix=Store Name,other=Other Store"``.
     """
-    aliases: dict[str, str] = {}
+    aliases: dict[str, str] = dict(_DEFAULT_PREFIX_ALIASES)
     for entry in os.getenv("MEDUSA_STORE_PREFIX_ALIASES", "").split(","):
         prefix, _, name = entry.partition("=")
         if prefix.strip() and name.strip():
