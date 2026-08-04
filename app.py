@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import html
 import os
@@ -57,6 +58,8 @@ from hygiene import (
     policy_compliance_by_owner,
     stale_candidates,
 )
+import orders
+import orders_client
 from prioritization import add_priority_score, assignee_rollup
 import sprint_planner
 import ticket_quality
@@ -3394,6 +3397,97 @@ def _render_new_and_triage(
         )
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_orders_cached(api_key: str, base_url: str, days: int) -> pd.DataFrame:
+    # Two windows plus the two before them, so a 30-day figure can be shown as
+    # up or down on the month before it in one fetch.
+    since = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)
+    return orders_client.fetch_orders(since, api_key, base_url)
+
+
+def _money(amount: float, currency: str = "usd") -> str:
+    symbol = {"usd": "$", "eur": "\u20ac", "gbp": "\u00a3"}.get(currency.lower(), "")
+    return f"{symbol}{amount:,.2f}" + (f" {currency.upper()}" if not symbol else "")
+
+
+def _render_orders() -> None:
+    """Orders, revenue and AOV for the last 7 and 30 days, straight from the CRM."""
+    st.subheader("Orders, Revenue & AOV")
+    try:
+        config = orders_client.load_medusa_env()
+    except orders_client.MedusaConfigError as exc:
+        st.caption(f"Order figures are misconfigured: {exc}")
+        return
+    if config is None:
+        st.caption(
+            "Order figures need a Medusa admin key. Create a secret key in the CRM "
+            "(Settings -> Secret API Keys) and set MEDUSA_ADMIN_API_KEY."
+        )
+        return
+
+    api_key, base_url = config
+    try:
+        with st.spinner("Reading the order book..."):
+            book = fetch_orders_cached(api_key, base_url, 61)
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Could not read orders from the CRM: {str(exc)[:200]}")
+        return
+
+    truncated = bool(book.attrs.get("truncated"))
+    # Totals in different currencies cannot be added; the shop bills in one, and
+    # if that ever stops being true the tiles report the main one and say so.
+    book, currency, other_currencies = orders.single_currency(book)
+    if truncated:
+        st.warning(
+            "The CRM has more orders in this period than one read can carry, so "
+            "the oldest of them are missing. The figures below are a floor, not a "
+            "count: the comparison windows lose most, and the 30-day window too "
+            "if the shop now takes more than 4,000 orders a month."
+        )
+    week = orders.window_metrics(book, 7)
+    month = orders.window_metrics(book, 30)
+    for window, label in ((week, "7 days"), (month, "30 days")):
+        tiles = st.columns(4)
+        tiles[0].metric(
+            f"Orders ({label})", f"{window.orders:,}", delta=f"{window.orders_delta:+,}"
+        )
+        tiles[1].metric(
+            f"Revenue ({label})",
+            _money(window.revenue, currency),
+            delta=(
+                f"{'+' if window.revenue_delta >= 0 else '-'}"
+                f"{_money(abs(window.revenue_delta), currency)}"
+            ),
+        )
+        tiles[2].metric(f"AOV ({label})", _money(window.aov, currency))
+        # Cancelled and unpaid are the gap between "orders" and "revenue", and
+        # the reason the two tiles do not divide into each other.
+        tiles[3].metric(
+            f"Cancelled / unpaid ({label})",
+            f"{window.canceled} / {window.unpaid_orders}",
+        )
+
+    trend = orders.daily_orders(book, 30)
+    if trend["orders"].sum():
+        figure = px.bar(trend, x="date", y="orders", title="Orders per day (30 days)")
+        figure.update_layout(height=260, margin=dict(l=0, r=0, t=40, b=0))
+        st.plotly_chart(figure, width="stretch", key="orders_daily")
+
+    st.caption(
+        "Revenue and AOV count captured payments only, so an order placed but not "
+        "yet paid raises the order count and not the revenue; cancelled orders are "
+        "excluded from both. Deltas compare with the equivalent window before it, "
+        "and the daily bars break the day at UTC midnight. "
+        f"Read read-only from {base_url}, cached for 15 minutes."
+    )
+    if other_currencies:
+        st.caption(
+            f"Figures cover {currency.upper()} orders only; orders in "
+            f"{', '.join(code.upper() for code in other_currencies)} are left out "
+            "rather than added to a total in another currency."
+        )
+
+
 def _render_resolved_summary(
     ticket_count_7: int | None,
     ticket_count_30: int | None,
@@ -4039,6 +4133,9 @@ def main() -> None:
         github_ready,
         github_error,
     )
+    st.divider()
+
+    _render_orders()
     st.divider()
 
     _render_new_and_triage(
