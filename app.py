@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import os
 import re
@@ -1815,6 +1816,7 @@ def _transition_sample_keys(editor_df: pd.DataFrame) -> tuple[str, ...]:
 
 
 _PLAN_EDITOR_KEY = "_sprint_plan_editor"
+_SPRINT_MOVE_BATCH = 50
 
 
 def _render_sprint_plan(df: pd.DataFrame) -> None:
@@ -1980,6 +1982,12 @@ def _render_sprint_plan(df: pd.DataFrame) -> None:
                 str(overhead),
                 str(assumed),
                 str(only_goals),
+                # The tickets themselves are part of the identity too: Jira data
+                # is refetched on a timer, and a plan reordered by a new ticket
+                # would otherwise keep the ticks at their old row positions.
+                hashlib.sha1(
+                    ",".join(plan["key"].astype(str)).encode("utf-8")
+                ).hexdigest(),
             ]
         ),
         column_config={
@@ -2107,7 +2115,12 @@ def _apply_sprint_plan(plan: pd.DataFrame, team_df: pd.DataFrame) -> None:
         return
     with st.spinner(f"Adding {len(to_add)} ticket(s) to {label}..."):
         try:
-            client.add_issues_to_sprint(sprint_id, to_add)
+            # Jira's Agile API takes at most fifty issues per move, and a plan
+            # drawn to a whole team's hours passes fifty rows easily.
+            for offset in range(0, len(to_add), _SPRINT_MOVE_BATCH):
+                client.add_issues_to_sprint(
+                    sprint_id, to_add[offset : offset + _SPRINT_MOVE_BATCH]
+                )
         except Exception as exc:  # noqa: BLE001
             st.error(f"Failed to add tickets to the sprint: {exc}")
             return
