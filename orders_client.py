@@ -70,6 +70,14 @@ def load_medusa_env() -> tuple[str, str] | None:
     if not key:
         return None
     base = os.getenv("MEDUSA_ADMIN_URL", DEFAULT_BASE_URL).strip() or DEFAULT_BASE_URL
+    # The key travels in an Authorization header, so the host it is sent to has
+    # to be deliberate and the connection encrypted: a mistyped variable would
+    # otherwise hand an admin credential to whatever answers.
+    if not base.lower().startswith("https://"):
+        raise MedusaConfigError(
+            "MEDUSA_ADMIN_URL must be an https:// address; the admin key is sent "
+            "to it as a credential and will not be sent in the clear."
+        )
     return key, base.rstrip("/")
 
 
@@ -114,12 +122,15 @@ def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFra
         page = payload.get("orders") or []
         rows.extend(page)
         offset += len(page)
-        # A short page is the end of the window. `count` is only a shortcut, and
-        # a version that omits it must not be read as "no orders".
-        if len(page) < _PAGE_SIZE:
-            break
+        # `count` is the window's real size and settles it. Without it, a page
+        # shorter than asked for is the end - though a deployment that caps the
+        # page size below the ask and reports no count cannot be told apart from
+        # a window that simply ended, which is why count is preferred.
         reported = int(payload.get("count") or 0)
-        if reported and offset >= reported:
+        exhausted = (
+            offset >= reported if reported else len(page) < _PAGE_SIZE
+        )
+        if not page or exhausted:
             break
         truncated = page_number == _MAX_PAGES - 1
 

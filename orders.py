@@ -93,12 +93,12 @@ def _paid(orders: pd.DataFrame) -> pd.DataFrame:
     ]
 
 
-def _net(orders: pd.DataFrame) -> float:
-    """What the shop kept: totals less anything refunded off them."""
+def _kept(orders: pd.DataFrame) -> pd.Series:
+    """Per order, the money the shop kept: the total less anything refunded."""
     if orders.empty:
-        return 0.0
+        return pd.Series(dtype=float)
     refunded = orders["refunded_total"] if "refunded_total" in orders.columns else 0.0
-    return float((orders["total"] - refunded).clip(lower=0).sum())
+    return (orders["total"] - refunded).clip(lower=0)
 
 
 def window_metrics(
@@ -114,7 +114,12 @@ def window_metrics(
     current = _slice(orders, start, end)
     previous = _slice(orders, previous_start, start)
     paid = _paid(current)
-    revenue = _net(paid)
+    kept = _kept(paid)
+    revenue = float(kept.sum()) if not paid.empty else 0.0
+    # An order refunded down to nothing is still a paid order - it is not
+    # awaiting payment - but it produced no basket, so averaging over it would
+    # drag AOV towards zero for a sale that was undone rather than made small.
+    earning = int((kept > 0).sum()) if not paid.empty else 0
     canceled = int(_canceled(current).sum()) if not current.empty else 0
     return WindowMetrics(
         days=days,
@@ -122,9 +127,9 @@ def window_metrics(
         canceled=canceled,
         paid_orders=int(len(paid)),
         revenue=round(revenue, 2),
-        aov=round(revenue / len(paid), 2) if len(paid) else 0.0,
+        aov=round(revenue / earning, 2) if earning else 0.0,
         prev_orders=int(len(previous)),
-        prev_revenue=round(_net(_paid(previous)), 2),
+        prev_revenue=round(float(_kept(_paid(previous)).sum()), 2),
     )
 
 
@@ -155,10 +160,9 @@ def daily_orders(
     counts = placed.groupby("date")["id"].count().reindex(index, fill_value=0)
     paid = _paid(placed)
     revenue = (
-        paid.assign(net=paid["total"] - paid["refunded_total"])
-        .groupby("date")["net"]
+        paid.assign(kept=_kept(paid))
+        .groupby("date")["kept"]
         .sum()
-        .clip(lower=0)
         .reindex(index, fill_value=0.0)
         if not paid.empty
         else pd.Series(0.0, index=index)
