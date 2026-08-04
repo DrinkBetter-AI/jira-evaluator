@@ -19,6 +19,22 @@ from orders_client import PAID_PAYMENT_STATUSES
 
 CANCELED_STATUSES = frozenset({"canceled", "cancelled"})
 
+# Windows the wine and merchant tables offer: a month reads as what is selling
+# now, a year as what the shop actually sells.
+LOOKBACK_WINDOWS = (30, 90, 180, 360)
+
+# Sold alongside the wine and shipped with it, but nobody's bottle. Left in the
+# merchant tables, where it is real money, and out of the wine table, where it
+# would otherwise outrank every wine in the shop. Matched as handle prefixes, so
+# a second size or a re-slug (`ice-pack-large`) is still an add-on.
+NON_WINE_HANDLES = frozenset({"ice-pack"})
+
+UNATTRIBUTED = "Unattributed"
+# Where the add-ons' money goes in the merchant table: the platform sells them,
+# so crediting them to nobody would read as an attribution failure.
+PLATFORM = "VinoVoss (add-ons)"
+TOP_WINES_LIMIT = 15
+
 
 @dataclass(frozen=True)
 class WindowMetrics:
@@ -71,6 +87,21 @@ def single_currency(orders: pd.DataFrame) -> tuple[pd.DataFrame, str, list[str]]
     if not others:
         return orders, main, []
     return orders[orders["currency_code"].eq(main)], main, others
+
+
+def is_add_on(handle: str) -> bool:
+    """Whether a product handle names something shipped with wine, not wine."""
+    text = str(handle or "").strip().lower()
+    return any(
+        text == prefix or text.startswith(f"{prefix}-") for prefix in NON_WINE_HANDLES
+    )
+
+
+def main_currency_items(items: pd.DataFrame, currency: str) -> pd.DataFrame:
+    """Lines billed in ``currency``; money in two currencies cannot be added."""
+    if items.empty or not currency or "currency_code" not in items.columns:
+        return items
+    return items[items["currency_code"].eq(currency)]
 
 
 def _canceled(orders: pd.DataFrame) -> pd.Series:
@@ -176,10 +207,140 @@ def daily_orders(
     )[columns]
 
 
+def _standing(items: pd.DataFrame) -> pd.DataFrame:
+    """Line items from orders that were not cancelled.
+
+    Deliberately not limited to captured orders, unlike revenue: what sells is a
+    question about demand, and an order awaiting payment still shows what a
+    customer chose.
+    """
+    if items.empty:
+        return items
+    return items[~items["status"].isin(CANCELED_STATUSES)]
+
+
+def top_wines(
+    items: pd.DataFrame,
+    days: int,
+    now: _dt.datetime | None = None,
+    limit: int = TOP_WINES_LIMIT,
+) -> pd.DataFrame:
+    """The wines sold most often in the last ``days`` days, by bottles.
+
+    Bottles, not revenue: the question is which wine is popular, and ranking by
+    revenue would answer a different one and put the most expensive bottle on
+    top of a list of the most wanted.
+    """
+    columns = ["wine", "bottles", "orders", "revenue"]
+    end = now or _dt.datetime.now(_dt.timezone.utc)
+    window = _standing(_slice(items, end - _dt.timedelta(days=days), end))
+    if window.empty:
+        return pd.DataFrame(columns=columns)
+    wines = window[~window["product_handle"].map(is_add_on)]
+    if wines.empty:
+        return pd.DataFrame(columns=columns)
+    grouped = (
+        wines.groupby("title")
+        .agg(
+            bottles=("quantity", "sum"),
+            orders=("order_id", "nunique"),
+            revenue=("revenue", "sum"),
+        )
+        .reset_index()
+        .rename(columns={"title": "wine"})
+    )
+    grouped["revenue"] = grouped["revenue"].round(2)
+    return (
+        grouped.sort_values(["bottles", "revenue"], ascending=False)
+        .head(limit)
+        .reset_index(drop=True)[columns]
+    )
+
+
+def merchant_of(handle: str, prefixes: dict[str, str]) -> str:
+    """The merchant whose product handle starts with one of ``prefixes``.
+
+    Longest prefix first: one merchant's prefix can begin with another's, and the
+    shorter would then claim the longer's wine. A handle that matches nothing is
+    named as unattributed rather than guessed at - a merchant that has since
+    changed its prefix would otherwise have its history quietly credited
+    elsewhere.
+    """
+    text = str(handle or "").strip().lower()
+    if is_add_on(text):
+        return PLATFORM
+    for prefix in sorted(prefixes, key=len, reverse=True):
+        if text.startswith(f"{prefix}-"):
+            return prefixes[prefix]
+    return UNATTRIBUTED
+
+
+def merchant_breakdown(
+    items: pd.DataFrame,
+    prefixes: dict[str, str],
+    days: int,
+    now: _dt.datetime | None = None,
+) -> pd.DataFrame:
+    """Revenue, orders and cancellations per merchant.
+
+    Revenue is per line, since one order can carry wine from several merchants,
+    but the order counts are per order: an order split between two merchants is a
+    cancellation for both, because both had a sale fall through. Summing the
+    order columns therefore over-counts, which is why the table shows no total.
+    """
+    columns = ["merchant", "revenue", "orders", "canceled"]
+    end = now or _dt.datetime.now(_dt.timezone.utc)
+    window = _slice(items, end - _dt.timedelta(days=days), end)
+    if window.empty:
+        return pd.DataFrame(columns=columns)
+
+    window = window.assign(
+        merchant=[merchant_of(handle, prefixes) for handle in window["product_handle"]]
+    )
+    canceled = window["status"].isin(CANCELED_STATUSES)
+    paid = window["payment_status"].isin(PAID_PAYMENT_STATUSES) & ~canceled
+    # Net of refunds, as the revenue tile is: a paid order that was handed back
+    # is not earnings, and counting it would make the two disagree.
+    window = window.assign(kept=(window["revenue"] - window["refunded"]).clip(lower=0))
+    earned = (
+        window[paid].groupby("merchant")["kept"].sum().round(2)
+        if paid.any()
+        else pd.Series(dtype=float)
+    )
+    # Per merchant per order, so an order holding three of a merchant's wines is
+    # one order for them rather than three.
+    pairs = window[["merchant", "order_id"]].drop_duplicates()
+    order_counts = pairs.groupby("merchant")["order_id"].nunique()
+    canceled_counts = (
+        window[canceled][["merchant", "order_id"]]
+        .drop_duplicates()
+        .groupby("merchant")["order_id"]
+        .nunique()
+        if canceled.any()
+        else pd.Series(dtype=int)
+    )
+
+    table = pd.DataFrame({"merchant": sorted(pairs["merchant"].unique())})
+    table["revenue"] = table["merchant"].map(earned).fillna(0.0)
+    table["orders"] = table["merchant"].map(order_counts).fillna(0).astype(int)
+    table["canceled"] = table["merchant"].map(canceled_counts).fillna(0).astype(int)
+    return table.sort_values("revenue", ascending=False).reset_index(drop=True)[columns]
+
+
 __all__ = [
     "CANCELED_STATUSES",
+    "LOOKBACK_WINDOWS",
+    "NON_WINE_HANDLES",
+    "PLATFORM",
+    "TOP_WINES_LIMIT",
+    "UNATTRIBUTED",
     "WindowMetrics",
     "daily_orders",
+    "is_add_on",
+    "main_currency_items",
+    "merchant_breakdown",
+    "merchant_of",
     "single_currency",
+    "top_wines",
     "window_metrics",
 ]

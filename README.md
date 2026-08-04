@@ -46,6 +46,7 @@ profile when they are not all set.
 | `PR_STALE_IDLE_DAYS` | no | `7` | A PR untouched for longer than this counts as stale |
 | `MEDUSA_ADMIN_API_KEY` | no | — | Medusa secret API key (Settings → Secret API Keys in the CRM); without it the *Orders, Revenue & AOV* section says so and everything else works |
 | `MEDUSA_ADMIN_URL` | no | `https://merchants.vinovoss.com` | CRM admin API the order figures are read from |
+| `MEDUSA_STORE_PREFIX_ALIASES` | no | — | Retired product-handle prefixes mapped to a merchant, e.g. `oldprefix=Store Name`; without it that merchant's older sales show as *Unattributed* |
 | `DASHBOARD_PASSWORD` | no locally, **yes on Cloud Run** | — | Shared password visitors must enter; unset locally means no gate, unset on Cloud Run (`K_SERVICE` present) refuses to serve at all |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
@@ -133,6 +134,25 @@ past changes matters:
 
 ## Dashboard layout
 
+The page splits in two at the top: an **Engineering** tab holding everything below,
+and a **Business** tab holding the shop's numbers on their own. They answer a
+different question from ticket and PR health, and the sidebar scope and filters do
+not apply to them. The Business tab holds:
+
+- *Orders, Revenue & AOV* for the last 7 and 30 days, each against the window
+  before it.
+- *Best Sellers & Merchants* over a window of 30, 90, 180 or 360 days: the wines
+  selling most bottles, and revenue, orders and cancellations per merchant. A
+  merchant is read from the handle prefix on each order line (`store_prefix` in
+  the CRM), since the admin API exposes no order-to-store link to an API-key
+  caller; a line whose prefix matches no current merchant is listed as
+  *Unattributed* rather than credited to a guess, and
+  `MEDUSA_STORE_PREFIX_ALIASES` maps prefixes a merchant has since retired.
+
+The order book is read once for the whole year and then topped up: each refresh
+asks the CRM only for orders placed or changed since the last read, so a year of
+trading does not cost a year of rows every time the page loads.
+
 1. **Scope** (sidebar) — `Organization` (every assignee returned by the JQL), `Team`
    (multi-select pre-filled from `JIRA_TEAM_MEMBERS`), or `Individual` (one assignee).
 2. **Filters** (sidebar) — status, priority, minimum idle days, minimum ticket age,
@@ -194,7 +214,8 @@ past changes matters:
    estimate, no due date, never started, no priority, carried over 3+ sprints. Read
    only — it recommends what to close or send back to Backlog, it never writes.
    Backlog tickets are always included here regardless of *Include Backlogs*.
-11. **Orders, Revenue & AOV** — the shop beside the engineering, read live from the
+11. **Orders, Revenue & AOV** (*Business* tab) — the shop beside the engineering,
+   read live from the
    Medusa CRM: orders, captured revenue and average order value over the last 7 and
    30 days, each against the equivalent window before it, plus a per-day bar for the
    month. Revenue counts captured payments only and cancelled orders count towards
@@ -202,8 +223,14 @@ past changes matters:
    not divide into each other - the fourth tile names the gap (cancelled / placed
    but not yet paid). AOV is captured revenue over the paid orders that produced it,
    not over every order placed, which would understate the basket whenever payment
-   capture lags. Read-only: every call is a `GET /admin/orders`, cached for fifteen
-   minutes. Needs `MEDUSA_ADMIN_API_KEY`.
+   capture lags. Read-only: every call is a `GET /admin/orders`, refreshed at most
+   every fifteen minutes and incrementally after the first read. Needs
+   `MEDUSA_ADMIN_API_KEY`. Below it, **Best Sellers & Merchants** ranks wines by
+   bottles sold - not by revenue, which would answer which bottle is dearest
+   rather than which is wanted - and breaks revenue, orders and cancellations out
+   per merchant, over 30, 90, 180 or 360 days. Bottles count what customers chose,
+   so an order awaiting payment counts there while revenue still waits for
+   capture; ice packs are add-ons and are kept out of the wine ranking.
 12. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
    or unowned: no Jira key anywhere in the title, branch name or description
    (matched against every project key Jira exposes, plus `JIRA_EXTRA_PROJECT_KEYS`,

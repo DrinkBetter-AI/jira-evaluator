@@ -5,6 +5,7 @@ import hashlib
 import html
 import os
 import re
+import threading
 from urllib.parse import quote, unquote
 
 import numpy as np
@@ -3410,12 +3411,60 @@ def _render_new_and_triage(
         )
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def fetch_orders_cached(api_key: str, base_url: str, days: int) -> pd.DataFrame:
-    # Two windows plus the two before them, so a 30-day figure can be shown as
-    # up or down on the month before it in one fetch.
-    since = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)
-    return orders_client.fetch_orders(since, api_key, base_url)
+# A year of orders, so the wine and merchant tables can look back 360 days, plus
+# the days a 30-day figure needs to be shown as up or down on the month before.
+ORDER_BOOK_DAYS = 390
+ORDER_BOOK_TTL_SECONDS = 900
+
+
+@st.cache_resource(show_spinner=False)
+def _order_book_holder(base_url: str, days: int) -> dict:
+    """Where the order book lives between page loads.
+
+    A cache_resource holder rather than cache_data because the book is amended
+    rather than recomputed: cache_data would hand back a copy and every refresh
+    would re-read the year.
+    """
+    return {"book": None, "stale": False, "lock": threading.Lock()}
+
+
+def _expire_order_book() -> None:
+    """Make the next read of the order book go to the CRM.
+
+    The book itself is kept: what is dropped is its freshness, so the refresh
+    still only asks for what changed rather than re-reading the year.
+    """
+    try:
+        config = orders_client.load_medusa_env()
+    except orders_client.MedusaConfigError:
+        return
+    if config is None:
+        return
+    holder = _order_book_holder(config[1], ORDER_BOOK_DAYS)
+    with holder["lock"]:
+        holder["stale"] = True
+
+
+def _order_book(api_key: str, base_url: str) -> orders_client.OrderBook:
+    """The order book, read once and topped up from then on."""
+    holder = _order_book_holder(base_url, ORDER_BOOK_DAYS)
+    with holder["lock"]:
+        book = holder["book"]
+        if book is not None and not holder["stale"]:
+            age = (_dt.datetime.now(_dt.timezone.utc) - book.synced_at).total_seconds()
+            if age < ORDER_BOOK_TTL_SECONDS:
+                return book
+        book = orders_client.sync_order_book(
+            book, api_key, base_url, ORDER_BOOK_DAYS
+        )
+        holder["book"] = book
+        holder["stale"] = False
+        return book
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_store_prefixes_cached(api_key: str, base_url: str) -> dict[str, str]:
+    return orders_client.fetch_stores(api_key, base_url)
 
 
 def _money(amount: float, currency: str = "usd") -> str:
@@ -3423,15 +3472,16 @@ def _money(amount: float, currency: str = "usd") -> str:
     return f"{symbol}{amount:,.2f}" + (f" {currency.upper()}" if not symbol else "")
 
 
-def _render_orders() -> None:
-    """Orders, revenue and AOV for the last 7 and 30 days, straight from the CRM."""
-    st.subheader("Orders, Revenue & AOV")
+def _render_business() -> None:
+    """The shop's numbers: orders and revenue, what sold, and how each merchant did."""
     try:
         config = orders_client.load_medusa_env()
     except orders_client.MedusaConfigError as exc:
+        st.subheader("Orders, Revenue & AOV")
         st.caption(f"Order figures are misconfigured: {exc}")
         return
     if config is None:
+        st.subheader("Orders, Revenue & AOV")
         st.caption(
             "Order figures need a Medusa admin key. Create a secret key in the CRM "
             "(Settings -> Secret API Keys) and set MEDUSA_ADMIN_API_KEY."
@@ -3441,21 +3491,30 @@ def _render_orders() -> None:
     api_key, base_url = config
     try:
         with st.spinner("Reading the order book..."):
-            book = fetch_orders_cached(api_key, base_url, 61)
+            order_book = _order_book(api_key, base_url)
     except Exception as exc:  # noqa: BLE001
+        st.subheader("Orders, Revenue & AOV")
         st.warning(f"Could not read orders from the CRM: {str(exc)[:200]}")
         return
 
-    truncated = bool(book.attrs.get("truncated"))
+    _render_orders(order_book, base_url)
+    st.divider()
+    _render_wines_and_merchants(order_book, api_key, base_url)
+
+
+def _render_orders(order_book: orders_client.OrderBook, base_url: str) -> None:
+    """Orders, revenue and AOV for the last 7 and 30 days, straight from the CRM."""
+    st.subheader("Orders, Revenue & AOV")
+    truncated = order_book.truncated
     # Totals in different currencies cannot be added; the shop bills in one, and
     # if that ever stops being true the tiles report the main one and say so.
-    book, currency, other_currencies = orders.single_currency(book)
+    book, currency, other_currencies = orders.single_currency(order_book.orders)
     if truncated:
         st.warning(
             "The CRM has more orders in this period than one read can carry, so "
             "the oldest of them are missing. The figures below are a floor, not a "
-            "count: the comparison windows lose most, and the 30-day window too "
-            "if the shop now takes more than 4,000 orders a month."
+            "count: the oldest months go first, and the 7- and 30-day windows "
+            "only once the shop takes more orders in a year than one read carries."
         )
     week = orders.window_metrics(book, 7)
     month = orders.window_metrics(book, 30)
@@ -3491,7 +3550,9 @@ def _render_orders() -> None:
         "yet paid raises the order count and not the revenue; cancelled orders are "
         "excluded from both. Deltas compare with the equivalent window before it, "
         "and the daily bars break the day at UTC midnight. "
-        f"Read read-only from {base_url}, cached for 15 minutes."
+        f"Read read-only from {base_url}; the first read covers "
+        f"{ORDER_BOOK_DAYS} days and every refresh after it asks the CRM only for "
+        "orders placed or changed since the last one."
     )
     if other_currencies:
         st.caption(
@@ -3499,6 +3560,95 @@ def _render_orders() -> None:
             f"{', '.join(code.upper() for code in other_currencies)} are left out "
             "rather than added to a total in another currency."
         )
+
+
+def _render_wines_and_merchants(
+    order_book: orders_client.OrderBook, api_key: str, base_url: str
+) -> None:
+    """What sold, and how each merchant did, over a window the reader picks."""
+    st.subheader("Best Sellers & Merchants")
+    days = st.radio(
+        "Window",
+        options=list(orders.LOOKBACK_WINDOWS),
+        format_func=lambda value: f"{value} days",
+        index=0,
+        horizontal=True,
+        key="business_window_days",
+    )
+
+    # Same guard as the tiles: lines billed in another currency are set aside
+    # rather than added into a column labelled with this one.
+    _, currency, other_currencies = orders.single_currency(order_book.orders)
+    items = orders.main_currency_items(order_book.items, currency)
+    wines_tab, merchants_tab = st.tabs(["Top wines", "By merchant"])
+
+    with wines_tab:
+        wines = orders.top_wines(items, days)
+        if wines.empty:
+            st.info(f"No wine sold in the last {days} days.")
+        else:
+            st.dataframe(
+                wines.rename(
+                    columns={
+                        "wine": "Wine",
+                        "bottles": "Bottles",
+                        "orders": "Orders",
+                        "revenue": "Revenue",
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+            st.caption(
+                f"Top {orders.TOP_WINES_LIMIT} by bottles sold in the last {days} "
+                "days, cancelled orders excluded. Bottles count what customers "
+                "chose, so an order still awaiting payment counts; revenue is the "
+                "line's own price, which is why it does not add up to the captured "
+                "revenue above. Ice packs are left out."
+            )
+
+    with merchants_tab:
+        try:
+            prefixes = fetch_store_prefixes_cached(api_key, base_url)
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Could not read the merchant list: {str(exc)[:200]}")
+            return
+        table = orders.merchant_breakdown(items, prefixes, days)
+        if table.empty:
+            st.info(f"No orders in the last {days} days.")
+            return
+        st.dataframe(
+            table.rename(
+                columns={
+                    "merchant": "Merchant",
+                    "revenue": f"Revenue ({currency.upper()})" if currency else "Revenue",
+                    "orders": "Orders",
+                    "canceled": "Cancelled",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+        unattributed = table[table["merchant"].eq(orders.UNATTRIBUTED)]
+        st.caption(
+            "A merchant is read from the product handle on each line, so an order "
+            "split between two merchants counts once for each and the order "
+            "columns do not sum to the shop's totals. Revenue counts captured "
+            "lines only, at the price on the line, less a share of anything the "
+            "order was refunded."
+        )
+        if not unattributed.empty:
+            st.caption(
+                "'Unattributed' is wine whose handle matches no current merchant "
+                "prefix, usually a shop that has since been renamed; it is shown "
+                "rather than credited to a guess."
+            )
+        if other_currencies:
+            st.caption(
+                f"Both tables cover {currency.upper()} orders only; "
+                f"{', '.join(code.upper() for code in other_currencies)} is left "
+                "out rather than added to a total in another currency."
+            )
 
 
 def _render_resolved_summary(
@@ -4023,6 +4173,9 @@ def main() -> None:
 
     if refresh_clicked:
         st.cache_data.clear()
+        # The order book is a cache_resource, which cache_data.clear() cannot
+        # reach, so Refresh would otherwise leave the shop's figures alone.
+        _expire_order_book()
 
     jql = JQL
     max_results = MAX_RESULTS
@@ -4167,388 +4320,393 @@ def main() -> None:
         except Exception:  # noqa: BLE001
             return None
 
-    _render_resolved_summary(
-        _resolved_count(7),
-        _resolved_count(30),
-        _resolved(30),
-        pr_count_7,
-        pr_count_30,
-        merged_prs,
-        github_ready,
-        github_error,
-    )
-    st.divider()
+    engineering_tab, business_tab = st.tabs(["Engineering", "Business"])
 
-    _render_orders()
-    st.divider()
+    # The shop's numbers answer a different question from the rest of the page,
+    # and everyone scrolling for an engineering signal was scrolling past them.
+    with business_tab:
+        _render_business()
 
-    _render_new_and_triage(
-        _created_count(1),
-        _created_count(7),
-        _triage_stuck_count(),
-        _created_list(7),
-        _triage_stuck_list(),
-        TRIAGE_STUCK_HOURS,
-    )
-    st.divider()
-
-    # "Unassigned" is Jira's placeholder, not a colleague: offering it here would
-    # inflate the head-count and let someone "focus" on a person who does not
-    # exist. Ownerless work is reached through the cleanup queue and the
-    # unassigned KPI instead.
-    assignees = sorted(
-        name
-        for name in df["assignee"].dropna().unique().tolist()
-        if str(name).strip().lower() not in _NO_OWNER_NAMES
-    )
-    statuses = sorted(df["status"].dropna().unique().tolist())
-    priorities = sorted(df["priority"].dropna().unique().tolist())
-
-    with st.sidebar:
-        st.header("Scope")
-        scope = st.radio(
-            "View",
-            options=[SCOPE_ORG, SCOPE_TEAM, SCOPE_INDIVIDUAL],
-            help=(
-                "Organization shows every assignee in the JQL scope; "
-                "Team pre-selects the configured team members; "
-                "Individual focuses on a single assignee."
-            ),
+    with engineering_tab:
+        _render_resolved_summary(
+            _resolved_count(7),
+            _resolved_count(30),
+            _resolved(30),
+            pr_count_7,
+            pr_count_30,
+            merged_prs,
+            github_ready,
+            github_error,
         )
-        selected_assignees = _resolve_scope_assignees(scope, assignees)
-        st.session_state[_SCOPE_ASSIGNEES_KEY] = (
-            None if selected_assignees is None else set(selected_assignees)
+        st.divider()
+
+        _render_new_and_triage(
+            _created_count(1),
+            _created_count(7),
+            _triage_stuck_count(),
+            _created_list(7),
+            _triage_stuck_list(),
+            TRIAGE_STUCK_HOURS,
         )
+        st.divider()
 
-        st.header("Filters")
-        selected_statuses = st.multiselect("Status", options=statuses, default=[])
-        selected_priorities = st.multiselect("Priority", options=priorities, default=[])
-        min_idle = st.slider("Min idle days", min_value=0, max_value=180, value=0)
-        min_age = st.slider("Min ticket age", min_value=0, max_value=365, value=0)
-        include_backlogs = st.checkbox("Include Backlogs", value=False)
-        color_by = st.radio("Bubble color", options=["priority", "assignee"], horizontal=True)
-
-        st.header("Jira writes")
-        # Reading the dashboard is the common case; changing Jira is a decision.
-        # Off on every page load so a reporting session cannot edit by accident,
-        # and re-armed deliberately when the reviewer means it.
-        allow_writes = st.toggle(
-            "Allow Jira edits",
-            value=False,
-            help=(
-                "Off: the dashboard only reads Jira. On: closures, transitions, "
-                "assignee and sprint edits can be applied."
-            ),
+        # "Unassigned" is Jira's placeholder, not a colleague: offering it here would
+        # inflate the head-count and let someone "focus" on a person who does not
+        # exist. Ownerless work is reached through the cleanup queue and the
+        # unassigned KPI instead.
+        assignees = sorted(
+            name
+            for name in df["assignee"].dropna().unique().tolist()
+            if str(name).strip().lower() not in _NO_OWNER_NAMES
         )
-        write_access.set_writes_enabled(allow_writes)
-        if allow_writes:
-            st.warning("Edits armed - Apply buttons will change Jira.")
-        else:
-            st.caption("Read-only. Nothing here can change Jira.")
+        statuses = sorted(df["status"].dropna().unique().tolist())
+        priorities = sorted(df["priority"].dropna().unique().tolist())
 
-    filtered = df.copy()
-    if selected_statuses:
-        filtered = filtered[filtered["status"].isin(selected_statuses)]
-    if selected_priorities:
-        filtered = filtered[filtered["priority"].isin(selected_priorities)]
-
-    filtered = filtered[(filtered["idle_days"] >= min_idle) & (filtered["ticket_age_days"] >= min_age)]
-
-    # Ownerless work belongs to nobody, so no assignee scope can contain it; the
-    # cleanup section keeps this pre-scope frame to feed its unassigned queue.
-    unscoped = filtered
-    if selected_assignees is not None:
-        filtered = filtered[filtered["assignee"].isin(selected_assignees)]
-
-    _render_metrics(
-        filtered,
-        include_backlogs=include_backlogs,
-        unassigned_source=unscoped if selected_assignees is not None else None,
-    )
-
-    st.divider()
-    _render_mix(_metrics_df(filtered, include_backlogs))
-
-    st.divider()
-    _render_team_overview(_metrics_df(filtered, include_backlogs))
-
-    st.divider()
-    _render_epics(_metrics_df(filtered, include_backlogs), organization_source=df)
-
-    st.divider()
-    # Backlog-inclusive on purpose: the backlog is what this section clears out.
-    _render_cleanup(filtered, unassigned_source=unscoped)
-
-    st.divider()
-    _render_scope_breakdown(filtered, scope=scope, include_backlogs=include_backlogs)
-
-    st.divider()
-    _render_pr_section(open_prs, github_ready, github_error, open_count_exact)
-
-    st.divider()
-    # Every ticket, not the scoped slice: a PR belongs to the org whichever team
-    # or person the dashboard is currently looking at.
-    _render_pr_hygiene(
-        open_prs, github_ready, github_error, _known_project_keys(df), tickets=df
-    )
-
-    st.divider()
-    # Backlog-inclusive on purpose: a backlog ticket is the best kind to hand off,
-    # and it is where badly written tickets accumulate unseen.
-    _render_ticket_quality(filtered)
-
-    st.divider()
-    _render_priority_queue(filtered, include_backlogs=include_backlogs)
-
-    st.divider()
-    _render_estimate_policy(filtered)
-
-    st.divider()
-    _render_stale_cleanup(filtered)
-
-    restore_requested = bool(st.session_state.pop("restore_sprint_ticket_table", False))
-    bubble_chart_version = int(st.session_state.get("bubble_chart_version", 0))
-    if restore_requested:
-        bubble_chart_version += 1
-        st.session_state["bubble_chart_version"] = bubble_chart_version
-
-    agg_priority = st.checkbox(
-        "Aggregate Priorities (Normal / High / Urgent)",
-        value=False,
-        help="Buckets: Normal = None/Low/Normal · High = High · Urgent = Highest/Urgent",
-    )
-    selected_key = _render_bubble_chart(
-        filtered,
-        color_by=color_by,
-        agg_priority=agg_priority,
-        chart_key=f"bubble_chart_{bubble_chart_version}",
-    )
-
-    if restore_requested:
-        active_sprint_ticket_key = None
-    else:
-        active_sprint_ticket_key = selected_key if selected_key and selected_key in filtered["key"].values else None
-
-    st.divider()
-    st.subheader("Sprint Planner")
-    _render_sprint_plan(df)
-
-    st.divider()
-    st.subheader("Sprint Capacity")
-    _render_sprint_capacity(
-        filtered,
-        status_source_df=filtered,
-        selected_ticket_key=active_sprint_ticket_key,
-    )
-
-    st.divider()
-    st.subheader("Suggested First Action")
-
-    PRIORITY_OPTIONS = ["Highest", "High", "Normal", "Low", "Lowest"]
-    action_type = st.selectbox(
-        "Action",
-        options=["Set None-priority tickets", "Change status"],
-        index=0,
-        help="Default action keeps the first cleanup flow: None priority -> Normal.",
-    )
-
-    # Bulk writes must not reach tickets the user has hidden with Include Backlogs.
-    action_df = _metrics_df(filtered, include_backlogs)
-    status_options = sorted(action_df["status"].dropna().astype(str).unique().tolist())
-    normalized_priority = action_df["priority"].fillna("").astype(str).str.strip().str.lower()
-    none_priority_keys = sorted(action_df[normalized_priority.isin(["", "none"])]["key"].tolist())
-
-    with st.container(border=True):
-        if action_type == "Set None-priority tickets":
-            st.markdown("**Detected tickets without priority**")
-            st.caption(
-                f"{len(none_priority_keys)} ticket(s) in the current view have no priority set."
+        with st.sidebar:
+            st.header("Scope")
+            scope = st.radio(
+                "View",
+                options=[SCOPE_ORG, SCOPE_TEAM, SCOPE_INDIVIDUAL],
+                help=(
+                    "Organization shows every assignee in the JQL scope; "
+                    "Team pre-selects the configured team members; "
+                    "Individual focuses on a single assignee."
+                ),
             )
-            if none_priority_keys:
-                preview = ", ".join(none_priority_keys[:15])
-                suffix = " ..." if len(none_priority_keys) > 15 else ""
-                st.caption(f"Sample: {preview}{suffix}")
-
-            default_keys = none_priority_keys[:BULK_ACTION_DEFAULT_LIMIT]
-            if len(none_priority_keys) > len(default_keys):
-                st.caption(
-                    f"Only the first {BULK_ACTION_DEFAULT_LIMIT} are pre-selected; "
-                    "add more explicitly if you mean to update them."
-                )
-            selected_keys = st.multiselect(
-                "Tickets to update",
-                options=none_priority_keys,
-                default=default_keys,
-                help="Remove any tickets you do not want to update.",
+            selected_assignees = _resolve_scope_assignees(scope, assignees)
+            st.session_state[_SCOPE_ASSIGNEES_KEY] = (
+                None if selected_assignees is None else set(selected_assignees)
             )
 
-            target_priority = st.selectbox(
-                "Suggested priority",
-                options=PRIORITY_OPTIONS,
-                index=2,
-                help="Normal is selected by default as the first cleanup action.",
+            st.header("Filters")
+            selected_statuses = st.multiselect("Status", options=statuses, default=[])
+            selected_priorities = st.multiselect("Priority", options=priorities, default=[])
+            min_idle = st.slider("Min idle days", min_value=0, max_value=180, value=0)
+            min_age = st.slider("Min ticket age", min_value=0, max_value=365, value=0)
+            include_backlogs = st.checkbox("Include Backlogs", value=False)
+            color_by = st.radio("Bubble color", options=["priority", "assignee"], horizontal=True)
+
+            st.header("Jira writes")
+            # Reading the dashboard is the common case; changing Jira is a decision.
+            # Off on every page load so a reporting session cannot edit by accident,
+            # and re-armed deliberately when the reviewer means it.
+            allow_writes = st.toggle(
+                "Allow Jira edits",
+                value=False,
+                help=(
+                    "Off: the dashboard only reads Jira. On: closures, transitions, "
+                    "assignee and sprint edits can be applied."
+                ),
             )
-            target_label = f"priority '{target_priority}'"
-        else:
-            st.markdown("**Change ticket status**")
-            if not status_options:
-                st.info("No statuses available in the current filtered view.")
-                source_status = None
-                target_status = None
-                selected_keys = []
+            write_access.set_writes_enabled(allow_writes)
+            if allow_writes:
+                st.warning("Edits armed - Apply buttons will change Jira.")
             else:
-                source_status = st.selectbox("From status", options=status_options, index=0)
-                to_options = [s for s in status_options if s != source_status] or status_options
-                target_status = st.selectbox("To status", options=to_options, index=0)
+                st.caption("Read-only. Nothing here can change Jira.")
 
-                source_keys = sorted(action_df[action_df["status"] == source_status]["key"].tolist())
-                default_source_keys = source_keys[:BULK_ACTION_DEFAULT_LIMIT]
-                if len(source_keys) > len(default_source_keys):
+        filtered = df.copy()
+        if selected_statuses:
+            filtered = filtered[filtered["status"].isin(selected_statuses)]
+        if selected_priorities:
+            filtered = filtered[filtered["priority"].isin(selected_priorities)]
+
+        filtered = filtered[(filtered["idle_days"] >= min_idle) & (filtered["ticket_age_days"] >= min_age)]
+
+        # Ownerless work belongs to nobody, so no assignee scope can contain it; the
+        # cleanup section keeps this pre-scope frame to feed its unassigned queue.
+        unscoped = filtered
+        if selected_assignees is not None:
+            filtered = filtered[filtered["assignee"].isin(selected_assignees)]
+
+        _render_metrics(
+            filtered,
+            include_backlogs=include_backlogs,
+            unassigned_source=unscoped if selected_assignees is not None else None,
+        )
+
+        st.divider()
+        _render_mix(_metrics_df(filtered, include_backlogs))
+
+        st.divider()
+        _render_team_overview(_metrics_df(filtered, include_backlogs))
+
+        st.divider()
+        _render_epics(_metrics_df(filtered, include_backlogs), organization_source=df)
+
+        st.divider()
+        # Backlog-inclusive on purpose: the backlog is what this section clears out.
+        _render_cleanup(filtered, unassigned_source=unscoped)
+
+        st.divider()
+        _render_scope_breakdown(filtered, scope=scope, include_backlogs=include_backlogs)
+
+        st.divider()
+        _render_pr_section(open_prs, github_ready, github_error, open_count_exact)
+
+        st.divider()
+        # Every ticket, not the scoped slice: a PR belongs to the org whichever team
+        # or person the dashboard is currently looking at.
+        _render_pr_hygiene(
+            open_prs, github_ready, github_error, _known_project_keys(df), tickets=df
+        )
+
+        st.divider()
+        # Backlog-inclusive on purpose: a backlog ticket is the best kind to hand off,
+        # and it is where badly written tickets accumulate unseen.
+        _render_ticket_quality(filtered)
+
+        st.divider()
+        _render_priority_queue(filtered, include_backlogs=include_backlogs)
+
+        st.divider()
+        _render_estimate_policy(filtered)
+
+        st.divider()
+        _render_stale_cleanup(filtered)
+
+        restore_requested = bool(st.session_state.pop("restore_sprint_ticket_table", False))
+        bubble_chart_version = int(st.session_state.get("bubble_chart_version", 0))
+        if restore_requested:
+            bubble_chart_version += 1
+            st.session_state["bubble_chart_version"] = bubble_chart_version
+
+        agg_priority = st.checkbox(
+            "Aggregate Priorities (Normal / High / Urgent)",
+            value=False,
+            help="Buckets: Normal = None/Low/Normal · High = High · Urgent = Highest/Urgent",
+        )
+        selected_key = _render_bubble_chart(
+            filtered,
+            color_by=color_by,
+            agg_priority=agg_priority,
+            chart_key=f"bubble_chart_{bubble_chart_version}",
+        )
+
+        if restore_requested:
+            active_sprint_ticket_key = None
+        else:
+            active_sprint_ticket_key = selected_key if selected_key and selected_key in filtered["key"].values else None
+
+        st.divider()
+        st.subheader("Sprint Planner")
+        _render_sprint_plan(df)
+
+        st.divider()
+        st.subheader("Sprint Capacity")
+        _render_sprint_capacity(
+            filtered,
+            status_source_df=filtered,
+            selected_ticket_key=active_sprint_ticket_key,
+        )
+
+        st.divider()
+        st.subheader("Suggested First Action")
+
+        PRIORITY_OPTIONS = ["Highest", "High", "Normal", "Low", "Lowest"]
+        action_type = st.selectbox(
+            "Action",
+            options=["Set None-priority tickets", "Change status"],
+            index=0,
+            help="Default action keeps the first cleanup flow: None priority -> Normal.",
+        )
+
+        # Bulk writes must not reach tickets the user has hidden with Include Backlogs.
+        action_df = _metrics_df(filtered, include_backlogs)
+        status_options = sorted(action_df["status"].dropna().astype(str).unique().tolist())
+        normalized_priority = action_df["priority"].fillna("").astype(str).str.strip().str.lower()
+        none_priority_keys = sorted(action_df[normalized_priority.isin(["", "none"])]["key"].tolist())
+
+        with st.container(border=True):
+            if action_type == "Set None-priority tickets":
+                st.markdown("**Detected tickets without priority**")
+                st.caption(
+                    f"{len(none_priority_keys)} ticket(s) in the current view have no priority set."
+                )
+                if none_priority_keys:
+                    preview = ", ".join(none_priority_keys[:15])
+                    suffix = " ..." if len(none_priority_keys) > 15 else ""
+                    st.caption(f"Sample: {preview}{suffix}")
+
+                default_keys = none_priority_keys[:BULK_ACTION_DEFAULT_LIMIT]
+                if len(none_priority_keys) > len(default_keys):
                     st.caption(
                         f"Only the first {BULK_ACTION_DEFAULT_LIMIT} are pre-selected; "
                         "add more explicitly if you mean to update them."
                     )
                 selected_keys = st.multiselect(
                     "Tickets to update",
-                    options=source_keys,
-                    default=default_source_keys,
-                    help="Only tickets currently in the selected source status are listed.",
+                    options=none_priority_keys,
+                    default=default_keys,
+                    help="Remove any tickets you do not want to update.",
                 )
-                target_label = f"status '{source_status}' -> '{target_status}'"
 
-        apply_suggestion = st.button(
-            f"Apply to {len(selected_keys)} ticket(s)",
-            disabled=(not selected_keys) or (not write_access.writes_enabled()),
-            type="primary",
-        )
-
-    if apply_suggestion and selected_keys:
-        client = JiraClient.resolve(
-            creds_path=CREDS_PATH,
-            profile_name=PROFILE_NAME,
-        )
-        with st.spinner(f"Updating {len(selected_keys)} tickets..."):
-            if action_type == "Set None-priority tickets":
-                succeeded, failed, operation = _apply_action_with_audit(
-                    client=client,
-                    action_type="priority",
-                    selected_keys=selected_keys,
-                    target=target_priority,
+                target_priority = st.selectbox(
+                    "Suggested priority",
+                    options=PRIORITY_OPTIONS,
+                    index=2,
+                    help="Normal is selected by default as the first cleanup action.",
                 )
+                target_label = f"priority '{target_priority}'"
             else:
-                succeeded, failed, operation = _apply_action_with_audit(
-                    client=client,
-                    action_type="status",
-                    selected_keys=selected_keys,
-                    target=target_status,
-                    source_status=source_status,
-                )
+                st.markdown("**Change ticket status**")
+                if not status_options:
+                    st.info("No statuses available in the current filtered view.")
+                    source_status = None
+                    target_status = None
+                    selected_keys = []
+                else:
+                    source_status = st.selectbox("From status", options=status_options, index=0)
+                    to_options = [s for s in status_options if s != source_status] or status_options
+                    target_status = st.selectbox("To status", options=to_options, index=0)
 
-        if succeeded:
-            st.success(
-                f"Updated {len(succeeded)} ticket(s) to {target_label}. Operation ID: {operation['operation_id']}"
+                    source_keys = sorted(action_df[action_df["status"] == source_status]["key"].tolist())
+                    default_source_keys = source_keys[:BULK_ACTION_DEFAULT_LIMIT]
+                    if len(source_keys) > len(default_source_keys):
+                        st.caption(
+                            f"Only the first {BULK_ACTION_DEFAULT_LIMIT} are pre-selected; "
+                            "add more explicitly if you mean to update them."
+                        )
+                    selected_keys = st.multiselect(
+                        "Tickets to update",
+                        options=source_keys,
+                        default=default_source_keys,
+                        help="Only tickets currently in the selected source status are listed.",
+                    )
+                    target_label = f"status '{source_status}' -> '{target_status}'"
+
+            apply_suggestion = st.button(
+                f"Apply to {len(selected_keys)} ticket(s)",
+                disabled=(not selected_keys) or (not write_access.writes_enabled()),
+                type="primary",
             )
-        if failed:
-            for key, err in failed.items():
-                st.error(f"{key}: {err}")
 
-        st.cache_data.clear()
-        st.rerun()
+        if apply_suggestion and selected_keys:
+            client = JiraClient.resolve(
+                creds_path=CREDS_PATH,
+                profile_name=PROFILE_NAME,
+            )
+            with st.spinner(f"Updating {len(selected_keys)} tickets..."):
+                if action_type == "Set None-priority tickets":
+                    succeeded, failed, operation = _apply_action_with_audit(
+                        client=client,
+                        action_type="priority",
+                        selected_keys=selected_keys,
+                        target=target_priority,
+                    )
+                else:
+                    succeeded, failed, operation = _apply_action_with_audit(
+                        client=client,
+                        action_type="status",
+                        selected_keys=selected_keys,
+                        target=target_status,
+                        source_status=source_status,
+                    )
 
-    st.divider()
-    st.subheader("Change History and Revert")
-    operations = load_operations(limit=30)
-    if not operations:
-        st.info("No write operations have been logged yet.")
-    else:
-        st.dataframe(pd.DataFrame(summarize_operations(operations)), width="stretch")
+            if succeeded:
+                st.success(
+                    f"Updated {len(succeeded)} ticket(s) to {target_label}. Operation ID: {operation['operation_id']}"
+                )
+            if failed:
+                for key, err in failed.items():
+                    st.error(f"{key}: {err}")
 
-        op_options = {
-            (
-                f"{op.get('created_at', '')} | {op.get('action_type', '')} | "
-                f"{op.get('target', '')} | success={op.get('success_count', 0)} | "
-                f"id={str(op.get('operation_id', ''))[:8]}"
-            ): op
-            for op in operations
-            if op.get("success_count", 0) > 0
-        }
+            st.cache_data.clear()
+            st.rerun()
 
-        if not op_options:
-            st.caption("No successful operation available for revert.")
+        st.divider()
+        st.subheader("Change History and Revert")
+        operations = load_operations(limit=30)
+        if not operations:
+            st.info("No write operations have been logged yet.")
         else:
-            selected_label = st.selectbox(
-                "Select operation to revert",
-                options=list(op_options.keys()),
-            )
-            selected_operation = op_options[selected_label]
-            confirm_revert = st.checkbox("I understand revert may partially fail due to Jira workflow rules.")
+            st.dataframe(pd.DataFrame(summarize_operations(operations)), width="stretch")
 
-            revert_clicked = st.button(
-                "Revert selected operation",
-                disabled=(not confirm_revert) or (not write_access.writes_enabled()),
-            )
+            op_options = {
+                (
+                    f"{op.get('created_at', '')} | {op.get('action_type', '')} | "
+                    f"{op.get('target', '')} | success={op.get('success_count', 0)} | "
+                    f"id={str(op.get('operation_id', ''))[:8]}"
+                ): op
+                for op in operations
+                if op.get("success_count", 0) > 0
+            }
 
-            if revert_clicked:
-                client = JiraClient.resolve(
-                    creds_path=CREDS_PATH,
-                    profile_name=PROFILE_NAME,
+            if not op_options:
+                st.caption("No successful operation available for revert.")
+            else:
+                selected_label = st.selectbox(
+                    "Select operation to revert",
+                    options=list(op_options.keys()),
+                )
+                selected_operation = op_options[selected_label]
+                confirm_revert = st.checkbox("I understand revert may partially fail due to Jira workflow rules.")
+
+                revert_clicked = st.button(
+                    "Revert selected operation",
+                    disabled=(not confirm_revert) or (not write_access.writes_enabled()),
                 )
 
-                revert_succeeded: list[str] = []
-                revert_failed: dict[str, str] = {}
-                parent_id = selected_operation.get("operation_id")
-                successful_items = [it for it in selected_operation.get("items", []) if it.get("success")]
+                if revert_clicked:
+                    client = JiraClient.resolve(
+                        creds_path=CREDS_PATH,
+                        profile_name=PROFILE_NAME,
+                    )
 
-                with st.spinner(f"Reverting {len(successful_items)} ticket(s)..."):
-                    for item in successful_items:
-                        key = str(item.get("key", ""))
-                        before = item.get("before") or {}
-                        try:
-                            if selected_operation.get("action_type") == "priority":
-                                original_priority_id = before.get("priority_id")
-                                if not original_priority_id:
-                                    raise RuntimeError("Original priority id missing in audit record.")
+                    revert_succeeded: list[str] = []
+                    revert_failed: dict[str, str] = {}
+                    parent_id = selected_operation.get("operation_id")
+                    successful_items = [it for it in selected_operation.get("items", []) if it.get("success")]
 
-                                rev_succeeded, rev_failed, rev_op = _apply_action_with_audit(
-                                    client=client,
-                                    action_type="revert_priority",
-                                    selected_keys=[key],
-                                    target=str(original_priority_id),
-                                    parent_operation_id=str(parent_id),
-                                )
-                            elif selected_operation.get("action_type") == "status":
-                                original_status = before.get("status")
-                                if not original_status:
-                                    raise RuntimeError("Original status missing in audit record.")
+                    with st.spinner(f"Reverting {len(successful_items)} ticket(s)..."):
+                        for item in successful_items:
+                            key = str(item.get("key", ""))
+                            before = item.get("before") or {}
+                            try:
+                                if selected_operation.get("action_type") == "priority":
+                                    original_priority_id = before.get("priority_id")
+                                    if not original_priority_id:
+                                        raise RuntimeError("Original priority id missing in audit record.")
 
-                                rev_succeeded, rev_failed, rev_op = _apply_action_with_audit(
-                                    client=client,
-                                    action_type="revert_status",
-                                    selected_keys=[key],
-                                    target=str(original_status),
-                                    parent_operation_id=str(parent_id),
-                                )
-                            else:
-                                raise RuntimeError("Selected operation type is not revertible by this tool.")
+                                    rev_succeeded, rev_failed, rev_op = _apply_action_with_audit(
+                                        client=client,
+                                        action_type="revert_priority",
+                                        selected_keys=[key],
+                                        target=str(original_priority_id),
+                                        parent_operation_id=str(parent_id),
+                                    )
+                                elif selected_operation.get("action_type") == "status":
+                                    original_status = before.get("status")
+                                    if not original_status:
+                                        raise RuntimeError("Original status missing in audit record.")
 
-                            revert_succeeded.extend(rev_succeeded)
-                            revert_failed.update(rev_failed)
-                        except Exception as exc:  # noqa: BLE001
-                            revert_failed[key] = str(exc)
+                                    rev_succeeded, rev_failed, rev_op = _apply_action_with_audit(
+                                        client=client,
+                                        action_type="revert_status",
+                                        selected_keys=[key],
+                                        target=str(original_status),
+                                        parent_operation_id=str(parent_id),
+                                    )
+                                else:
+                                    raise RuntimeError("Selected operation type is not revertible by this tool.")
 
-                if revert_succeeded:
-                    st.success(f"Reverted {len(revert_succeeded)} ticket(s).")
-                if revert_failed:
-                    for key, err in revert_failed.items():
-                        st.error(f"Revert failed for {key}: {err}")
+                                revert_succeeded.extend(rev_succeeded)
+                                revert_failed.update(rev_failed)
+                            except Exception as exc:  # noqa: BLE001
+                                revert_failed[key] = str(exc)
 
-                st.cache_data.clear()
-                st.rerun()
+                    if revert_succeeded:
+                        st.success(f"Reverted {len(revert_succeeded)} ticket(s).")
+                    if revert_failed:
+                        for key, err in revert_failed.items():
+                            st.error(f"Revert failed for {key}: {err}")
 
-    st.caption(
-        "Team member filter uses Jira assignee display names from fetched data. "
-        "For stricter JQL filtering, use assignee account IDs in JQL."
-    )
+                    st.cache_data.clear()
+                    st.rerun()
+
+        st.caption(
+            "Team member filter uses Jira assignee display names from fetched data. "
+            "For stricter JQL filtering, use assignee account IDs in JQL."
+        )
 
 
 if __name__ == "__main__":

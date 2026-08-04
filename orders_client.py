@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import datetime as _dt
 import os
+from dataclasses import dataclass
 
 import pandas as pd
 import requests
@@ -24,15 +25,40 @@ _KEY_ENV_VARS = ("MEDUSA_ADMIN_API_KEY", "MEDUSA_API_KEY")
 
 # One page per hundred orders keeps a thirty-day window to two or three calls.
 _PAGE_SIZE = 100
-# A month of a growing shop, with headroom; a runaway loop would otherwise walk
-# the whole order history a hundred rows at a time.
-_MAX_PAGES = 40
+# The first read covers a year, which is ~1,500 orders today, so this is a guard
+# against a runaway loop rather than a budget: it has to stay well clear of the
+# real volume, because everything past it is silently the oldest orders missing.
+_MAX_PAGES = 200
 
 # Medusa returns the order's line items whatever `fields` asks for, so the list
 # is about the columns the metrics need, not about the response size.
 _ORDER_FIELDS = (
-    "id,display_id,created_at,status,payment_status,total,refunded_total,currency_code"
+    "id,display_id,created_at,updated_at,status,payment_status,total,"
+    "refunded_total,currency_code"
 )
+
+# Re-reading a year of orders on every refresh costs seconds and gets slower
+# every month the shop trades. Instead the book is kept and topped up: Medusa can
+# filter on `updated_at`, which moves both when an order is placed and when it is
+# later paid or cancelled, so one incremental read catches new sales and
+# corrections to old ones alike. The overlap covers clock skew between this
+# process and the CRM.
+_SYNC_OVERLAP = _dt.timedelta(minutes=10)
+
+# Line-item columns: what was bought, how many, and for how much.
+ITEM_COLUMNS = [
+    "order_id",
+    "item_id",
+    "created_at",
+    "status",
+    "payment_status",
+    "currency_code",
+    "title",
+    "product_handle",
+    "quantity",
+    "revenue",
+    "refunded",
+]
 
 # An order that was paid, including one since refunded: the refund is netted off
 # the total rather than the order being struck out, so a wholly refunded sale
@@ -48,12 +74,29 @@ COLUMNS = [
     "id",
     "display_id",
     "created_at",
+    "updated_at",
     "status",
     "payment_status",
     "total",
     "refunded_total",
     "currency_code",
 ]
+
+
+@dataclass(frozen=True)
+class OrderBook:
+    """Orders and their line items, plus when they were last read.
+
+    Two frames rather than one: the tiles count orders, the wine and merchant
+    tables count what was in them, and a shared order may hold wine from more
+    than one merchant.
+    """
+
+    orders: pd.DataFrame
+    items: pd.DataFrame
+    window_days: int
+    synced_at: _dt.datetime
+    truncated: bool
 
 
 class MedusaConfigError(RuntimeError):
@@ -86,12 +129,10 @@ def _auth_header(api_key: str) -> dict[str, str]:
     return {"Authorization": f"Basic {token}", "Accept": "application/json"}
 
 
-def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFrame:
-    """Every order created at or after ``since``, oldest first.
-
-    Filtered server-side: asking for a month of a shop that has years of history
-    behind it should cost a month of rows.
-    """
+def _fetch_pages(
+    api_key: str, base_url: str, filters: dict[str, str]
+) -> tuple[list[dict], bool]:
+    """Every order matching ``filters``, newest first, and whether paging ran out."""
     headers = _auth_header(api_key)
     url = f"{base_url}/admin/orders"
     rows: list[dict] = []
@@ -106,11 +147,11 @@ def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFra
                 # Newest first, so a shop that outgrows the page ceiling loses the
                 # oldest comparison window rather than the week being headlined.
                 "order": "-created_at",
-                "created_at[$gte]": since.astimezone(_dt.timezone.utc).isoformat(),
                 "fields": _ORDER_FIELDS,
+                **filters,
             },
             headers=headers,
-            timeout=30,
+            timeout=60,
         )
         if response.status_code in (401, 403):
             raise MedusaConfigError(
@@ -133,7 +174,10 @@ def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFra
         if not page or exhausted:
             break
         truncated = page_number == _MAX_PAGES - 1
+    return rows, truncated
 
+
+def _order_frame(rows: list[dict], base_url: str) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=COLUMNS)
 
@@ -155,23 +199,242 @@ def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFra
         if column not in frame.columns:
             frame[column] = None
     frame = frame[COLUMNS].copy()
-    frame["created_at"] = pd.to_datetime(frame["created_at"], utc=True, errors="coerce")
+    for column in ("created_at", "updated_at"):
+        frame[column] = pd.to_datetime(frame[column], utc=True, errors="coerce")
     for column in ("total", "refunded_total"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
     for column in ("status", "payment_status", "currency_code"):
         frame[column] = frame[column].fillna("").astype(str).str.strip().str.lower()
-    frame = frame.sort_values("created_at").reset_index(drop=True)
+    return frame.sort_values("created_at").reset_index(drop=True)
+
+
+def _with_refunds(lines: list[dict], order: dict) -> list[dict]:
+    """Spread an order's refund across its lines, in proportion to their value.
+
+    A refund is recorded against the order, not against the bottle that went
+    back, so the merchant who sold it cannot be known. Splitting it by value at
+    least keeps a merchant's revenue from counting money the customer got back,
+    and keeps the per-merchant total reconcilable with the revenue tile.
+    """
+    refunded = pd.to_numeric(order.get("refunded_total"), errors="coerce")
+    refunded = 0.0 if pd.isna(refunded) else float(refunded)
+    gross = sum(line["revenue"] for line in lines)
+    if refunded <= 0 or gross <= 0:
+        return lines
+    for line in lines:
+        line["refunded"] = round(
+            min(refunded * line["revenue"] / gross, line["revenue"]), 2
+        )
+    return lines
+
+
+def _item_frame(rows: list[dict]) -> pd.DataFrame:
+    """One row per line item, carrying its order's date and payment state.
+
+    Denormalised on purpose: every question asked of the items - what sold, whose
+    wine it was, what it earned - is also filtered by when the order was placed
+    and whether it stood, and a per-item frame answers those without a join.
+    """
+    records: list[dict] = []
+    for order in rows:
+        order_id = order.get("id")
+        lines: list[dict] = []
+        for position, item in enumerate(order.get("items") or []):
+            quantity = pd.to_numeric(item.get("quantity"), errors="coerce")
+            quantity = 0 if pd.isna(quantity) else int(quantity)
+            unit_price = pd.to_numeric(item.get("unit_price"), errors="coerce")
+            unit_price = 0.0 if pd.isna(unit_price) else float(unit_price)
+            lines.append(
+                {
+                    "order_id": order_id,
+                    # Identity per line, so paging that returns an order twice
+                    # collapses to one copy while an order genuinely listing the
+                    # same wine on two lines keeps both. Falls back to position
+                    # when Medusa omits the id.
+                    "item_id": str(item.get("id") or f"{order_id}#{position}"),
+                    "created_at": order.get("created_at"),
+                    "status": order.get("status"),
+                    "payment_status": order.get("payment_status"),
+                    "currency_code": order.get("currency_code"),
+                    "title": item.get("product_title") or item.get("title") or "",
+                    "product_handle": item.get("product_handle") or "",
+                    "quantity": quantity,
+                    "revenue": round(unit_price * quantity, 2),
+                    "refunded": 0.0,
+                }
+            )
+        records.extend(_with_refunds(lines, order))
+    if not records:
+        return pd.DataFrame(columns=ITEM_COLUMNS)
+    frame = pd.DataFrame(records)[ITEM_COLUMNS]
+    frame = frame.drop_duplicates(subset=["order_id", "item_id"])
+    frame["created_at"] = pd.to_datetime(frame["created_at"], utc=True, errors="coerce")
+    for column in ("revenue", "refunded"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
+    for column in ("status", "payment_status", "currency_code", "product_handle"):
+        frame[column] = frame[column].fillna("").astype(str).str.strip().str.lower()
+    frame["title"] = frame["title"].fillna("").astype(str).str.strip()
+    return frame.reset_index(drop=True)
+
+
+def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFrame:
+    """Every order created at or after ``since``, oldest first.
+
+    Filtered server-side: asking for a month of a shop that has years of history
+    behind it should cost a month of rows.
+    """
+    rows, truncated = _fetch_pages(
+        api_key,
+        base_url,
+        {"created_at[$gte]": since.astimezone(_dt.timezone.utc).isoformat()},
+    )
+    frame = _order_frame(rows, base_url)
     # Read by the UI to say so, rather than reporting a partial book as the book.
     frame.attrs["truncated"] = truncated
     return frame
 
 
+def _stack(kept: pd.DataFrame, fresh: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Concatenate two frames, ignoring an empty one so its dtypes cannot win.
+
+    A refresh that finds nothing new hands over an all-empty frame, and pandas
+    reads its columns as objects when deciding the result's dtypes.
+    """
+    parts = [frame for frame in (kept, fresh) if not frame.empty]
+    if not parts:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(parts, ignore_index=True)
+
+
+def sync_order_book(
+    previous: OrderBook | None,
+    api_key: str,
+    base_url: str,
+    days: int,
+    now: _dt.datetime | None = None,
+) -> OrderBook:
+    """The last ``days`` days of orders, reading only what has changed since
+    ``previous`` was read.
+
+    A first call reads the whole window. Later calls ask only for orders touched
+    since the last read and graft them onto the book, replacing the earlier copy
+    of any order that changed - an order captured or cancelled hours after it was
+    placed has to overwrite its old row, not appear twice.
+    Orders that have aged out of the window are dropped on the way through.
+    """
+    read_at = now or _dt.datetime.now(_dt.timezone.utc)
+    window_start = read_at - _dt.timedelta(days=days)
+    incremental = previous is not None and previous.window_days == days
+    if incremental:
+        assert previous is not None  # narrowed by `incremental`
+        filters = {
+            "updated_at[$gte]": (
+                (previous.synced_at - _SYNC_OVERLAP)
+                .astimezone(_dt.timezone.utc)
+                .isoformat()
+            )
+        }
+    else:
+        filters = {"created_at[$gte]": window_start.isoformat()}
+
+    rows, truncated = _fetch_pages(api_key, base_url, filters)
+    fresh_orders = _order_frame(rows, base_url)
+    fresh_items = _item_frame(rows)
+
+    if incremental and previous is not None:
+        changed = set(fresh_orders["id"].tolist())
+        kept_orders = previous.orders[~previous.orders["id"].isin(changed)]
+        kept_items = previous.items[~previous.items["order_id"].isin(changed)]
+        order_frame = _stack(kept_orders, fresh_orders, COLUMNS)
+        item_frame = _stack(kept_items, fresh_items, ITEM_COLUMNS)
+        truncated = truncated or previous.truncated
+    else:
+        order_frame, item_frame = fresh_orders, fresh_items
+
+    # An incremental read is filtered on when an order changed, so it also brings
+    # back orders placed before the window: the window is applied here instead.
+    order_frame = order_frame[order_frame["created_at"].ge(window_start)]
+    item_frame = item_frame[item_frame["created_at"].ge(window_start)]
+    order_frame = (
+        order_frame.drop_duplicates(subset="id", keep="last")
+        .sort_values("created_at")
+        .reset_index(drop=True)
+    )
+    item_frame = item_frame.sort_values("created_at").reset_index(drop=True)
+    order_frame.attrs["truncated"] = truncated
+    return OrderBook(
+        orders=order_frame,
+        items=item_frame,
+        window_days=days,
+        synced_at=read_at,
+        truncated=truncated,
+    )
+
+
+# Prefixes the CRM no longer registers but which are still on wine it has sold.
+# TheWinesGood's store record says `thewinesgood`, its products say
+# `thewinegood` - a letter's difference that would otherwise leave a year of its
+# sales credited to nobody. Confirmed as the same shop by Angel.
+_DEFAULT_PREFIX_ALIASES = {"thewinegood": "TheWinesGood"}
+
+
+def _prefix_aliases() -> dict[str, str]:
+    """Retired handle prefixes mapped to the merchant they belonged to.
+
+    A merchant that changed its prefix keeps the old one on everything it has
+    already sold, and the store record only remembers the current one, so that
+    history would otherwise be attributed to nobody. Add more with
+    ``MEDUSA_STORE_PREFIX_ALIASES="oldprefix=Store Name,other=Other Store"``.
+    """
+    aliases: dict[str, str] = dict(_DEFAULT_PREFIX_ALIASES)
+    for entry in os.getenv("MEDUSA_STORE_PREFIX_ALIASES", "").split(","):
+        prefix, _, name = entry.partition("=")
+        if prefix.strip() and name.strip():
+            aliases[prefix.strip().lower()] = name.strip()
+    return aliases
+
+
+def fetch_stores(api_key: str, base_url: str) -> dict[str, str]:
+    """Each merchant's handle prefix mapped to its name.
+
+    Every product a merchant lists is slugged with that prefix, and the order
+    line keeps the product handle, so the prefix is what ties a bottle sold back
+    to the shop that sold it. The admin API exposes no order-to-store link to an
+    API-key caller.
+    """
+    response = requests.get(
+        f"{base_url}/admin/stores",
+        params={"limit": 200},
+        headers=_auth_header(api_key),
+        timeout=30,
+    )
+    if response.status_code in (401, 403):
+        raise MedusaConfigError(
+            f"The CRM refused the API key ({response.status_code}) for the store list."
+        )
+    response.raise_for_status()
+    prefixes: dict[str, str] = {}
+    for store in response.json().get("stores") or []:
+        metadata = store.get("metadata") or {}
+        prefix = str(metadata.get("store_prefix") or "").strip().lower()
+        name = str(store.get("name") or "").strip()
+        if prefix and name:
+            prefixes[prefix] = name
+    # Configured aliases lose to a live store prefix: a prefix the CRM is using
+    # today belongs to whoever it says, not to a stale setting.
+    return {**_prefix_aliases(), **prefixes}
+
+
 __all__ = [
     "COLUMNS",
+    "ITEM_COLUMNS",
     "REQUIRED_FIELDS",
     "DEFAULT_BASE_URL",
     "MedusaConfigError",
+    "OrderBook",
     "PAID_PAYMENT_STATUSES",
     "fetch_orders",
+    "fetch_stores",
     "load_medusa_env",
+    "sync_order_book",
 ]
