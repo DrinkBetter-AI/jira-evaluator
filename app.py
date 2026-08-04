@@ -1913,11 +1913,22 @@ def _render_sprint_plan(df: pd.DataFrame) -> None:
 
     # Anyone on the team's roster is planned for, not only whoever already holds
     # a ticket: someone with hours and nothing assigned is the spare capacity the
-    # plan exists to find.
-    people = sorted(
-        set(team_df["assignee"].dropna().astype(str))
-        | {name for name, owner in TEAM_PEOPLE.items() if owner == team}
-    )
+    # plan exists to find. They join the list under the spelling their hours were
+    # declared in, and only when no Jira name already denotes them - listing the
+    # roster's "farid" beside Jira's "Farid Shahidi" would make one declaration
+    # match two names and be withheld from both as ambiguous.
+    known = set(team_df["assignee"].dropna().astype(str))
+    roster = [
+        name
+        for name, owner in TEAM_PEOPLE.items()
+        if owner == team and not any(same_person(name, person) for person in known)
+    ]
+    spare = {
+        declared
+        for declared in WEEKLY_HOURS
+        if any(same_person(declared, name) for name in roster)
+    }
+    people = sorted(known | spare)
     capacity = sprint_planner.person_capacity(
         people, WEEKLY_HOURS, sprint_days, overhead_per_week=overhead
     )
@@ -1930,28 +1941,22 @@ def _render_sprint_plan(df: pd.DataFrame) -> None:
 
     candidates = team_df.assign(goal=sprint_planner.match_goals(team_df, goals))
     if goals and only_goals:
-        candidates = candidates[candidates["goal"].ne(sprint_planner.NO_GOAL)]
+        # Work already under way is kept whatever it serves: it is spending this
+        # sprint's hours either way, and hiding it would hand those hours out twice.
+        candidates = candidates[
+            candidates["goal"].ne(sprint_planner.NO_GOAL)
+            | sprint_planner.in_flight(candidates)
+        ]
     if candidates.empty:
         st.info("No ticket matches those goals. Try different words, or untick *Only goal work*.")
         return
 
     plan = sprint_planner.plan_sprint(candidates, capacity, goals=goals, default_hours=assumed)
 
-    if goals:
-        st.markdown("**Goals**")
-        st.dataframe(
-            sprint_planner.goal_load(plan, goals),
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "goal": st.column_config.TextColumn("Goal", width="large"),
-                "tickets": st.column_config.NumberColumn("Tickets"),
-                "hours": st.column_config.NumberColumn("Hours needed", format="%.1f"),
-                "planned_tickets": st.column_config.NumberColumn("Fits"),
-                "planned_hours": st.column_config.NumberColumn("Hours planned", format="%.1f"),
-                "left_out": st.column_config.NumberColumn("Left over"),
-            },
-        )
+    # The goals belong above the tickets that serve them, but they have to report
+    # the reviewer's decision rather than the proposal, so the space is reserved
+    # here and filled once the editor below has been read.
+    goals_slot = st.container() if goals else None
 
     st.markdown("**Proposed plan** - change any row; the load below follows your edits.")
     editable = plan.assign(include=plan["plan"].eq(sprint_planner.PLANNED))
@@ -1997,6 +2002,23 @@ def _render_sprint_plan(df: pd.DataFrame) -> None:
     decided["plan"] = decided["include"].map(
         lambda chosen: sprint_planner.PLANNED if chosen else sprint_planner.NEXT_UP
     )
+    if goals_slot is not None:
+        with goals_slot:
+            st.markdown("**Goals**")
+            st.dataframe(
+                sprint_planner.goal_load(decided, goals),
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "goal": st.column_config.TextColumn("Goal", width="large"),
+                    "tickets": st.column_config.NumberColumn("Tickets"),
+                    "hours": st.column_config.NumberColumn("Hours needed", format="%.1f"),
+                    "planned_tickets": st.column_config.NumberColumn("Fits"),
+                    "planned_hours": st.column_config.NumberColumn("Hours planned", format="%.1f"),
+                    "left_out": st.column_config.NumberColumn("Left over"),
+                },
+            )
+
     load = sprint_planner.plan_load(decided, capacity)
     over = load[load["left_hours"].lt(0)]
     st.markdown("**Who it lands on**")

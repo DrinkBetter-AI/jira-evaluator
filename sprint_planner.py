@@ -38,6 +38,13 @@ _IN_FLIGHT = ("in progress", "in review", "review in staging", "in development")
 
 NO_GOAL = "No goal"
 
+
+def in_flight(df: pd.DataFrame) -> pd.Series:
+    """Which tickets are already being worked on."""
+    statuses = df.get("status", pd.Series("", index=df.index)).fillna("").astype(str)
+    return statuses.str.strip().str.lower().isin(_IN_FLIGHT)
+
+
 _GOAL_STOPWORDS = frozenset(
     "and the for with into from all any our new finalize finalise finish"
     " complete ship launch".split()
@@ -200,8 +207,7 @@ def plan_sprint(
     frame["priority_score"] = pd.to_numeric(
         frame.get("priority_score", pd.Series(0.0, index=frame.index)), errors="coerce"
     ).fillna(0.0)
-    statuses = frame.get("status", pd.Series("", index=frame.index)).fillna("").astype(str)
-    frame["_in_flight"] = statuses.str.strip().str.lower().isin(_IN_FLIGHT)
+    frame["_in_flight"] = in_flight(frame)
 
     named = list(goals or [])
     if "goal" not in frame.columns:
