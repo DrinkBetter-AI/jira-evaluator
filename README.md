@@ -255,7 +255,11 @@ engineering numbers would still wait for the shop's.
    of everyone who visited; one person meeting the same error ten times is one
    person to apologise to, not ten. **Voss AI** is reach rather than engagement: how
    many people opened it, asked it something, and got nothing back. Needs
-   `AMPLITUDE_API_KEY` and `AMPLITUDE_SECRET_KEY`; read-only, every call is a `GET`.
+   `AMPLITUDE_API_KEY` and `AMPLITUDE_SECRET_KEY`; read-only, every call is a
+   `GET /api/2/funnels`. Those two counts are asked as two-step funnels rather than
+   of the segmentation endpoint, whose interval only comes in days, weeks or months:
+   no interval spans an arbitrary window, so a count from it is a sum of buckets, and
+   adding buckets counts somebody who came back next week as two people.
 13. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
    or unowned: no Jira key anywhere in the title, branch name or description
    (matched against every project key Jira exposes, plus `JIRA_EXTRA_PROJECT_KEYS`,

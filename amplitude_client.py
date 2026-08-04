@@ -40,6 +40,9 @@ DEFAULT_CONVERSION_DAYS = 7
 # through the shop, not whether they eventually touched all of these events.
 _FUNNEL_MODE = "ordered"
 
+# Amplitude's pseudo-event for "did anything at all".
+_ANY_EVENT = "_active"
+
 
 @dataclass(frozen=True)
 class Step:
@@ -53,7 +56,7 @@ class Step:
 # visitors land straight on a product page from search engines and never see the
 # home page, so a funnel starting there would describe a few hundred people.
 DEFAULT_FUNNEL = (
-    Step("Visited", "_active"),
+    Step("Visited", _ANY_EVENT),
     Step("Product page", "pdp_viewed"),
     Step("Added to cart", "cart_product_added"),
     Step("Started checkout", "checkout_started"),
@@ -257,9 +260,8 @@ def event_users(
 ) -> pd.DataFrame:
     """How many distinct people fired each event in the window.
 
-    One request per event: Amplitude's segmentation endpoint takes a second
-    event only as a comparison series, and reading five friction counts as five
-    small calls is simpler than reading them as two shapes.
+    One request per event, because each count has to be deduplicated over the
+    whole window independently of the others.
     """
     rows = []
     for step in events:
@@ -276,32 +278,38 @@ def event_users(
 def _unique_users(credentials: tuple[str, str, str], event: str, days: int) -> int:
     """Distinct people firing ``event`` over the whole window, not per day.
 
-    The interval is the window, so Amplitude dedupes across it itself. Summing
-    daily uniques instead would count somebody who came back twice as two
-    people, and for an error count that overstates the harm.
+    Asked as a two-step funnel rather than of the segmentation endpoint, whose
+    interval only comes in days, weeks or months: no interval spans an arbitrary
+    window, so any count from it is a sum of buckets, and adding buckets counts
+    somebody who came back next week as two people - which for an error count
+    overstates how many customers were let down. A funnel's first step is
+    unconditional and deduplicated over the whole interval, so it is the count
+    wanted, and it is the same arithmetic as the funnel above, which matters when
+    the two are read side by side.
+
+    The second step is ``_active`` (any event at all) purely because Amplitude
+    will not accept a one-step funnel; nothing reads it.
     """
     start, end = _window(days)
     payload = _get(
         credentials,
-        "/api/2/events/segmentation",
+        "/api/2/funnels",
         [
             ("e", _event_param(event)),
+            ("e", _event_param(_ANY_EVENT)),
             ("start", start),
             ("end", end),
-            ("m", "uniques"),
-            ("i", str(max(days, 1))),
+            ("mode", _FUNNEL_MODE),
+            ("cs", str(DEFAULT_CONVERSION_DAYS * 24 * 60 * 60)),
         ],
     )
-    data = payload.get("data")
-    if not isinstance(data, dict):
+    try:
+        return _funnel_counts(payload, 1)[0]
+    except AmplitudeConfigError:
+        # An event nobody has ever fired - a friction event on a healthy week,
+        # or one this deployment does not send - is a zero, not a broken panel.
+        # A refused credential has already raised from _get by now.
         return 0
-    series = data.get("series")
-    if not isinstance(series, list) or not series:
-        return 0
-    first = series[0]
-    if not isinstance(first, list):
-        return 0
-    return sum(_as_ints(first))
 
 
 __all__ = [
