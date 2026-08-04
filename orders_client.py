@@ -30,10 +30,13 @@ _MAX_PAGES = 40
 
 # Medusa returns the order's line items whatever `fields` asks for, so the list
 # is about the columns the metrics need, not about the response size.
-_ORDER_FIELDS = "id,display_id,created_at,status,payment_status,total,currency_code"
+_ORDER_FIELDS = (
+    "id,display_id,created_at,status,payment_status,total,refunded_total,currency_code"
+)
 
-# An order that was paid, including one since partly refunded: the refund is a
-# correction to revenue already earned, not a sale that never happened.
+# An order that was paid, including one since refunded: the refund is netted off
+# the total rather than the order being struck out, so a wholly refunded sale
+# contributes nothing and a half-refunded one contributes half.
 PAID_PAYMENT_STATUSES = frozenset({"captured", "partially_refunded", "refunded"})
 
 # Without any one of these the arithmetic is not merely incomplete, it is wrong:
@@ -48,6 +51,7 @@ COLUMNS = [
     "status",
     "payment_status",
     "total",
+    "refunded_total",
     "currency_code",
 ]
 
@@ -84,13 +88,16 @@ def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFra
     url = f"{base_url}/admin/orders"
     rows: list[dict] = []
     offset = 0
-    for _ in range(_MAX_PAGES):
+    truncated = False
+    for page_number in range(_MAX_PAGES):
         response = requests.get(
             url,
             params={
                 "limit": _PAGE_SIZE,
                 "offset": offset,
-                "order": "created_at",
+                # Newest first, so a shop that outgrows the page ceiling loses the
+                # oldest comparison window rather than the week being headlined.
+                "order": "-created_at",
                 "created_at[$gte]": since.astimezone(_dt.timezone.utc).isoformat(),
                 "fields": _ORDER_FIELDS,
             },
@@ -107,11 +114,18 @@ def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFra
         page = payload.get("orders") or []
         rows.extend(page)
         offset += len(page)
-        if not page or offset >= int(payload.get("count") or 0):
+        # A short page is the end of the window. `count` is only a shortcut, and
+        # a version that omits it must not be read as "no orders".
+        if len(page) < _PAGE_SIZE:
             break
+        reported = int(payload.get("count") or 0)
+        if reported and offset >= reported:
+            break
+        truncated = page_number == _MAX_PAGES - 1
 
     if not rows:
         return pd.DataFrame(columns=COLUMNS)
+
     frame = pd.DataFrame(rows)
     # Every figure is defined by these three. Filling a missing one in would not
     # give a smaller answer, it would give a wrong one - a confident $0 for a
@@ -127,10 +141,14 @@ def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFra
             frame[column] = None
     frame = frame[COLUMNS].copy()
     frame["created_at"] = pd.to_datetime(frame["created_at"], utc=True, errors="coerce")
-    frame["total"] = pd.to_numeric(frame["total"], errors="coerce").fillna(0.0)
+    for column in ("total", "refunded_total"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
     for column in ("status", "payment_status", "currency_code"):
         frame[column] = frame[column].fillna("").astype(str).str.strip().str.lower()
-    return frame.sort_values("created_at").reset_index(drop=True)
+    frame = frame.sort_values("created_at").reset_index(drop=True)
+    # Read by the UI to say so, rather than reporting a partial book as the book.
+    frame.attrs["truncated"] = truncated
+    return frame
 
 
 __all__ = [

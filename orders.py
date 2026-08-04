@@ -93,6 +93,14 @@ def _paid(orders: pd.DataFrame) -> pd.DataFrame:
     ]
 
 
+def _net(orders: pd.DataFrame) -> float:
+    """What the shop kept: totals less anything refunded off them."""
+    if orders.empty:
+        return 0.0
+    refunded = orders["refunded_total"] if "refunded_total" in orders.columns else 0.0
+    return float((orders["total"] - refunded).clip(lower=0).sum())
+
+
 def window_metrics(
     orders: pd.DataFrame,
     days: int,
@@ -106,7 +114,7 @@ def window_metrics(
     current = _slice(orders, start, end)
     previous = _slice(orders, previous_start, start)
     paid = _paid(current)
-    revenue = float(paid["total"].sum()) if not paid.empty else 0.0
+    revenue = _net(paid)
     canceled = int(_canceled(current).sum()) if not current.empty else 0
     return WindowMetrics(
         days=days,
@@ -116,7 +124,7 @@ def window_metrics(
         revenue=round(revenue, 2),
         aov=round(revenue / len(paid), 2) if len(paid) else 0.0,
         prev_orders=int(len(previous)),
-        prev_revenue=round(float(_paid(previous)["total"].sum()) if not previous.empty else 0.0, 2),
+        prev_revenue=round(_net(_paid(previous)), 2),
     )
 
 
@@ -147,7 +155,11 @@ def daily_orders(
     counts = placed.groupby("date")["id"].count().reindex(index, fill_value=0)
     paid = _paid(placed)
     revenue = (
-        paid.groupby("date")["total"].sum().reindex(index, fill_value=0.0)
+        paid.assign(net=paid["total"] - paid["refunded_total"])
+        .groupby("date")["net"]
+        .sum()
+        .clip(lower=0)
+        .reindex(index, fill_value=0.0)
         if not paid.empty
         else pd.Series(0.0, index=index)
     )

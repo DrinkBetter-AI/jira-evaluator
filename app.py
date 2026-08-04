@@ -3429,9 +3429,16 @@ def _render_orders() -> None:
         st.warning(f"Could not read orders from the CRM: {str(exc)[:200]}")
         return
 
+    truncated = bool(book.attrs.get("truncated"))
     # Totals in different currencies cannot be added; the shop bills in one, and
     # if that ever stops being true the tiles report the main one and say so.
     book, currency, other_currencies = orders.single_currency(book)
+    if truncated:
+        st.warning(
+            "The CRM has more orders in this period than one read can carry, so "
+            "the oldest of them are missing and the 30-day comparison understates "
+            "the month before last. The 7-day figures are unaffected."
+        )
     week = orders.window_metrics(book, 7)
     month = orders.window_metrics(book, 30)
     for window, label in ((week, "7 days"), (month, "30 days")):
