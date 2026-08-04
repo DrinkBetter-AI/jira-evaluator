@@ -22,8 +22,9 @@ FORMER_TEAM = "Former staff"
 
 _NO_OWNER = {"", "unassigned", "none"}
 
-# Teams that used to be tracked separately and are now one. Applied last, so a
-# ticket routed by project key lands in the same row as one routed by assignee.
+# Teams that used to be tracked separately and are now one. Applied after both
+# routing paths, so a ticket routed by project key lands in the same row as one
+# routed by assignee - a raw ``CRM`` project key is the same team as Anouar.
 TEAM_ALIASES = {
     "crm": "Marketplace",
     "leadership": "Business strategy",
@@ -71,6 +72,27 @@ def parse_team_projects(spec: str) -> dict[str, str]:
 def parse_team_people(spec: str) -> dict[str, str]:
     """Person name -> team name, from the ``Team=Name,Name;Team=Name`` spec."""
     return _parse_groups(spec)
+
+
+def _active_aliases(
+    project_teams: dict[str, str], people_teams: dict[str, str]
+) -> dict[str, str]:
+    """The merges that still apply once the deployment has had its say.
+
+    A team someone names in ``JIRA_TEAM_PEOPLE`` or ``JIRA_TEAM_PROJECTS`` is a
+    deliberate answer to "who owns this", so a historical merge here must not
+    quietly rename it. The alias survives only where the config is silent -
+    notably the bare project key a ticket falls back to.
+    """
+    configured = {
+        str(team).strip().lower()
+        for team in (*project_teams.values(), *people_teams.values())
+    }
+    return {
+        name: target
+        for name, target in TEAM_ALIASES.items()
+        if name not in configured
+    }
 
 
 def _team_for_person(display_name: str, people_teams: dict[str, str]) -> str | None:
@@ -123,7 +145,8 @@ def add_team(
     # so it is called out rather than silently attributed to a project's team.
     no_owner = owners.str.strip().str.lower().isin(_NO_OWNER)
     team = by_person.fillna(by_project).mask(no_owner, NO_OWNER_TEAM).astype(str)
-    out["team"] = team.map(lambda name: TEAM_ALIASES.get(name.strip().lower(), name))
+    aliases = _active_aliases(project_teams, people_teams)
+    out["team"] = team.map(lambda name: aliases.get(name.strip().lower(), name))
     return out
 
 
