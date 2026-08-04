@@ -199,6 +199,9 @@ past changes matters:
    conversation (design, research, an outage), **No** is neither. Epics and
    initiatives are exempt and score *n/a*. The per-person table groups by reporter,
    since the person who wrote the ticket is the one who can say what done means.
+   Backlog tickets are always included regardless of *Include Backlogs* — an unowned
+   backlog ticket is the best kind to hand off, and the worst-written ones collect
+   there unseen.
 13. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
    age-vs-idle chart, sprint planning tables, and bulk Jira write-back actions.
 14. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours

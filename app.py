@@ -3322,7 +3322,8 @@ def _render_ticket_quality(df: pd.DataFrame) -> None:
         "Scored out of 5: a summary that says what the work is, a real description, "
         "acceptance criteria, an estimate, and an epic. Epics and initiatives are exempt. "
         "Ready for Devin needs the goal and the finish line written down, and work that "
-        "does not hinge on a conversation."
+        "does not hinge on a conversation. Backlog tickets are always included here, "
+        "regardless of *Include Backlogs*."
     )
 
     columns = ["key", "summary", "status", "assignee", "reporter", "quality_score", "missing"]
@@ -3683,7 +3684,9 @@ def main() -> None:
     _render_pr_hygiene(open_prs, github_ready, github_error, _known_project_keys(df))
 
     st.divider()
-    _render_ticket_quality(_metrics_df(filtered, include_backlogs))
+    # Backlog-inclusive on purpose: a backlog ticket is the best kind to hand off,
+    # and it is where badly written tickets accumulate unseen.
+    _render_ticket_quality(filtered)
 
     st.divider()
     _render_priority_queue(filtered, include_backlogs=include_backlogs)

@@ -103,13 +103,18 @@ def _adf_to_text(value: Any) -> str:
     nodes - so reading a description means walking it. Block-level nodes are
     separated by newlines, because whether a description has acceptance criteria
     is usually a question about its lines.
+
+    Children are concatenated, never newline-joined: a paragraph's content is a
+    run of text nodes split at every mark boundary, so "Acceptance **criteria**"
+    arrives as three nodes and a newline between them would hide the phrase.
+    Line breaks come from the block nodes and lists that own them.
     """
     if value is None:
         return ""
     if isinstance(value, str):
         return value
     if isinstance(value, list):
-        return "\n".join(part for part in (_adf_to_text(v) for v in value) if part)
+        return "".join(_adf_to_text(v) for v in value)
     if not isinstance(value, dict):
         return ""
 
@@ -139,12 +144,20 @@ _ADF_BLOCK_TYPES = {
 }
 
 
+def _list_start(node: dict[str, Any]) -> int:
+    """First number of an ordered list; a malformed ``order`` costs numbering only."""
+    try:
+        return int((node.get("attrs") or {}).get("order", 1) or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
 def _adf_list_to_text(node: dict[str, Any]) -> str:
     """Render an ADF list back to marked-up lines."""
     node_type = node.get("type")
     items = node.get("content") or []
     lines: list[str] = []
-    for index, item in enumerate(items, start=int(node.get("attrs", {}).get("order", 1) or 1)):
+    for index, item in enumerate(items, start=_list_start(node)):
         if not isinstance(item, dict):
             continue
         text = _adf_to_text(item.get("content")).strip()
