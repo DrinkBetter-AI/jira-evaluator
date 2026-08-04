@@ -33,9 +33,19 @@ MIN_SUMMARY_WORDS = 4
 _ACCEPTANCE_RE = re.compile(
     r"acceptance criteria|acceptance:|definition of done|\bDoD\b|"
     r"expected (?:result|behaviou?r|outcome)|success criteria|"
-    r"steps to reproduce|given .*\bwhen\b.*\bthen\b",
-    re.IGNORECASE | re.DOTALL,
+    r"steps to reproduce",
+    re.IGNORECASE,
 )
+
+# Gherkin, written either as one sentence or as the usual stanza. Kept off
+# _ACCEPTANCE_RE because the three words are ordinary English - "Given the budget
+# was cut we deprioritised this. Later, when time allows, then revisit" is prose,
+# not a finish line. So the one-line form has to open its line and run to "then"
+# without a sentence ending, and the stanza form needs its own lines.
+_GHERKIN_LINE_RE = re.compile(
+    r"^\W*given\b[^.\n]*\bwhen\b[^.\n]*\bthen\b", re.IGNORECASE | re.MULTILINE
+)
+_GHERKIN_STANZA_RE = re.compile(r"^\W*(given|then)\b", re.IGNORECASE | re.MULTILINE)
 
 # A checklist or a numbered list of outcomes is acceptance criteria whether or
 # not anyone wrote the words.
@@ -90,9 +100,17 @@ def has_acceptance_criteria(text: str) -> bool:
     """True when the ticket says how anyone would know it is finished."""
     if not text:
         return False
-    if _ACCEPTANCE_RE.search(text):
+    if _ACCEPTANCE_RE.search(text) or _is_gherkin(text):
         return True
     return len(_CHECKLIST_RE.findall(text)) >= _MIN_CHECKLIST_ITEMS
+
+
+def _is_gherkin(text: str) -> bool:
+    """Given/When/Then, on one line or opening lines of its own."""
+    if _GHERKIN_LINE_RE.search(text):
+        return True
+    openers = {match.group(1).lower() for match in _GHERKIN_STANZA_RE.finditer(text)}
+    return openers == {"given", "then"}
 
 
 def _estimate_seconds(df: pd.DataFrame) -> pd.Series:
