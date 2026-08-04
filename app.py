@@ -3472,8 +3472,39 @@ def _money(amount: float, currency: str = "usd") -> str:
     return f"{symbol}{amount:,.2f}" + (f" {currency.upper()}" if not symbol else "")
 
 
+BUSINESS_OPENED_KEY = "business_opened"
+
+
 def _render_business() -> None:
-    """The shop's numbers: orders and revenue, what sold, and how each merchant did."""
+    """The shop's numbers: orders and revenue, what sold, and how each merchant did.
+
+    Behind a button on the first visit. Streamlit runs the body of every tab on
+    every rerun, whichever one the browser is showing, so reading a year of
+    orders here would cost everyone several seconds of cold start for a tab most
+    of them never open. Once opened it stays open for the session.
+    """
+    # Reading the environment costs nothing, so a missing key is reported instead
+    # of offered as a button that goes on to admit it cannot read anything.
+    misconfigured = True
+    try:
+        misconfigured = orders_client.load_medusa_env() is None
+    except orders_client.MedusaConfigError:
+        pass
+    if not misconfigured and not st.session_state.get(BUSINESS_OPENED_KEY):
+        st.subheader("Orders, Revenue & AOV")
+        st.caption(
+            "A year of the order book, read from the CRM on request so the rest of "
+            "the dashboard opens straight away. It stays loaded afterwards, and "
+            "refreshes only what has changed."
+        )
+        if st.button("Read the shop's figures", key="business_open"):
+            st.session_state[BUSINESS_OPENED_KEY] = True
+            st.rerun()
+        return
+    _render_business_sections()
+
+
+def _render_business_sections() -> None:
     try:
         config = orders_client.load_medusa_env()
     except orders_client.MedusaConfigError as exc:
