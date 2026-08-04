@@ -5,10 +5,9 @@ and failed, and that is the number a leadership meeting actually argues about.
 This module answers it from the product's own event stream: how far people get
 towards an order, and how many of them hit an error on the way.
 
-Every call is a GET against ``/api/2/funnels`` or ``/api/2/events/segmentation``,
-authenticated with the project's API key and secret key as HTTP Basic. Amplitude
-issues no narrower credential than a project key, which is why this module has
-no other verb.
+Every call is a GET against ``/api/2/funnels``, authenticated with the project's
+API key and secret key as HTTP Basic. Amplitude issues no narrower credential
+than a project key, which is why this module has no other verb.
 """
 
 from __future__ import annotations
@@ -211,9 +210,11 @@ def _funnel_counts(payload: dict, expected: int) -> list[int]:
     """The per-step user counts out of a funnels response.
 
     Amplitude reports the same numbers under more than one key depending on the
-    query, so this prefers the cumulative counts and falls back rather than
-    failing: a funnel that renders one step short is still readable, an
-    exception is not.
+    query, so this tries each in turn. Only keys carrying *people* are read:
+    ``stepByStep`` and the ``stepTrans`` family are deliberately not among them,
+    being ratios and transitions that would truncate to a funnel of zeros - which
+    reads as a shop nobody visited rather than as a response this code failed to
+    understand. An unrecognised shape raises instead.
     """
     data = payload.get("data")
     block: dict = {}
@@ -221,7 +222,7 @@ def _funnel_counts(payload: dict, expected: int) -> list[int]:
         block = data[0]
     elif isinstance(data, dict):
         block = data
-    for name in ("cumulativeRaw", "cumulative", "stepByStep"):
+    for name in ("cumulativeRaw", "cumulative"):
         values = block.get(name)
         if isinstance(values, list) and values:
             counts = _as_ints(values)
