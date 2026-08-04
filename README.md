@@ -149,6 +149,16 @@ past changes matters:
    as drifting (idle, unassigned children, missing estimates, spread across sprints,
    too many owners), plus a count of tickets with no epic at all. Because the JQL
    loads open work only, this is remaining work per epic, never completion.
+   Under it, **Epic organization** takes the tickets with no epic and suggests a
+   parent for each from the epics that already exist: the suggestion is the epic
+   whose own name and whose existing children's summaries share the most
+   distinctive words with the ticket, restricted to the ticket's own project, and
+   the words that earned it are shown so the guess can be judged rather than
+   trusted. A ticket whose best match explains less than a third of what it is
+   about keeps its row but loses the guess, since a wrong parent offered
+   confidently is worse than none. A companion tab lists epics with no open
+   children left - finished or abandoned, closeable either way. Nothing is filed
+   automatically; every suggestion is read-only.
 6. **Backlog Cleanup** — the oldest open tickets presented one at a time, because a
    backlog is triaged in single decisions rather than in a table of 200 rows. Each
    card carries the ticket's age, idle time, owner, status, epic and priority, with

@@ -39,6 +39,7 @@ from capacity import (
 )
 import cleanup
 from cleanup import is_unowned
+import epic_organization
 from epics import epic_health_flags, epic_rollup
 from teams import (
     NO_OWNER_TEAM,
@@ -1173,6 +1174,113 @@ def _render_epics(df: pd.DataFrame) -> None:
         file_name="jira_epic_rollup.csv",
         mime="text/csv",
     )
+
+    _render_epic_organization(df)
+
+
+def _render_epic_organization(df: pd.DataFrame) -> None:
+    """Where the parentless tickets belong, and which epics are empty."""
+    st.markdown("##### Epic organization")
+    suggestions = epic_organization.suggest_parents(df)
+    empty = epic_organization.empty_epics(df)
+    if suggestions.empty and empty.empty:
+        st.success("Every ticket has an epic, and no epic is sitting empty.")
+        return
+
+    matched = suggestions[suggestions["suggested_epic_key"].ne("")]
+    o1, o2, o3 = st.columns(3)
+    o1.metric("Tickets with no epic", int(len(suggestions)))
+    o2.metric("With a suggested parent", int(len(matched)))
+    o3.metric("Epics with nothing open", int(len(empty)))
+    st.caption(
+        "Suggestions come from the words a ticket shares with an epic and with the "
+        "tickets already in it, scored so that a word common to every epic counts "
+        "for nothing. Only epics in the ticket's own project are considered. "
+        "Nothing is filed automatically - *Why* is there so the guess can be judged."
+    )
+
+    by_epic_tab, ticket_tab, empty_tab = st.tabs(
+        ["Suggested parents", "Every orphan", "Empty epics"]
+    )
+    with by_epic_tab:
+        rollup = epic_organization.orphan_summary(suggestions)
+        if rollup.empty:
+            st.info("No orphan ticket reads clearly enough to point at an epic.")
+        else:
+            rollup = rollup.assign(
+                epic_url=rollup["suggested_epic_key"].map(_jira_ticket_url)
+            )
+            st.dataframe(
+                rollup[["epic_url", "suggested_epic", "tickets", "keys"]],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "epic_url": st.column_config.LinkColumn(
+                        "Epic", display_text=JIRA_KEY_DISPLAY_PATTERN
+                    ),
+                    "suggested_epic": st.column_config.TextColumn("Name", width="large"),
+                    "tickets": st.column_config.NumberColumn("Orphans"),
+                    "keys": st.column_config.TextColumn("Tickets", width="large"),
+                },
+            )
+            st.caption("Start at the top: one epic that takes several tickets at once.")
+    with ticket_tab:
+        display = suggestions.assign(
+            key_url=suggestions["key"].map(_jira_ticket_url),
+            confidence=suggestions["confidence"] * 100,
+        )
+        st.dataframe(
+            display[
+                ["key_url", "summary", "status", "assignee", "suggested_epic", "why", "confidence"]
+            ],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "key_url": st.column_config.LinkColumn(
+                    "Key", display_text=JIRA_KEY_DISPLAY_PATTERN
+                ),
+                "summary": st.column_config.TextColumn("Summary", width="large"),
+                "status": st.column_config.TextColumn("Status"),
+                "assignee": st.column_config.TextColumn("Assignee"),
+                "suggested_epic": st.column_config.TextColumn("Suggested epic", width="medium"),
+                "why": st.column_config.TextColumn("Why"),
+                "confidence": st.column_config.NumberColumn("Confidence", format="%.0f%%"),
+            },
+        )
+        st.download_button(
+            "Download orphan tickets (CSV)",
+            data=suggestions.to_csv(index=False).encode("utf-8"),
+            file_name="jira_orphan_tickets.csv",
+            mime="text/csv",
+        )
+    with empty_tab:
+        if empty.empty:
+            st.success("No epic is sitting empty.")
+        else:
+            display = empty.assign(key_url=empty["key"].map(_jira_ticket_url))
+            st.dataframe(
+                display[
+                    [column for column in
+                     ["key_url", "summary", "status", "assignee", "idle_days", "ticket_age_days"]
+                     if column in display.columns]
+                ],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "key_url": st.column_config.LinkColumn(
+                        "Key", display_text=JIRA_KEY_DISPLAY_PATTERN
+                    ),
+                    "summary": st.column_config.TextColumn("Epic", width="large"),
+                    "status": st.column_config.TextColumn("Status"),
+                    "assignee": st.column_config.TextColumn("Owner"),
+                    "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
+                    "ticket_age_days": st.column_config.NumberColumn("Age (days)", format="%.1f"),
+                },
+            )
+            st.caption(
+                "No open children left. The dashboard does not load Done tickets, so "
+                "these are finished or abandoned - close them either way."
+            )
 
 
 _TRIAGE_DECISIONS_KEY = "_triage_decisions"
