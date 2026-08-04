@@ -33,7 +33,9 @@ MIN_SUMMARY_WORDS = 4
 _ACCEPTANCE_RE = re.compile(
     r"acceptance criteria|acceptance:|definition of done|\bDoD\b|"
     r"expected (?:result|behaviou?r|outcome)|success criteria|"
-    r"steps to reproduce",
+    # "See Steps to Reproduce" points at a field the fetch does not read; a
+    # pointer elsewhere is not the criteria being here.
+    r"(?<!see )steps to reproduce",
     re.IGNORECASE,
 )
 
