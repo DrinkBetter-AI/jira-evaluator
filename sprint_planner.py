@@ -288,11 +288,20 @@ def goal_load(plan: pd.DataFrame, goals: list[str] | None = None) -> pd.DataFram
     """Per goal: how much of it fits in this sprint and how much is left over.
 
     The question a goal-led sprint has to answer is whether all three goals fit,
-    and if not which one is being half-done.
+    and if not which one is being half-done. A named goal that matched no ticket
+    is answered with a row of zeroes rather than by disappearing: a goal nobody
+    has written tickets for is the most useful thing the table can say.
     """
     columns = ["goal", "tickets", "hours", "planned_tickets", "planned_hours", "left_out"]
+    named = list(goals or [])
     if plan.empty:
-        return pd.DataFrame(columns=columns)
+        if not named:
+            return pd.DataFrame(columns=columns)
+        empty = pd.DataFrame({"goal": named})
+        for column in columns[1:]:
+            empty[column] = 0
+        return empty[columns]
+    plan = plan.assign(goal=plan["goal"].fillna(NO_GOAL).astype(str))
     chosen = plan[plan["plan"].eq(PLANNED)]
     table = (
         plan.groupby("goal", dropna=False)
@@ -303,13 +312,17 @@ def goal_load(plan: pd.DataFrame, goals: list[str] | None = None) -> pd.DataFram
             )
         )
         .fillna(0)
+        .reindex(sorted(set(plan["goal"]) | set(named)))
+        .fillna(0)
+        .rename_axis("goal")
         .reset_index()
     )
     table["planned_tickets"] = table["planned_tickets"].astype(int)
+    table["tickets"] = table["tickets"].astype(int)
     table["left_out"] = table["tickets"] - table["planned_tickets"]
     for column in ("hours", "planned_hours"):
         table[column] = table[column].round(1)
-    rank = {goal: index for index, goal in enumerate(goals or [])}
+    rank = {goal: index for index, goal in enumerate(named)}
     return (
         table.assign(_rank=table["goal"].map(lambda goal: rank.get(goal, len(rank))))
         .sort_values(["_rank", "hours"], ascending=[True, False])

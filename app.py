@@ -1852,8 +1852,10 @@ def _render_sprint_plan(df: pd.DataFrame) -> None:
 
     team_df = scored[scored["team"].astype(str) == team]
     if "issue_type" in team_df.columns:
-        kinds = team_df["issue_type"].fillna("").astype(str).str.strip().str.lower()
-        team_df = team_df[~kinds.isin({"epic", "initiative"})]
+        # Containers carry no hours of their own, and Jira spells them several
+        # ways ("Top-level initiative", "Toplevel"), so the shared test is used
+        # rather than a literal list that misses the spellings it does not know.
+        team_df = team_df[~team_df["issue_type"].map(cleanup.is_container)]
     if team_df.empty:
         st.info(f"No open tickets for {team}.")
         return
@@ -2134,16 +2136,27 @@ def _apply_sprint_plan(plan: pd.DataFrame, team_df: pd.DataFrame) -> None:
     if not to_add:
         st.info("Every chosen ticket is already in that sprint.")
         return
+    written = 0
     with st.spinner(f"Adding {len(to_add)} ticket(s) to {label}..."):
         try:
             # Jira's Agile API takes at most fifty issues per move, and a plan
             # drawn to a whole team's hours passes fifty rows easily.
             for offset in range(0, len(to_add), _SPRINT_MOVE_BATCH):
-                client.add_issues_to_sprint(
-                    sprint_id, to_add[offset : offset + _SPRINT_MOVE_BATCH]
-                )
+                batch = to_add[offset : offset + _SPRINT_MOVE_BATCH]
+                client.add_issues_to_sprint(sprint_id, batch)
+                written += len(batch)
         except Exception as exc:  # noqa: BLE001
-            st.error(f"Failed to add tickets to the sprint: {exc}")
+            # A later batch failing does not undo the earlier ones: saying the
+            # write failed outright would send someone to re-apply tickets that
+            # are already on the sprint.
+            if written:
+                st.error(
+                    f"Added {written} of {len(to_add)} ticket(s) to {label}, then "
+                    f"the next batch failed: {exc}. Refresh Data before retrying "
+                    "so the ones already moved are not applied again."
+                )
+            else:
+                st.error(f"Failed to add tickets to the sprint: {exc}")
             return
     st.success(f"Added {len(to_add)} ticket(s) to {label}. Refresh Data to see it.")
 
