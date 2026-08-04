@@ -228,6 +228,33 @@ click) and confirm every value is one of Yes/No/Maybe. The board is wide — zoo
   token, `8602` `PR_STALE_AGE_DAYS=1`, `8603` `PR_STALE_AGE_DAYS=7d`. Threshold changes are read at
   import, so they cannot be exercised without a separate process. A garbage threshold should leave
   the tile label at the default (`Stale (>14d old or >7d idle)`); the label itself is the assertion.
+- **No GitHub token at all? Run a hybrid harness: synthetic PRs + live Jira.** Any PR-hygiene
+  behaviour that joins PRs to tickets (e.g. `pr_hygiene.critical_in_flight`) can still be driven
+  end-to-end. Copy the ticket harness pattern but patch only the GitHub side, leaving the Jira
+  fetch live and read-only:
+  ```python
+  import app as dashboard
+  dashboard.github_client.load_github_env = lambda: ("synthetic-token", "OrgName")
+  dashboard.fetch_open_prs_cached = lambda *a, **k: PRS.copy()
+  dashboard.fetch_open_pr_count_cached = lambda *a, **k: len(PRS)
+  dashboard.fetch_merged_prs_cached = lambda *a, **k: pd.DataFrame()   # merged charts tolerate empty
+  dashboard.fetch_merged_pr_count_cached = lambda *a, **k: 0
+  dashboard.main()
+  ```
+  The synthetic PR frame needs `number, title, url, is_draft, branch, body, review_decision,
+  created_at, updated_at, author, repo, approving_reviews, changes_reviews, total_reviews,
+  review_requests, age_days, idle_days` (mirror `github_client._to_frame`). Point the PRs at **real
+  live ticket keys** picked from a probe of the Jira frame, so the join is exercised against real
+  priorities/statuses. Guard the harness with `if os.getenv("DEMO_BUILD_ONLY") == "1": raise
+  SystemExit(0)` before `main()` — Streamlit only executes the script when a browser session
+  connects, so an expectation script cannot rely on the app process having written the frame cache.
+- **Make excluded rows the *idlest/oldest* ones.** Tables like the critical tab sort by
+  `idle_days` desc: if every deliberately-excluded PR (wrong status, wrong priority, no key,
+  key with no matching ticket) has a bigger idle than every included PR, a broken filter cannot
+  produce a passing-looking screenshot — the leak lands in row 1.
+- **Link columns:** `st.column_config.LinkColumn(display_text=JIRA_KEY_DISPLAY_PATTERN)` shows the
+  bare key. To prove the href without an Atlassian session, click it: Jira bounces to
+  `/jira/get-started?continueUrl=<url-encoded browse URL>`, and the address bar is the assertion.
 - **GitHub token:** `DASHBOARD_GITHUB_TOKEN=$(gh auth token)` works but expires in ~1 hour — keep a
   relaunch script (see `/home/ubuntu/launch_pr16.sh` pattern) and re-run it for long sessions.
 - **Scrolling Streamlit pages full of dataframes:** the wheel is captured by whichever `st.dataframe`
@@ -262,6 +289,44 @@ click) and confirm every value is one of Yes/No/Maybe. The board is wide — zoo
 - Long text columns (`Missing`) are truncated by column width and **cannot** be widened by dragging
   the header separator or by `ctrl+-`; the table's fullscreen button helps a little, but plan to
   confirm the full strings from the CSV.
+
+## Testing the Sprint Planner (and any capacity/roster-driven section)
+
+- **`JIRA_WEEKLY_HOURS` is mandatory** or the section short-circuits to "Nobody has declared
+  hours ...". Run one instance with it and one without (the warning case is a real assertion).
+  Exercise it in **short spellings** (`Farid=20`, `Mehdi=40`) rather than full Jira display
+  names — short-name resolution against `JIRA_TEAM_PEOPLE` roster entries is the fragile path
+  and has broken twice (ambiguity emptying the capacity frame; lowercase roster labels showing
+  as a second person). A roster-only person with declared hours should appear as spare capacity
+  labelled with the *declared* spelling.
+- The planner is fed the **unfiltered** frame, so sidebar scope/filters do not move it; assert it
+  still renders under each scope rather than expecting its numbers to change.
+- **Recompute everything offline against the same snapshot.** Import `sprint_planner` and mirror
+  the section: `match_goals` → `person_capacity(names, weekly, days, overhead_per_week)` →
+  `plan_sprint` → `goal_load` / `plan_load`. Capacity arithmetic (`weekly/5*days` minus
+  `overhead/5*days`) renders as a plausible number even when it is off by a whole day, so an
+  independent figure is the only way to catch it. Drive the knobs from env vars in the script so
+  each UI state has a matching expectation.
+- Pick knob values that make effects unmistakable: overhead **4 → 20 h/week** zeroes a 20h/week
+  person and forces rows out; assumed hours **4 → 10** separates estimated from unestimated rows.
+- **Editor-key identity.** The `st.data_editor` key mixes team + goals + knobs + a SHA-1
+  fingerprint of the plan's ordered ticket keys. Assert both halves: an edit must *survive*
+  `Refresh Data` when the ticket set is unchanged, and must be *discarded* when team/goals/knobs
+  change (tick → switch team → switch back → computed default, with no tick landing on a
+  different ticket). Making live data change under fixed knobs is generally not possible
+  read-only; say so rather than claiming that half.
+- **In-flight work is special-cased**: it survives the "Only goal work" filter and, if it costs
+  more than its owner's remaining hours, it is still planned with the budget floored at zero
+  (*Why* reads `already in flight, Xh against Yh left`) and the person shows negative "Left (h)"
+  plus an "Over their hours" warning. Combine goals + a high overhead to reach that state.
+- Ordering claims are cheapest to prove from the exported CSV: `priority_score` is in the CSV but
+  not in the on-screen editor, so "priority does not beat goal rank" is only checkable there.
+- Warnings that live on the write path may still render **before** the edit-switch check (e.g.
+  "these tickets would leave another open sprint"). Read the code to see whether a warning is
+  gated on writes being enabled; if it is not, it can be verified without arming anything —
+  typically by choosing a team whose tickets span two open sprints.
+- Reruns after a knob change or a checkbox tick can take 10-20s on a ~700 ticket instance; wait
+  for the greyed-out overlay to clear before screenshotting, or you will capture the old table.
 
 ## Gotchas
 
