@@ -44,6 +44,8 @@ profile when they are not all set.
 | `JIRA_EXTRA_PROJECT_KEYS` | no | — | Extra project keys a PR may reference, e.g. `MDP,WT2`, for projects the account cannot see; used by *PR Hygiene* |
 | `PR_STALE_AGE_DAYS` | no | `14` | A PR open longer than this counts as stale |
 | `PR_STALE_IDLE_DAYS` | no | `7` | A PR untouched for longer than this counts as stale |
+| `MEDUSA_ADMIN_API_KEY` | no | — | Medusa secret API key (Settings → Secret API Keys in the CRM); without it the *Orders, Revenue & AOV* section says so and everything else works |
+| `MEDUSA_ADMIN_URL` | no | `https://merchants.vinovoss.com` | CRM admin API the order figures are read from |
 | `DASHBOARD_PASSWORD` | no locally, **yes on Cloud Run** | — | Shared password visitors must enter; unset locally means no gate, unset on Cloud Run (`K_SERVICE` present) refuses to serve at all |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
@@ -192,14 +194,24 @@ past changes matters:
    estimate, no due date, never started, no priority, carried over 3+ sprints. Read
    only — it recommends what to close or send back to Backlog, it never writes.
    Backlog tickets are always included here regardless of *Include Backlogs*.
-11. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
+11. **Orders, Revenue & AOV** — the shop beside the engineering, read live from the
+   Medusa CRM: orders, captured revenue and average order value over the last 7 and
+   30 days, each against the equivalent window before it, plus a per-day bar for the
+   month. Revenue counts captured payments only and cancelled orders count towards
+   neither revenue nor AOV, so the order tile and the revenue tile deliberately do
+   not divide into each other - the fourth tile names the gap (cancelled / placed
+   but not yet paid). AOV is captured revenue over the paid orders that produced it,
+   not over every order placed, which would understate the basket whenever payment
+   capture lags. Read-only: every call is a `GET /admin/orders`, cached for fifteen
+   minutes. Needs `MEDUSA_ADMIN_API_KEY`.
+12. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
    or unowned: no Jira key anywhere in the title, branch name or description
    (matched against every project key Jira exposes, plus `JIRA_EXTRA_PROJECT_KEYS`,
    so a string like `UTF-8` does not read as a ticket); open past
    `PR_STALE_AGE_DAYS` or untouched past `PR_STALE_IDLE_DAYS`, with the reason
    named; and nobody requested to review with no review yet. Includes a per-author
    table and a CSV of everything flagged. Needs `DASHBOARD_GITHUB_TOKEN`.
-12. **Ticket Quality & Ready for Devin** — every ticket graded out of 5 on whether
+13. **Ticket Quality & Ready for Devin** — every ticket graded out of 5 on whether
    someone outside the original conversation could pick it up: a summary of at
    least four words, a description of at least 120 characters, explicit acceptance
    criteria (the words, or a checklist of three or more items), an estimate, and an
@@ -212,7 +224,7 @@ past changes matters:
    Backlog tickets are always included regardless of *Include Backlogs* — an unowned
    backlog ticket is the best kind to hand off, and the worst-written ones collect
    there unseen.
-13. **Sprint Planner** — a first draft of one team's next sprint, built from goals
+14. **Sprint Planner** — a first draft of one team's next sprint, built from goals
    rather than from the top of a priority list. Name two or three goals for the
    sprint ("Onboarding, Quiz, Checkout", most important first) and every ticket
    that shares a word with one — in its summary, its epic's name or its labels —
@@ -232,9 +244,9 @@ past changes matters:
    armed, and it only adds tickets to an active or future sprint. Jira moves an
    issue between sprints rather than copying it, so a ticket already on another
    open sprint leaves it; the section names those tickets before the button.
-14. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
+15. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
    age-vs-idle chart, sprint planning tables, and bulk Jira write-back actions.
-15. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
+16. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
    per person against what they are actually available for, which matters when most
    contributors are part-time: `JIRA_WEEKLY_HOURS` is spread over the weekdays
    between the sprint's start and end dates, so 20h/week across a 10-working-day
