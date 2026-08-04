@@ -3754,6 +3754,7 @@ def _render_pr_hygiene(
     github_ready: bool,
     github_error: str = "",
     project_keys: list[str] | None = None,
+    tickets: pd.DataFrame | None = None,
 ) -> None:
     """Open PRs that are untraceable, stalled, or nobody's job to review."""
     st.subheader("PR Hygiene")
@@ -3772,15 +3773,19 @@ def _render_pr_hygiene(
     no_key = prs[~prs["has_jira_key"]]
     stale = prs[prs["is_stale"]]
     unowned = prs[prs["is_unowned"]]
+    critical = pr_hygiene.critical_in_flight(
+        prs, tickets if tickets is not None else pd.DataFrame()
+    )
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("No Jira key", int(len(no_key)))
-    c2.metric(
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Critical in flight", int(len(critical)))
+    c2.metric("No Jira key", int(len(no_key)))
+    c3.metric(
         f"Stale (>{pr_hygiene.STALE_AGE_DAYS:.0f}d old or "
         f">{pr_hygiene.STALE_IDLE_DAYS:.0f}d idle)",
         int(len(stale)),
     )
-    c3.metric("No reviewer", int(len(unowned)))
+    c4.metric("No reviewer", int(len(unowned)))
     st.caption(
         "A key is looked for in the PR title, branch name and description"
         + (f", matched against {len(project_keys)} known project keys." if project_keys else ".")
@@ -3795,12 +3800,38 @@ def _render_pr_hygiene(
         "age_days": st.column_config.NumberColumn("Age (days)", format="%.0f"),
         "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.0f"),
         "stale_reason": st.column_config.TextColumn("Why"),
-        "jira_key": st.column_config.TextColumn("Jira"),
+        "jira_key": st.column_config.LinkColumn(
+            "Jira", display_text=JIRA_KEY_DISPLAY_PATTERN
+        ),
+        "priority": st.column_config.TextColumn("Priority"),
+        "ticket_status": st.column_config.TextColumn("Ticket status"),
     }
 
-    key_tab, stale_tab, owner_tab, person_tab = st.tabs(
-        ["No Jira key", "Stale", "No reviewer", "By person"]
+    critical_tab, key_tab, stale_tab, owner_tab, person_tab = st.tabs(
+        ["Critical in flight", "No Jira key", "Stale", "No reviewer", "By person"]
     )
+    with critical_tab:
+        if critical.empty:
+            st.success(
+                "No open PR is carrying high-priority work in dev, review or staging."
+            )
+        else:
+            st.dataframe(
+                critical.assign(
+                    jira_key=critical["jira_key"].map(_jira_ticket_url)
+                ).sort_values(["idle_days", "age_days"], ascending=False)[
+                    ["url", "title", "jira_key", "priority", "ticket_status",
+                     "author", "repo", "age_days", "idle_days"]
+                ],
+                width="stretch",
+                hide_index=True,
+                column_config=config,
+            )
+        st.caption(
+            "High-priority tickets whose PR is still open in dev, code review or "
+            "staging: the work nearest to shipping, longest-idle first. A PR with "
+            "no Jira key has no priority to read and is listed in the next tab."
+        )
     with key_tab:
         if no_key.empty:
             st.success("Every open PR references a Jira ticket.")
@@ -4255,7 +4286,11 @@ def main() -> None:
     _render_pr_section(open_prs, github_ready, github_error, open_count_exact)
 
     st.divider()
-    _render_pr_hygiene(open_prs, github_ready, github_error, _known_project_keys(df))
+    # Every ticket, not the scoped slice: a PR belongs to the org whichever team
+    # or person the dashboard is currently looking at.
+    _render_pr_hygiene(
+        open_prs, github_ready, github_error, _known_project_keys(df), tickets=df
+    )
 
     st.divider()
     # Backlog-inclusive on purpose: a backlog ticket is the best kind to hand off,

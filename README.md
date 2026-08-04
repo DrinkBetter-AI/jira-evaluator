@@ -209,7 +209,11 @@ past changes matters:
    (matched against every project key Jira exposes, plus `JIRA_EXTRA_PROJECT_KEYS`,
    so a string like `UTF-8` does not read as a ticket); open past
    `PR_STALE_AGE_DAYS` or untouched past `PR_STALE_IDLE_DAYS`, with the reason
-   named; and nobody requested to review with no review yet. Includes a per-author
+   named; and nobody requested to review with no review yet. A first tab answers a
+   different question - which open PRs matter: those whose Jira ticket is High,
+   Highest or Urgent *and* already in dev, code review or staging, longest-idle
+   first, because that is work one review away from shipping. Tickets merely In
+   Progress are excluded: the code is still being written. Includes a per-author
    table and a CSV of everything flagged. Needs `DASHBOARD_GITHUB_TOKEN`.
 13. **Ticket Quality & Ready for Devin** — every ticket graded out of 5 on whether
    someone outside the original conversation could pick it up: a summary of at
