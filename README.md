@@ -151,7 +151,10 @@ not apply to them. The Business tab holds:
 
 The order book is read once for the whole year and then topped up: each refresh
 asks the CRM only for orders placed or changed since the last read, so a year of
-trading does not cost a year of rows every time the page loads.
+trading does not cost a year of rows every time the page loads. That first read
+waits for a button, because Streamlit runs the body of every tab on every rerun
+whichever one the browser is showing — otherwise a visitor who only wanted the
+engineering numbers would still wait for the shop's.
 
 1. **Scope** (sidebar) — `Organization` (every assignee returned by the JQL), `Team`
    (multi-select pre-filled from `JIRA_TEAM_MEMBERS`), or `Individual` (one assignee).
