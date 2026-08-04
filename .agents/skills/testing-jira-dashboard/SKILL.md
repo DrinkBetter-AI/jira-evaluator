@@ -203,6 +203,38 @@ not force it to No/Maybe). Sort the board by the Devin-able? column (Sort-by sel
 click) and confirm every value is one of Yes/No/Maybe. The board is wide — zoom the browser out
 (ctrl+minus) so the Key and Devin-able? columns are visible together in one screenshot.
 
+## Testing the PR Hygiene section (and any GitHub-backed section)
+
+- **Recompute expectations at the same moment as the UI run.** Open-PR data drifts hourly: during
+  one run a PR merged between the pre-computation and the UI load, moving open PRs 60 → 59 and the
+  "No Jira key" tile 14 → 13. Re-run the probe script immediately after loading the page and diff
+  the two sets (`set(zip(repo, number))`) to attribute any mismatch to drift rather than a bug,
+  instead of declaring a failure.
+- **Probe script shape** (module-level functions, there is no `GitHubClient` class):
+  `from github_client import fetch_open_prs, load_github_env` → `token, org = load_github_env()` →
+  `fetch_open_prs(token, org)` → `pr_hygiene.add_hygiene_fields(prs, project_keys)`. `fetch_tickets`
+  needs all of `creds_path, profile_name, jql, max_results, page_size, schema_version` as keywords.
+- **Find the discriminating rows offline first.** Diff known-key matching against
+  `pr_hygiene._GENERIC_KEY_RE`: rows where they disagree are the false-positive evidence (e.g. a PR
+  body containing `UTF-8`, or a branch containing `DEVIN-2747`) and must *stay* in the "No Jira key"
+  tab. Also list PRs whose key comes only from `branch` and only from `body` — those must be absent
+  from that tab. This is the only way to test key detection without hand-reading 60 PRs.
+- **Config fixes are often tile-invisible.** Widening the project-key list (ticket keys → Jira's
+  project list → including archived projects) changed the counts by zero on a real org, because no
+  open PR referenced the newly-added projects. Assert such fixes via the section caption
+  ("matched against N known project keys", app.py `_render_pr_hygiene`) and via targeted
+  `find_jira_key` calls (`mb-1234-fix-login` → `MB-1234`) rather than chasing a count change.
+- **One instance per env-var permutation** beats restarting: `8600` token + defaults, `8601` no
+  token, `8602` `PR_STALE_AGE_DAYS=1`, `8603` `PR_STALE_AGE_DAYS=7d`. Threshold changes are read at
+  import, so they cannot be exercised without a separate process. A garbage threshold should leave
+  the tile label at the default (`Stale (>14d old or >7d idle)`); the label itself is the assertion.
+- **GitHub token:** `DASHBOARD_GITHUB_TOKEN=$(gh auth token)` works but expires in ~1 hour — keep a
+  relaunch script (see `/home/ubuntu/launch_pr16.sh` pattern) and re-run it for long sessions.
+- **Scrolling Streamlit pages full of dataframes:** the wheel is captured by whichever `st.dataframe`
+  is under the cursor, silently scrolling table rows instead of the page. Put the cursor in the
+  right-hand margin (e.g. x≈990) to scroll the page, and over the table only when you deliberately
+  want more rows.
+
 ## Gotchas
 
 - The Streamlit page has no browser chrome if the window is in fullscreen; press `F11` before using
