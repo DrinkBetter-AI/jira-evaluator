@@ -212,9 +212,29 @@ past changes matters:
    Backlog tickets are always included regardless of *Include Backlogs* — an unowned
    backlog ticket is the best kind to hand off, and the worst-written ones collect
    there unseen.
-13. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
+13. **Sprint Planner** — a first draft of one team's next sprint, built from goals
+   rather than from the top of a priority list. Name two or three goals for the
+   sprint ("Onboarding, Quiz, Checkout", most important first) and every ticket
+   that shares a word with one — in its summary, its epic's name or its labels —
+   is filled into its owner's hours, goal by goal and highest priority first
+   inside each goal. Work already in progress is placed before anything new, on
+   the grounds that a sprint which starts three tickets and finishes none is the
+   failure worth preventing. Each person's hours come from `JIRA_WEEKLY_HOURS`
+   over the sprint's working days, **minus an overhead** — code review, Slack,
+   meetings — that defaults to 4h/week and is editable, because those hours are
+   spent every sprint and appear on no ticket. An unestimated ticket is assumed
+   to cost 4h (also editable) and the row says so, since counting it as zero
+   would let the sprint absorb unlimited unmeasured work. *Goals* shows what each
+   goal needs against what fits, which is how you find out that all three do not.
+   Everything is a proposal: tick or untick any row, change any ticket's hours,
+   and the per-person load follows the decision rather than the suggestion.
+   Nothing reaches Jira until *Add to sprint* is pressed with the edit switch
+   armed, and it only adds tickets to an active or future sprint. Jira moves an
+   issue between sprints rather than copying it, so a ticket already on another
+   open sprint leaves it; the section names those tickets before the button.
+14. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
    age-vs-idle chart, sprint planning tables, and bulk Jira write-back actions.
-14. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
+15. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
    per person against what they are actually available for, which matters when most
    contributors are part-time: `JIRA_WEEKLY_HOURS` is spread over the weekdays
    between the sprint's start and end dates, so 20h/week across a 10-working-day
