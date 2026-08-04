@@ -25,9 +25,10 @@ _KEY_ENV_VARS = ("MEDUSA_ADMIN_API_KEY", "MEDUSA_API_KEY")
 
 # One page per hundred orders keeps a thirty-day window to two or three calls.
 _PAGE_SIZE = 100
-# A month of a growing shop, with headroom; a runaway loop would otherwise walk
-# the whole order history a hundred rows at a time.
-_MAX_PAGES = 40
+# The first read covers a year, which is ~1,500 orders today, so this is a guard
+# against a runaway loop rather than a budget: it has to stay well clear of the
+# real volume, because everything past it is silently the oldest orders missing.
+_MAX_PAGES = 200
 
 # Medusa returns the order's line items whatever `fields` asks for, so the list
 # is about the columns the metrics need, not about the response size.
@@ -47,6 +48,7 @@ _SYNC_OVERLAP = _dt.timedelta(minutes=10)
 # Line-item columns: what was bought, how many, and for how much.
 ITEM_COLUMNS = [
     "order_id",
+    "item_id",
     "created_at",
     "status",
     "payment_status",
@@ -55,6 +57,7 @@ ITEM_COLUMNS = [
     "product_handle",
     "quantity",
     "revenue",
+    "refunded",
 ]
 
 # An order that was paid, including one since refunded: the refund is netted off
@@ -205,6 +208,26 @@ def _order_frame(rows: list[dict], base_url: str) -> pd.DataFrame:
     return frame.sort_values("created_at").reset_index(drop=True)
 
 
+def _with_refunds(lines: list[dict], order: dict) -> list[dict]:
+    """Spread an order's refund across its lines, in proportion to their value.
+
+    A refund is recorded against the order, not against the bottle that went
+    back, so the merchant who sold it cannot be known. Splitting it by value at
+    least keeps a merchant's revenue from counting money the customer got back,
+    and keeps the per-merchant total reconcilable with the revenue tile.
+    """
+    refunded = pd.to_numeric(order.get("refunded_total"), errors="coerce")
+    refunded = 0.0 if pd.isna(refunded) else float(refunded)
+    gross = sum(line["revenue"] for line in lines)
+    if refunded <= 0 or gross <= 0:
+        return lines
+    for line in lines:
+        line["refunded"] = round(
+            min(refunded * line["revenue"] / gross, line["revenue"]), 2
+        )
+    return lines
+
+
 def _item_frame(rows: list[dict]) -> pd.DataFrame:
     """One row per line item, carrying its order's date and payment state.
 
@@ -215,14 +238,20 @@ def _item_frame(rows: list[dict]) -> pd.DataFrame:
     records: list[dict] = []
     for order in rows:
         order_id = order.get("id")
-        for item in order.get("items") or []:
+        lines: list[dict] = []
+        for position, item in enumerate(order.get("items") or []):
             quantity = pd.to_numeric(item.get("quantity"), errors="coerce")
             quantity = 0 if pd.isna(quantity) else int(quantity)
             unit_price = pd.to_numeric(item.get("unit_price"), errors="coerce")
             unit_price = 0.0 if pd.isna(unit_price) else float(unit_price)
-            records.append(
+            lines.append(
                 {
                     "order_id": order_id,
+                    # Identity per line, so paging that returns an order twice
+                    # collapses to one copy while an order genuinely listing the
+                    # same wine on two lines keeps both. Falls back to position
+                    # when Medusa omits the id.
+                    "item_id": str(item.get("id") or f"{order_id}#{position}"),
                     "created_at": order.get("created_at"),
                     "status": order.get("status"),
                     "payment_status": order.get("payment_status"),
@@ -231,13 +260,17 @@ def _item_frame(rows: list[dict]) -> pd.DataFrame:
                     "product_handle": item.get("product_handle") or "",
                     "quantity": quantity,
                     "revenue": round(unit_price * quantity, 2),
+                    "refunded": 0.0,
                 }
             )
+        records.extend(_with_refunds(lines, order))
     if not records:
         return pd.DataFrame(columns=ITEM_COLUMNS)
     frame = pd.DataFrame(records)[ITEM_COLUMNS]
-    frame = frame.drop_duplicates()
+    frame = frame.drop_duplicates(subset=["order_id", "item_id"])
     frame["created_at"] = pd.to_datetime(frame["created_at"], utc=True, errors="coerce")
+    for column in ("revenue", "refunded"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
     for column in ("status", "payment_status", "currency_code", "product_handle"):
         frame[column] = frame[column].fillna("").astype(str).str.strip().str.lower()
     frame["title"] = frame["title"].fillna("").astype(str).str.strip()
@@ -259,6 +292,18 @@ def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFra
     # Read by the UI to say so, rather than reporting a partial book as the book.
     frame.attrs["truncated"] = truncated
     return frame
+
+
+def _stack(kept: pd.DataFrame, fresh: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Concatenate two frames, ignoring an empty one so its dtypes cannot win.
+
+    A refresh that finds nothing new hands over an all-empty frame, and pandas
+    reads its columns as objects when deciding the result's dtypes.
+    """
+    parts = [frame for frame in (kept, fresh) if not frame.empty]
+    if not parts:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(parts, ignore_index=True)
 
 
 def sync_order_book(
@@ -300,8 +345,8 @@ def sync_order_book(
         changed = set(fresh_orders["id"].tolist())
         kept_orders = previous.orders[~previous.orders["id"].isin(changed)]
         kept_items = previous.items[~previous.items["order_id"].isin(changed)]
-        order_frame = pd.concat([kept_orders, fresh_orders], ignore_index=True)
-        item_frame = pd.concat([kept_items, fresh_items], ignore_index=True)
+        order_frame = _stack(kept_orders, fresh_orders, COLUMNS)
+        item_frame = _stack(kept_items, fresh_items, ITEM_COLUMNS)
         truncated = truncated or previous.truncated
     else:
         order_frame, item_frame = fresh_orders, fresh_items

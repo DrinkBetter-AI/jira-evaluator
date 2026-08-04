@@ -3425,7 +3425,24 @@ def _order_book_holder(base_url: str, days: int) -> dict:
     rather than recomputed: cache_data would hand back a copy and every refresh
     would re-read the year.
     """
-    return {"book": None, "lock": threading.Lock()}
+    return {"book": None, "stale": False, "lock": threading.Lock()}
+
+
+def _expire_order_book() -> None:
+    """Make the next read of the order book go to the CRM.
+
+    The book itself is kept: what is dropped is its freshness, so the refresh
+    still only asks for what changed rather than re-reading the year.
+    """
+    try:
+        config = orders_client.load_medusa_env()
+    except orders_client.MedusaConfigError:
+        return
+    if config is None:
+        return
+    holder = _order_book_holder(config[1], ORDER_BOOK_DAYS)
+    with holder["lock"]:
+        holder["stale"] = True
 
 
 def _order_book(api_key: str, base_url: str) -> orders_client.OrderBook:
@@ -3433,7 +3450,7 @@ def _order_book(api_key: str, base_url: str) -> orders_client.OrderBook:
     holder = _order_book_holder(base_url, ORDER_BOOK_DAYS)
     with holder["lock"]:
         book = holder["book"]
-        if book is not None:
+        if book is not None and not holder["stale"]:
             age = (_dt.datetime.now(_dt.timezone.utc) - book.synced_at).total_seconds()
             if age < ORDER_BOOK_TTL_SECONDS:
                 return book
@@ -3441,6 +3458,7 @@ def _order_book(api_key: str, base_url: str) -> orders_client.OrderBook:
             book, api_key, base_url, ORDER_BOOK_DAYS
         )
         holder["book"] = book
+        holder["stale"] = False
         return book
 
 
@@ -3495,8 +3513,8 @@ def _render_orders(order_book: orders_client.OrderBook, base_url: str) -> None:
         st.warning(
             "The CRM has more orders in this period than one read can carry, so "
             "the oldest of them are missing. The figures below are a floor, not a "
-            "count: the comparison windows lose most, and the 30-day window too "
-            "if the shop now takes more than 4,000 orders a month."
+            "count: the oldest months go first, and the 7- and 30-day windows "
+            "only once the shop takes more orders in a year than one read carries."
         )
     week = orders.window_metrics(book, 7)
     month = orders.window_metrics(book, 30)
@@ -3558,11 +3576,14 @@ def _render_wines_and_merchants(
         key="business_window_days",
     )
 
-    _, currency, _ = orders.single_currency(order_book.orders)
+    # Same guard as the tiles: lines billed in another currency are set aside
+    # rather than added into a column labelled with this one.
+    _, currency, other_currencies = orders.single_currency(order_book.orders)
+    items = orders.main_currency_items(order_book.items, currency)
     wines_tab, merchants_tab = st.tabs(["Top wines", "By merchant"])
 
     with wines_tab:
-        wines = orders.top_wines(order_book.items, days)
+        wines = orders.top_wines(items, days)
         if wines.empty:
             st.info(f"No wine sold in the last {days} days.")
         else:
@@ -3592,7 +3613,7 @@ def _render_wines_and_merchants(
         except Exception as exc:  # noqa: BLE001
             st.warning(f"Could not read the merchant list: {str(exc)[:200]}")
             return
-        table = orders.merchant_breakdown(order_book.items, prefixes, days)
+        table = orders.merchant_breakdown(items, prefixes, days)
         if table.empty:
             st.info(f"No orders in the last {days} days.")
             return
@@ -3613,13 +3634,20 @@ def _render_wines_and_merchants(
             "A merchant is read from the product handle on each line, so an order "
             "split between two merchants counts once for each and the order "
             "columns do not sum to the shop's totals. Revenue counts captured "
-            "lines only, at the price on the line."
+            "lines only, at the price on the line, less a share of anything the "
+            "order was refunded."
         )
         if not unattributed.empty:
             st.caption(
                 "'Unattributed' is wine whose handle matches no current merchant "
                 "prefix, usually a shop that has since been renamed; it is shown "
                 "rather than credited to a guess."
+            )
+        if other_currencies:
+            st.caption(
+                f"Both tables cover {currency.upper()} orders only; "
+                f"{', '.join(code.upper() for code in other_currencies)} is left "
+                "out rather than added to a total in another currency."
             )
 
 
@@ -4145,6 +4173,9 @@ def main() -> None:
 
     if refresh_clicked:
         st.cache_data.clear()
+        # The order book is a cache_resource, which cache_data.clear() cannot
+        # reach, so Refresh would otherwise leave the shop's figures alone.
+        _expire_order_book()
 
     jql = JQL
     max_results = MAX_RESULTS

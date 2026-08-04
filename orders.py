@@ -25,7 +25,8 @@ LOOKBACK_WINDOWS = (30, 90, 180, 360)
 
 # Sold alongside the wine and shipped with it, but nobody's bottle. Left in the
 # merchant tables, where it is real money, and out of the wine table, where it
-# would otherwise outrank every wine in the shop.
+# would otherwise outrank every wine in the shop. Matched as handle prefixes, so
+# a second size or a re-slug (`ice-pack-large`) is still an add-on.
 NON_WINE_HANDLES = frozenset({"ice-pack"})
 
 UNATTRIBUTED = "Unattributed"
@@ -86,6 +87,21 @@ def single_currency(orders: pd.DataFrame) -> tuple[pd.DataFrame, str, list[str]]
     if not others:
         return orders, main, []
     return orders[orders["currency_code"].eq(main)], main, others
+
+
+def is_add_on(handle: str) -> bool:
+    """Whether a product handle names something shipped with wine, not wine."""
+    text = str(handle or "").strip().lower()
+    return any(
+        text == prefix or text.startswith(f"{prefix}-") for prefix in NON_WINE_HANDLES
+    )
+
+
+def main_currency_items(items: pd.DataFrame, currency: str) -> pd.DataFrame:
+    """Lines billed in ``currency``; money in two currencies cannot be added."""
+    if items.empty or not currency or "currency_code" not in items.columns:
+        return items
+    return items[items["currency_code"].eq(currency)]
 
 
 def _canceled(orders: pd.DataFrame) -> pd.Series:
@@ -220,7 +236,7 @@ def top_wines(
     window = _standing(_slice(items, end - _dt.timedelta(days=days), end))
     if window.empty:
         return pd.DataFrame(columns=columns)
-    wines = window[~window["product_handle"].isin(NON_WINE_HANDLES)]
+    wines = window[~window["product_handle"].map(is_add_on)]
     if wines.empty:
         return pd.DataFrame(columns=columns)
     grouped = (
@@ -251,7 +267,7 @@ def merchant_of(handle: str, prefixes: dict[str, str]) -> str:
     elsewhere.
     """
     text = str(handle or "").strip().lower()
-    if text in NON_WINE_HANDLES:
+    if is_add_on(text):
         return PLATFORM
     for prefix in sorted(prefixes, key=len, reverse=True):
         if text.startswith(f"{prefix}-"):
@@ -283,8 +299,11 @@ def merchant_breakdown(
     )
     canceled = window["status"].isin(CANCELED_STATUSES)
     paid = window["payment_status"].isin(PAID_PAYMENT_STATUSES) & ~canceled
+    # Net of refunds, as the revenue tile is: a paid order that was handed back
+    # is not earnings, and counting it would make the two disagree.
+    window = window.assign(kept=(window["revenue"] - window["refunded"]).clip(lower=0))
     earned = (
-        window[paid].groupby("merchant")["revenue"].sum().round(2)
+        window[paid].groupby("merchant")["kept"].sum().round(2)
         if paid.any()
         else pd.Series(dtype=float)
     )
@@ -317,6 +336,8 @@ __all__ = [
     "UNATTRIBUTED",
     "WindowMetrics",
     "daily_orders",
+    "is_add_on",
+    "main_currency_items",
     "merchant_breakdown",
     "merchant_of",
     "single_currency",
