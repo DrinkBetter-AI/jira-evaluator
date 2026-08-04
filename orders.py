@@ -56,10 +56,41 @@ def _slice(orders: pd.DataFrame, start: _dt.datetime, end: _dt.datetime) -> pd.D
     return orders[created.ge(start) & created.lt(end)]
 
 
+def single_currency(orders: pd.DataFrame) -> tuple[pd.DataFrame, str, list[str]]:
+    """The order book in its main currency, that currency, and any others found.
+
+    Totals in different currencies cannot be added, and the shop has only ever
+    billed in one. Should that change, the tiles keep meaning something - they
+    report the main currency - and the caller names what was set aside.
+    """
+    if orders.empty or "currency_code" not in orders.columns:
+        return orders, "", []
+    found = orders["currency_code"].value_counts()
+    main = str(found.index[0])
+    others = sorted(str(code) for code in found.index[1:])
+    if not others:
+        return orders, main, []
+    return orders[orders["currency_code"].eq(main)], main, others
+
+
+def _canceled(orders: pd.DataFrame) -> pd.Series:
+    if orders.empty:
+        return pd.Series(dtype=bool)
+    return orders["status"].isin(CANCELED_STATUSES)
+
+
 def _paid(orders: pd.DataFrame) -> pd.DataFrame:
+    """Orders whose money the shop kept: captured, and not cancelled.
+
+    Payment state alone is not enough. A cancelled order is usually refunded,
+    and a refund is only a correction to revenue when the sale stood; on a
+    cancelled order it means the sale did not happen at all.
+    """
     if orders.empty:
         return orders
-    return orders[orders["payment_status"].isin(PAID_PAYMENT_STATUSES)]
+    return orders[
+        orders["payment_status"].isin(PAID_PAYMENT_STATUSES) & ~_canceled(orders)
+    ]
 
 
 def window_metrics(
@@ -76,9 +107,7 @@ def window_metrics(
     previous = _slice(orders, previous_start, start)
     paid = _paid(current)
     revenue = float(paid["total"].sum()) if not paid.empty else 0.0
-    canceled = (
-        int(current["status"].isin(CANCELED_STATUSES).sum()) if not current.empty else 0
-    )
+    canceled = int(_canceled(current).sum()) if not current.empty else 0
     return WindowMetrics(
         days=days,
         orders=int(len(current)),
@@ -103,9 +132,13 @@ def daily_orders(
     """
     columns = ["date", "orders", "revenue"]
     end = now or _dt.datetime.now(_dt.timezone.utc)
-    start = end - _dt.timedelta(days=days)
-    window = _slice(orders, start, end)
-    index = pd.date_range(start.date(), end.date(), freq="D", tz="UTC").normalize()
+    # Whole days only: counting from this hour ``days`` ago would draw a first
+    # bar covering the tail of a day and read as a collapse in orders.
+    start = pd.Timestamp(end).tz_convert("UTC").normalize() - pd.Timedelta(
+        days=days - 1
+    )
+    window = _slice(orders, start.to_pydatetime(), end)
+    index = pd.date_range(start, pd.Timestamp(end).tz_convert("UTC").normalize(), freq="D")
     if window.empty:
         return pd.DataFrame({"date": index.date, "orders": 0, "revenue": 0.0})[columns]
 
@@ -127,4 +160,10 @@ def daily_orders(
     )[columns]
 
 
-__all__ = ["CANCELED_STATUSES", "WindowMetrics", "daily_orders", "window_metrics"]
+__all__ = [
+    "CANCELED_STATUSES",
+    "WindowMetrics",
+    "daily_orders",
+    "single_currency",
+    "window_metrics",
+]

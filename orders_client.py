@@ -30,7 +30,7 @@ _MAX_PAGES = 40
 
 # Medusa returns the order's line items whatever `fields` asks for, so the list
 # is about the columns the metrics need, not about the response size.
-_ORDER_FIELDS = "id,display_id,created_at,status,total,currency_code"
+_ORDER_FIELDS = "id,display_id,created_at,status,payment_status,total,currency_code"
 
 # An order that was paid, including one since partly refunded: the refund is a
 # correction to revenue already earned, not a sale that never happened.
@@ -108,6 +108,14 @@ def fetch_orders(since: _dt.datetime, api_key: str, base_url: str) -> pd.DataFra
     if not rows:
         return pd.DataFrame(columns=COLUMNS)
     frame = pd.DataFrame(rows)
+    # Revenue is defined by payment state, so an order book without it is not a
+    # smaller answer, it is a wrong one - every order would read as unpaid.
+    if "payment_status" not in frame.columns:
+        raise MedusaConfigError(
+            "The CRM returned orders with no payment_status, so paid and unpaid "
+            "orders cannot be told apart. Check the Medusa version behind "
+            f"{base_url}."
+        )
     for column in COLUMNS:
         if column not in frame.columns:
             frame[column] = None

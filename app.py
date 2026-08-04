@@ -3405,8 +3405,9 @@ def fetch_orders_cached(api_key: str, base_url: str, days: int) -> pd.DataFrame:
     return orders_client.fetch_orders(since, api_key, base_url)
 
 
-def _money(amount: float) -> str:
-    return f"${amount:,.2f}"
+def _money(amount: float, currency: str = "usd") -> str:
+    symbol = {"usd": "$", "eur": "\u20ac", "gbp": "\u00a3"}.get(currency.lower(), "")
+    return f"{symbol}{amount:,.2f}" + (f" {currency.upper()}" if not symbol else "")
 
 
 def _render_orders() -> None:
@@ -3428,6 +3429,9 @@ def _render_orders() -> None:
         st.warning(f"Could not read orders from the CRM: {exc}")
         return
 
+    # Totals in different currencies cannot be added; the shop bills in one, and
+    # if that ever stops being true the tiles report the main one and say so.
+    book, currency, other_currencies = orders.single_currency(book)
     week = orders.window_metrics(book, 7)
     month = orders.window_metrics(book, 30)
     for window, label in ((week, "7 days"), (month, "30 days")):
@@ -3437,10 +3441,13 @@ def _render_orders() -> None:
         )
         tiles[1].metric(
             f"Revenue ({label})",
-            _money(window.revenue),
-            delta=f"{'+' if window.revenue_delta >= 0 else '-'}{_money(abs(window.revenue_delta))}",
+            _money(window.revenue, currency),
+            delta=(
+                f"{'+' if window.revenue_delta >= 0 else '-'}"
+                f"{_money(abs(window.revenue_delta), currency)}"
+            ),
         )
-        tiles[2].metric(f"AOV ({label})", _money(window.aov))
+        tiles[2].metric(f"AOV ({label})", _money(window.aov, currency))
         # Cancelled and unpaid are the gap between "orders" and "revenue", and
         # the reason the two tiles do not divide into each other.
         tiles[3].metric(
@@ -3460,6 +3467,12 @@ def _render_orders() -> None:
         "excluded from both. Deltas compare with the equivalent window before it. "
         f"Read read-only from {base_url}, cached for 15 minutes."
     )
+    if other_currencies:
+        st.caption(
+            f"Figures cover {currency.upper()} orders only; orders in "
+            f"{', '.join(code.upper() for code in other_currencies)} are left out "
+            "rather than added to a total in another currency."
+        )
 
 
 def _render_resolved_summary(
