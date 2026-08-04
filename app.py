@@ -1139,13 +1139,22 @@ def _render_epics(df: pd.DataFrame) -> None:
     e2.metric("Epics needing attention", max(drifting, 0))
     e3.metric("Tickets with no epic", orphans)
 
-    display = rollup.drop(columns=["epic_key"])
+    # "No epic" is a bucket rather than an issue, so it gets no link to follow.
+    display = rollup.copy()
+    display["epic_url"] = display["epic_key"].map(
+        lambda key: _jira_ticket_url(key) if str(key).strip() else ""
+    )
+    display = display.drop(columns=["epic_key"])
+    display.insert(0, "epic_url", display.pop("epic_url"))
     st.dataframe(
         display,
         width="stretch",
         hide_index=True,
         column_config={
-            "epic": st.column_config.TextColumn("Epic"),
+            "epic_url": st.column_config.LinkColumn(
+                "Key", display_text=JIRA_KEY_DISPLAY_PATTERN
+            ),
+            "epic": st.column_config.TextColumn("Epic", width="large"),
             "open_children": st.column_config.NumberColumn("Open"),
             "owners": st.column_config.NumberColumn("Owners"),
             "avg_idle": st.column_config.NumberColumn("Avg idle (days)", format="%.1f"),
@@ -3326,9 +3335,14 @@ def _render_ticket_quality(df: pd.DataFrame) -> None:
         "regardless of *Include Backlogs*."
     )
 
-    columns = ["key", "summary", "status", "assignee", "reporter", "quality_score", "missing"]
+    gradable = gradable.assign(key_url=gradable["key"].map(_jira_ticket_url))
+    ready = ready.assign(key_url=ready["key"].map(_jira_ticket_url))
+    maybe = maybe.assign(key_url=maybe["key"].map(_jira_ticket_url))
+    unclear = unclear.assign(key_url=unclear["key"].map(_jira_ticket_url))
+
+    columns = ["key_url", "summary", "status", "assignee", "reporter", "quality_score", "missing"]
     config = {
-        "key": st.column_config.TextColumn("Key"),
+        "key_url": st.column_config.LinkColumn("Key", display_text=JIRA_KEY_DISPLAY_PATTERN),
         "summary": st.column_config.TextColumn("Summary", width="large"),
         "status": st.column_config.TextColumn("Status"),
         "assignee": st.column_config.TextColumn("Assignee"),
@@ -3404,7 +3418,7 @@ def _render_ticket_quality(df: pd.DataFrame) -> None:
 
     st.download_button(
         "Download ticket scores (CSV)",
-        gradable[columns + ["devinable"]].to_csv(index=False),
+        gradable[["key"] + columns[1:] + ["devinable"]].to_csv(index=False),
         file_name="ticket_quality.csv",
         mime="text/csv",
     )

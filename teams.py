@@ -22,16 +22,26 @@ FORMER_TEAM = "Former staff"
 
 _NO_OWNER = {"", "unassigned", "none"}
 
+# Teams that used to be tracked separately and are now one. Applied after both
+# routing paths, so a ticket routed by project key lands in the same row as one
+# routed by assignee - a raw ``CRM`` project key is the same team as Anouar.
+TEAM_ALIASES = {
+    "crm": "Marketplace",
+    "leadership": "Business strategy",
+    "business": "Business strategy",
+}
+
 # The VinoVoss roster as of this writing; overridden wholesale by JIRA_TEAM_PEOPLE.
 DEFAULT_TEAM_PEOPLE = (
-    "Marketplace=Shawn,Shown,David,Mohsen,Gaston;"
-    "CRM=Anouar,Jal;"
+    # The CRM is the merchant side of the marketplace, and leadership sets the
+    # business direction: two rows each would split one team's work in half.
+    "Marketplace=Shawn,Shown,David,Mohsen,Gaston,Anouar,Jal;"
     "App=Ali,Farid;"
     "Design=Robert,Alesya;"
     "QA=Santi,Dina;"
     "ML=Tam,Mehdi,Jim;"
-    "Business=Zoe,Praveen,Igor,Jason,Kenesha,Whitney,Jennifer,Nancy,Matthew,Sylvia,Evmorfia;"
-    "Leadership=Angel,Arsalan,Mihai,Jeff;"
+    "Business strategy=Zoe,Praveen,Igor,Jason,Kenesha,Whitney,Jennifer,Nancy,"
+    "Matthew,Sylvia,Evmorfia,Angel,Arsalan,Mihai,Jeff;"
     # Full Jira display names, verified against the instance: a bare "Dan" would
     # file a future Dan Someone-Else's tickets under people who have left.
     f"{FORMER_TEAM}=Armine Aproyan,Saji,Sai Shankar,Saeid Parsa,Haichen Song,"
@@ -62,6 +72,29 @@ def parse_team_projects(spec: str) -> dict[str, str]:
 def parse_team_people(spec: str) -> dict[str, str]:
     """Person name -> team name, from the ``Team=Name,Name;Team=Name`` spec."""
     return _parse_groups(spec)
+
+
+def _active_aliases(
+    project_teams: dict[str, str], people_teams: dict[str, str]
+) -> dict[str, str]:
+    """The merges that still apply once the deployment has had its say.
+
+    A team someone names in ``JIRA_TEAM_PEOPLE`` or ``JIRA_TEAM_PROJECTS`` is a
+    deliberate answer to "who owns this", so a historical merge must neither
+    rename a team the roster still keeps nor invent one it has never heard of.
+    An alias therefore needs both ends to agree: the old name absent from the
+    roster and the new one present. Where it survives it catches what the roster
+    cannot - the bare project key a ticket with an off-roster owner falls back to.
+    """
+    configured = {
+        str(team).strip().lower()
+        for team in (*project_teams.values(), *people_teams.values())
+    }
+    return {
+        name: target
+        for name, target in TEAM_ALIASES.items()
+        if name not in configured and target.lower() in configured
+    }
 
 
 def _team_for_person(display_name: str, people_teams: dict[str, str]) -> str | None:
@@ -113,7 +146,9 @@ def add_team(
     # An unowned ticket has no team of its own; it belongs to whoever picks it up,
     # so it is called out rather than silently attributed to a project's team.
     no_owner = owners.str.strip().str.lower().isin(_NO_OWNER)
-    out["team"] = by_person.fillna(by_project).mask(no_owner, NO_OWNER_TEAM)
+    team = by_person.fillna(by_project).mask(no_owner, NO_OWNER_TEAM).astype(str)
+    aliases = _active_aliases(project_teams, people_teams)
+    out["team"] = team.map(lambda name: aliases.get(name.strip().lower(), name))
     return out
 
 
