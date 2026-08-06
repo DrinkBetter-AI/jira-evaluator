@@ -32,6 +32,7 @@ accident, and it has no access to Google Ads itself at all.
 from __future__ import annotations
 
 import datetime as _dt
+import functools
 import json
 import os
 import re
@@ -63,6 +64,11 @@ LOOKBACK_WINDOWS = (7, 30)
 
 _CUSTOMER_ID_PATTERN = re.compile(r"^\d{6,12}$")
 _NAME_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{1,1024}$")
+# Project ids are letters, digits and hyphens, optionally domain-prefixed for the
+# oldest projects (`example.com:project`). Checked for the same reason as the
+# dataset: both are interpolated into a backquoted table reference, which a
+# backquote in either would close.
+_PROJECT_PATTERN = re.compile(r"^[A-Za-z0-9\-.]{1,63}(:[A-Za-z0-9\-]{1,63})?$")
 
 
 class AdsConfigError(RuntimeError):
@@ -106,6 +112,11 @@ class Spend:
     days_with_data: int
     first_day: _dt.date | None
     last_day: _dt.date | None
+    # The window asked for, and the earliest day the transfer has loaded anything
+    # at all. Between them they tell a window whose history has not arrived from
+    # one whose account simply spent nothing: a quiet day has no row either.
+    window_start: _dt.date | None = None
+    history_start: _dt.date | None = None
 
     @property
     def cost_per_conversion(self) -> float:
@@ -122,8 +133,25 @@ class Spend:
 
     @property
     def partial(self) -> bool:
-        """Whether the window is missing days, and so understates spend."""
-        return self.days_with_data < self.days
+        """Whether the window starts before the transfer's history does.
+
+        Deliberately not "fewer days have rows than the window is long". The
+        stats table has no row for a day on which nothing ran, so an account
+        paused for a fortnight would otherwise be reported as a broken feed. What
+        makes a figure an understatement is history that begins mid-window.
+        """
+        if self.history_start is None or self.window_start is None:
+            return False
+        return self.history_start > self.window_start
+
+    @property
+    def days_loaded(self) -> int:
+        """Days of the window the transfer has actually loaded."""
+        if not self.partial:
+            return self.days
+        assert self.history_start is not None  # narrowed by `partial`
+        assert self.window_start is not None
+        return max(self.days - (self.history_start - self.window_start).days, 0)
 
 
 def load_ads_env() -> AdsConfig | None:
@@ -160,6 +188,11 @@ def load_ads_env() -> AdsConfig | None:
         )
     if not _NAME_PATTERN.match(dataset):
         raise AdsConfigError(f"{_DATASET_ENV_VAR} is not a valid dataset name.")
+    if not _PROJECT_PATTERN.match(project):
+        raise AdsConfigError(
+            f"{project!r} is not a GCP project id; check "
+            f"{_PROJECT_ENV_VAR} and the key's project_id."
+        )
     return AdsConfig(
         project=project, dataset=dataset, customer_id=customer, key_json=key_json
     )
@@ -175,6 +208,22 @@ def _default_project() -> str:
         value = os.getenv(var, "").strip()
         if value:
             return value
+    return _adc_project()
+
+
+@functools.lru_cache(maxsize=1)
+def _adc_project() -> str:
+    """The project the ambient credentials belong to, asked once per process.
+
+    On Cloud Run none of the project variables are set, so this is the branch that
+    answers - and it reaches the metadata server to do it. It is called on every
+    Streamlit rerun, which is every click, so the answer is remembered: the
+    identity a process runs as does not change underneath it.
+    """
+    return _ask_adc_project()
+
+
+def _ask_adc_project() -> str:
     try:
         import google.auth  # noqa: PLC0415 - optional dependency
 
@@ -363,6 +412,8 @@ def window(stats: pd.DataFrame, days: int, now: _dt.date | None = None) -> Spend
             days_with_data=0,
             first_day=None,
             last_day=None,
+            window_start=first,
+            history_start=None,
         )
 
     current = stats[(stats["day"] >= first) & (stats["day"] <= last)]
@@ -380,6 +431,11 @@ def window(stats: pd.DataFrame, days: int, now: _dt.date | None = None) -> Spend
         days_with_data=len(days_present),
         first_day=days_present[0] if days_present else None,
         last_day=days_present[-1] if days_present else None,
+        window_start=first,
+        # Across both periods, not just the current one: the query asks for twice
+        # the window, so the earliest row in it is where the transfer's history
+        # begins whenever that is later than the query's own start.
+        history_start=min(stats["day"]),
     )
 
 
@@ -460,6 +516,10 @@ class Sales:
 
     orders: int
     revenue: float
+    # The currency that revenue is in. Money in two currencies cannot be added,
+    # so the caller takes the shop's main one - and if it is not the currency the
+    # ad account bills in, dividing one by the other means nothing.
+    currency: str = ""
 
 
 # Below this, wine's margin does not cover the ad that sold it. A rough floor
@@ -485,10 +545,16 @@ def verdicts(spend: Spend, campaigns: pd.DataFrame, sales: Sales | None) -> list
 
     if sales is not None and sales.orders:
         per_order = spend.cost / sales.orders
+        # The basket is only quoted when there is revenue to quote: a caller that
+        # cannot compare the two currencies passes the orders without it.
+        basket = (
+            f", against an average basket of {_money(sales.revenue / sales.orders)}"
+            if sales.revenue
+            else ""
+        )
         lines.append(
             f"**{_money(spend.cost)} bought {sales.orders:,} orders** - "
-            f"{_money(per_order)} of ad spend per order, against an average "
-            f"basket of {_money(sales.revenue / sales.orders)}."
+            f"{_money(per_order)} of ad spend per order{basket}."
         )
         if sales.revenue:
             true_roas = sales.revenue / spend.cost

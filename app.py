@@ -3769,8 +3769,14 @@ def _ads_sales(
         _dt.time.min,
         tzinfo=_dt.timezone.utc,
     )
-    metrics = orders.window_metrics(order_book.orders, span, now=end)
-    return ads_client.Sales(orders=metrics.paid_orders, revenue=metrics.revenue)
+    # The shop's main currency only. Every other money section does the same,
+    # and adding takings in two currencies would inflate the return on spend
+    # quoted in one of them.
+    book, currency, _others = orders.single_currency(order_book.orders)
+    metrics = orders.window_metrics(book, span, now=end)
+    return ads_client.Sales(
+        orders=metrics.paid_orders, revenue=metrics.revenue, currency=currency
+    )
 
 
 def _money_delta(change: float, currency: str) -> str:
@@ -3857,17 +3863,33 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         "Ad spend per order",
         _money(spend.cost / sales.orders, money) if sales and sales.orders else "\u2014",
     )
+    # Comparable only if the shop takes money in the currency the ads are billed
+    # in; otherwise the ratio is one currency divided by another.
+    comparable = bool(sales and (not sales.currency or sales.currency == money))
     tiles[3].metric(
         "Revenue per $1 spent",
-        f"{sales.revenue / spend.cost:.1f}x" if sales and spend.cost else "\u2014",
+        f"{sales.revenue / spend.cost:.1f}x"
+        if sales and comparable and spend.cost
+        else "\u2014",
     )
     tiles[4].metric("Google's own conversions", f"{spend.conversions:,.0f}")
 
     if spend.partial:
         st.warning(
-            f"Only {spend.days_with_data} of these {days} days have arrived "
-            f"({spend.first_day} to {spend.last_day}), so the spend figure is "
-            "that much of the window rather than all of it."
+            f"Only {spend.days_loaded} of these {days} days have been loaded: "
+            f"the transfer's history starts on {spend.history_start}, so the "
+            "spend figure is that much of the window rather than all of it."
+        )
+    elif not spend.cost:
+        st.info(
+            f"No spend recorded in the last {days} days. The dataset is loaded "
+            "up to date, so this is a quiet account rather than missing figures."
+        )
+    if sales and not comparable:
+        st.caption(
+            f"The shop's takings are in {sales.currency.upper()} and the ad "
+            f"account bills in {currency.upper()}, so return per unit spent is "
+            "left blank rather than dividing one currency by another."
         )
 
     st.dataframe(
@@ -3900,6 +3922,13 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         hide_index=True,
     )
 
+    # Orders can still be compared against spend when the currencies differ -
+    # a count is a count - but revenue cannot, so it is withheld rather than
+    # divided by a figure in another currency.
+    if sales and not comparable:
+        sales = ads_client.Sales(
+            orders=sales.orders, revenue=0.0, currency=sales.currency
+        )
     lines = ads_client.verdicts(spend, campaigns, sales)
     if lines:
         with st.expander("What this means", expanded=True):
