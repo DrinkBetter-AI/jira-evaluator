@@ -386,7 +386,7 @@ def event_breakdown(
             ("limit", str(_BREAKDOWN_LIMIT)),
         ],
     )
-    rows = _segmentation_totals(payload)
+    rows = _segmentation_totals(payload, event)
     if not rows:
         return pd.DataFrame(columns=["value", "events"])
     frame = pd.DataFrame(rows, columns=["value", "events"])
@@ -395,12 +395,17 @@ def event_breakdown(
     return frame.sort_values("events", ascending=False).reset_index(drop=True)
 
 
-def _segmentation_totals(payload: dict) -> list[tuple[str, int]]:
+def _segmentation_totals(payload: dict, event: str) -> list[tuple[str, int]]:
     """``(label, total)`` per group in an event segmentation response.
 
     Amplitude returns one series of per-interval numbers per group. Summing them
     is only valid because the metric asked for is ``totals``; the same sum over
     unique users would count a person who came back on Tuesday twice.
+
+    A grouping Amplitude did not apply - an event that never carries the
+    property - comes back as the ungrouped shape: one series labelled with the
+    event itself. That is dropped, because a table whose only row is
+    ``app_error_occurred`` claims to be a breakdown and is not one.
     """
     data = payload.get("data")
     if not isinstance(data, dict):
@@ -413,7 +418,10 @@ def _segmentation_totals(payload: dict) -> list[tuple[str, int]]:
     for index, values in enumerate(series):
         if index >= len(labels) or not isinstance(values, list):
             continue
-        rows.append((_series_label(labels[index]), sum(_as_ints(values))))
+        label = _series_label(labels[index])
+        if len(series) == 1 and label == event:
+            return []
+        rows.append((label, sum(_as_ints(values))))
     return rows
 
 

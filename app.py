@@ -3825,17 +3825,17 @@ def _render_product_funnel() -> None:
     tiles[0].metric(
         f"{top['step']} ({days}d)",
         f"{int(top['users']):,}",
-        delta=_people_delta(top, previous, 0),
+        **_delta_arrow(_people_delta(top, previous, 0)),
     )
     tiles[1].metric(
         f"{end['step']} ({days}d)",
         f"{int(end['users']):,}",
-        delta=_people_delta(end, previous, len(steps) - 1),
+        **_delta_arrow(_people_delta(end, previous, len(steps) - 1)),
     )
     tiles[2].metric(
         "Visit to order",
         _percent(float(end["from_start"])),
-        delta=_rate_delta(steps, previous, len(steps) - 1, "from_start"),
+        **_delta_arrow(_rate_delta(steps, previous, len(steps) - 1, "from_start")),
     )
     tiles[3].metric(
         "Biggest drop-off",
@@ -3919,6 +3919,19 @@ def _render_product_funnel() -> None:
         )
 
 
+def _delta_arrow(change: str | None) -> dict:
+    """``st.metric`` arguments that do not call standing still an improvement.
+
+    Streamlit colours a tile's delta by whether the string begins with a minus,
+    so "flat" and "+0 people" would both be drawn as a green arrow upwards. In a
+    table or a sentence those words are read; on a tile only the arrow is.
+    """
+    if change is None:
+        return {}
+    unmoved = change == "flat" or change.startswith(("+0 ", "+0.0"))
+    return {"delta": change, "delta_color": "off" if unmoved else "normal"}
+
+
 def _people_delta(
     row: pd.Series, previous: pd.DataFrame | None, index: int
 ) -> str | None:
@@ -3944,6 +3957,13 @@ def _rate_delta(
     # from another's.
     if steps.iloc[index]["event"] != previous.iloc[index]["event"]:
         return None
+    # A rate over nobody is unknown, not zero: an empty previous period would
+    # otherwise make this one look like a triumph, and a step nobody reached now
+    # would report the shop as having collapsed.
+    denominator = index - 1 if column == "from_previous" else 0
+    for frame in (steps, previous):
+        if not int(frame.iloc[denominator]["users"]):
+            return None
     change = float(steps.iloc[index][column]) - float(previous.iloc[index][column])
     if abs(change) < _NOISE_POINTS:
         return "flat"
