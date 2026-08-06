@@ -91,6 +91,10 @@ class Burn:
     # fewer than the window: a billing export switched on last week holds a
     # week, and averaging that week over a month is a discount nobody gave.
     days_loaded: int | None = None
+    # Whether the period before this one is whole. A source that starts inside
+    # it holds a day or two of a month, and a month measured against two days
+    # of it is a rise of a thousand per cent that never happened.
+    comparable: bool = True
 
     @property
     def cost_change(self) -> float:
@@ -203,6 +207,7 @@ def window(
     provider: str = "OpenAI",
     now: _dt.date | None = None,
     loaded: int | None = None,
+    comparable: bool = True,
 ) -> Burn:
     """Split a daily cost frame into this window and the one before it.
 
@@ -235,6 +240,7 @@ def window(
         lines=by_line(current),
         other_currencies=others,
         days_loaded=min(loaded, days) if loaded else None,
+        comparable=comparable,
     )
 
 
@@ -315,21 +321,24 @@ def verdicts(burn: Burn) -> list[str]:
         f"**{_money(burn.cost, money)} on {burn.provider} in {burn.days} days** - "
         f"{_money(burn.monthly, money)} a month at this rate."
     ]
-    if burn.prev_cost < burn.cost * _NEW_SPEND_SHARE:
-        lines.append(
-            f"**This spend is new** - the {burn.days} days before came to "
-            f"{_money(burn.prev_cost, money)}, so there is no earlier period to "
-            "read it against yet."
-        )
-    else:
-        share = burn.cost_change / burn.prev_cost
-        if abs(share) >= 0.1:
-            word = "up" if share > 0 else "down"
+    # Silent where the earlier period is only partly held: the caller says why,
+    # and a trend drawn against two days of a month is worse than no trend.
+    if burn.comparable:
+        if burn.prev_cost < burn.cost * _NEW_SPEND_SHARE:
             lines.append(
-                f"**Spend is {word} {_money(abs(burn.cost_change), money)} "
-                f"({share:+.0%}) on the {burn.days} days before**, so this is a "
-                "change in usage rather than the usual bill."
+                f"**This spend is new** - the {burn.days} days before came to "
+                f"{_money(burn.prev_cost, money)}, so there is no earlier period "
+                "to read it against yet."
             )
+        else:
+            share = burn.cost_change / burn.prev_cost
+            if abs(share) >= 0.1:
+                word = "up" if share > 0 else "down"
+                lines.append(
+                    f"**Spend is {word} {_money(abs(burn.cost_change), money)} "
+                    f"({share:+.0%}) on the {burn.days} days before**, so this is "
+                    "a change in usage rather than the usual bill."
+                )
     cached = cached_share(burn.lines)
     if cached >= 0.25:
         lines.append(

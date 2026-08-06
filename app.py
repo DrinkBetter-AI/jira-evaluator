@@ -4842,7 +4842,14 @@ def _render_cloud(days: int) -> None:
     # averaged over a month it was not switched on for.
     covered = (covered_to - history_start).days + 1
     burn = cost_client.window(
-        read.costs, days, provider="Google Cloud", now=covered_to, loaded=covered
+        read.costs,
+        days,
+        provider="Google Cloud",
+        now=covered_to,
+        loaded=covered,
+        # The period before this one has to be whole to be compared with. Two
+        # days of the previous month is not a cheaper month, and reads as one.
+        comparable=covered >= 2 * days,
     )
     cloud = "Cloud costs"
     money = burn.currency
@@ -4854,7 +4861,9 @@ def _render_cloud(days: int) -> None:
         f"Google Cloud ({days}d)",
         _money(burn.cost, money),
         **_delta_arrow(
-            _money_delta(burn.cost_change, money) if burn.prev_cost else None
+            _money_delta(burn.cost_change, money)
+            if burn.prev_cost and burn.comparable
+            else None
         ),
     )
     # A day rather than a month, unlike the AI tile beside it: Cloud is billed
@@ -4934,9 +4943,9 @@ def _render_cloud(days: int) -> None:
     elif covered < 2 * days:
         lines.insert(
             0,
-            f"**The export only goes back to {history_start}**, so the "
-            f"comparison with the {days} days before this window is built on "
-            f"the {covered - days} of them it holds.",
+            f"**The export only goes back to {history_start}**, so it holds "
+            f"{covered - days} of the {days} days before this window - too few "
+            "to compare with, and no trend is drawn until it holds them all.",
         )
     if lines:
         with st.expander("What Google Cloud costs", expanded=True):
