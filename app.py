@@ -3846,7 +3846,7 @@ def _money(amount: float, currency: str = "usd") -> str:
 
 
 def _business_readable() -> bool:
-    """Whether any of the CRM, Amplitude, Google Ads or the cost APIs can be read.
+    """Whether the CRM, Amplitude, Ads, the cost APIs or the billing export read.
 
     Reading the environment is close enough to free that a deployment with no
     keys keeps the Business page out of the navigation entirely, rather than
@@ -3862,6 +3862,7 @@ def _business_readable() -> bool:
         ads_client.load_ads_env,
         cost_client.load_openai_env,
         cost_client.load_stripe_env,
+        cost_client.load_billing_env,
     )
     for load in loaders:
         try:
