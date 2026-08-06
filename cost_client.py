@@ -87,6 +87,10 @@ class Burn:
     # Currencies set aside rather than added to the figure above, which is what
     # the caller names so the reader knows the total is not the whole bill.
     other_currencies: tuple[str, ...] = ()
+    # Days of the window the source can actually answer for, where that is
+    # fewer than the window: a billing export switched on last week holds a
+    # week, and averaging that week over a month is a discount nobody gave.
+    days_loaded: int | None = None
 
     @property
     def cost_change(self) -> float:
@@ -94,12 +98,15 @@ class Burn:
 
     @property
     def per_day(self) -> float:
-        """Averaged over the window, not over the days that had charges.
+        """Averaged over the days the source covers, not the days with charges.
 
         A quiet weekend is part of the monthly bill, so dividing by days with
-        charges would overstate what the next month is likely to cost.
+        charges would overstate what the next month is likely to cost. Days the
+        source has no answer for are the other error, and understate it: they
+        are not free days, they are days nobody can see.
         """
-        return self.cost / self.days if self.days else 0.0
+        span = self.days_loaded or self.days
+        return self.cost / span if span else 0.0
 
     @property
     def monthly(self) -> float:
@@ -195,6 +202,7 @@ def window(
     days: int,
     provider: str = "OpenAI",
     now: _dt.date | None = None,
+    loaded: int | None = None,
 ) -> Burn:
     """Split a daily cost frame into this window and the one before it.
 
@@ -226,6 +234,7 @@ def window(
         last_day=max(current["day"]) if not current.empty else None,
         lines=by_line(current),
         other_currencies=others,
+        days_loaded=min(loaded, days) if loaded else None,
     )
 
 
@@ -743,15 +752,18 @@ def build_billing_client(config: Billing):
 def billing_tables(client, config: Billing) -> list[str]:
     """The export tables in the dataset, oldest name first.
 
-    Usually one, and empty for the hours between the dataset being created and
-    Google writing to it - the normal state then, not an error, as is a billing
-    account whose export was never enabled. More than one means more than one
-    billing account exports here, and the panel reads the first and says so
-    rather than adding two accounts' bills into one figure.
+    Usually one, and empty in three cases that are all the same sentence to a
+    reader: the dataset does not exist, the export was never enabled, or Google
+    has not written the first table in the hours since it was. None of them is
+    an error. More than one means more than one billing account exports here,
+    and the panel reads the first and says so rather than adding two accounts'
+    bills into one figure.
     """
     try:
         tables = list(client.list_tables(f"{config.project}.{config.dataset}"))
     except Exception as exc:  # noqa: BLE001 - the caller words this for a reader
+        if _absent(exc):
+            return []
         raise CostConfigError(
             f"Could not read `{config.project}.{config.dataset}`: {str(exc)[:200]}"
         ) from exc
@@ -763,6 +775,19 @@ def billing_tables(client, config: Billing) -> list[str]:
             if table.table_id.startswith(BILLING_TABLE_PREFIX)
         )
     ]
+
+
+def _absent(exc: Exception) -> bool:
+    """Whether BigQuery said there is no such dataset, rather than refusing it.
+
+    A dataset nobody has created is where every deployment starts, and reads as
+    a 404; a dataset the credential may not see is a 403 and worth a warning.
+    """
+    try:
+        from google.api_core import exceptions  # noqa: PLC0415 - optional
+    except ImportError:  # pragma: no cover - only without the client library
+        return False
+    return isinstance(exc, exceptions.NotFound)
 
 
 def cloud_costs(

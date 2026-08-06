@@ -4831,14 +4831,18 @@ def _render_cloud(days: int) -> None:
     history_start, covered_to = read.history_start, read.covered_to
     if history_start is None or covered_to is None:
         st.caption(
-            "The billing export dataset is readable but Google has not written "
-            "to it yet. It writes the first table within a few hours of being "
-            "switched on, and covers nothing from before that."
+            f"There is no billing export in `{config.project}.{config.dataset}` "
+            "yet. Enable *standard usage cost* export under Billing, Billing "
+            "export; Google writes the first table within a few hours, and it "
+            "covers nothing from before that."
         )
         return
 
+    # The days the export actually holds, so a fortnight-old export is not
+    # averaged over a month it was not switched on for.
+    covered = (covered_to - history_start).days + 1
     burn = cost_client.window(
-        read.costs, days, provider="Google Cloud", now=covered_to
+        read.costs, days, provider="Google Cloud", now=covered_to, loaded=covered
     )
     cloud = "Cloud costs"
     money = burn.currency
@@ -4917,7 +4921,6 @@ def _render_cloud(days: int) -> None:
         )
     # It is not retroactive either, so a window starting before it was switched
     # on is a shorter period wearing a longer label.
-    covered = (covered_to - history_start).days + 1
     # Equal is the same case: a window as long as the export's whole history has
     # nothing behind it, and saying the comparison rests on nought days is worse
     # than saying there is no comparison.
