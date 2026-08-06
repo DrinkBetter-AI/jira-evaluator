@@ -3992,10 +3992,9 @@ def _charged_commission(
     try:
         if not cost_client.load_stripe_env():
             return None
-        # One day more than the two windows the fold needs, because the ledger
-        # is fetched from today back while the window ends yesterday. Disputes
-        # are not read here: they are a Burn figure and cost another call.
-        entries, _truncated = _stripe_ledger_cached(span + 1)
+        # The same read Burn makes, so the tab pages Stripe once. Disputes are
+        # not read here: they are a Burn figure and cost another call.
+        entries, _truncated = _stripe_ledger_cached(STRIPE_LEDGER_DAYS)
         # The fold bounds the window's start but not its end, and today's sales
         # are not in yesterday's spend: without this the return climbs through
         # the day and reads high by a day in every window.
@@ -4318,6 +4317,16 @@ def _openai_costs_cached(days: int) -> pd.DataFrame:
     return cost_client.openai_costs(key, days)
 
 
+# Every panel that wants the ledger asks for the same days of it, so that all of
+# them read one download: the longest window any of them offers, its preceding
+# window, and a day of slack for the ads panel, whose window ends yesterday.
+# Folding a window narrower than this out of the frame costs nothing; paging a
+# busy platform's balance transactions a second time costs a hundred requests.
+STRIPE_LEDGER_DAYS = (
+    max(cost_client.LOOKBACK_WINDOWS + ads_client.LOOKBACK_WINDOWS) + 1
+)
+
+
 @st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
 def _stripe_ledger_cached(days: int) -> tuple[pd.DataFrame, bool]:
     """Stripe's ledger for the window and the window before.
@@ -4342,7 +4351,7 @@ def _stripe_disputes_cached(days: int) -> int:
 
 def _stripe_cached(days: int) -> tuple[pd.DataFrame, bool, int]:
     """Stripe's ledger for the window and the window before, and its disputes."""
-    entries, truncated = _stripe_ledger_cached(days)
+    entries, truncated = _stripe_ledger_cached(STRIPE_LEDGER_DAYS)
     return entries, truncated, _stripe_disputes_cached(days)
 
 
