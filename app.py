@@ -3706,10 +3706,20 @@ FUNNEL_TTL_SECONDS = 900
 
 @st.cache_data(ttl=FUNNEL_TTL_SECONDS, show_spinner=False)
 def _funnel_cached(
-    credentials: tuple[str, str, str], funnel_spec: str, days: int
+    credentials: tuple[str, str, str],
+    funnel_spec: str,
+    days: int,
+    offset_days: int = 0,
 ) -> pd.DataFrame:
     steps = amplitude_client.parse_funnel(funnel_spec)
-    return amplitude_client.funnel(credentials, steps, days)
+    return amplitude_client.funnel(credentials, steps, days, offset_days)
+
+
+@st.cache_data(ttl=FUNNEL_TTL_SECONDS, show_spinner=False)
+def _breakdown_cached(
+    credentials: tuple[str, str, str], event: str, prop: str, days: int
+) -> pd.DataFrame:
+    return amplitude_client.event_breakdown(credentials, event, prop, days)
 
 
 @st.cache_data(ttl=FUNNEL_TTL_SECONDS, show_spinner=False)
@@ -3722,6 +3732,20 @@ def _event_users_cached(
     is not obliged to know how to hash this module's dataclass."""
     steps = tuple(amplitude_client.Step(label, event) for label, event in events)
     return amplitude_client.event_users(credentials, steps, days)
+
+
+def _points(change: float) -> str:
+    """A change in a conversion rate, in percentage points rather than percent.
+
+    A rate that went from 2% to 3% rose by one point and by fifty percent, and
+    the second phrasing is how a modest week gets reported as a triumph.
+    """
+    return f"{change * 100:+.1f}pp"
+
+
+# Below this, a rate has not really moved: reporting a hundredth of a point as
+# progress teaches people to ignore the whole column.
+_NOISE_POINTS = 0.001
 
 
 def _percent(value: float) -> str:
@@ -3778,15 +3802,41 @@ def _render_product_funnel() -> None:
         st.info(f"Amplitude recorded nobody at the first step in the last {days} days.")
         return
 
+    # The same window again, ending where this one starts. A conversion rate on
+    # its own is not a fact anybody can act on - 2% is either a disaster or an
+    # improvement depending on last month - so the comparison is worth a second
+    # request. It is allowed to fail: a funnel without a trend is still useful,
+    # and a project younger than two windows has no previous period at all.
+    previous: pd.DataFrame | None = None
+    try:
+        with st.spinner("Reading the period before it..."):
+            candidate = _funnel_cached(credentials, funnel_spec, days, days)
+        if not candidate.empty and candidate["users"].iloc[0]:
+            previous = candidate
+    except Exception:  # noqa: BLE001
+        previous = None
+
     top = steps.iloc[0]
     end = steps.iloc[-1]
     # The step that loses the most people, ignoring the first: it has nothing
     # before it to have lost anybody from.
     worst = steps.iloc[1:].sort_values("lost", ascending=False).iloc[0]
     tiles = st.columns(4)
-    tiles[0].metric(f"{top['step']} ({days}d)", f"{int(top['users']):,}")
-    tiles[1].metric(f"{end['step']} ({days}d)", f"{int(end['users']):,}")
-    tiles[2].metric("Visit to order", _percent(float(end["from_start"])))
+    tiles[0].metric(
+        f"{top['step']} ({days}d)",
+        f"{int(top['users']):,}",
+        delta=_people_delta(top, previous, 0),
+    )
+    tiles[1].metric(
+        f"{end['step']} ({days}d)",
+        f"{int(end['users']):,}",
+        delta=_people_delta(end, previous, len(steps) - 1),
+    )
+    tiles[2].metric(
+        "Visit to order",
+        _percent(float(end["from_start"])),
+        delta=_rate_delta(steps, previous, len(steps) - 1, "from_start"),
+    )
     tiles[3].metric(
         "Biggest drop-off",
         worst["step"],
@@ -3809,10 +3859,14 @@ def _render_product_funnel() -> None:
         from_previous=steps["from_previous"].map(_percent),
         from_start=steps["from_start"].map(_percent),
         lost=steps["lost"].map(lambda count: f"{int(count):,}"),
+        trend=[
+            _rate_delta(steps, previous, index, "from_previous") or "\u2014"
+            for index in range(len(steps))
+        ],
     )
     # The first step has nothing before it, and printing 0% there reads as a step
     # that loses everybody rather than as the top of the funnel.
-    table.loc[table.index[0], ["from_previous", "lost"]] = "\u2014"
+    table.loc[table.index[0], ["from_previous", "lost", "trend"]] = "\u2014"
     st.dataframe(
         table.rename(
             columns={
@@ -3820,6 +3874,7 @@ def _render_product_funnel() -> None:
                 "event": "Event",
                 "users": "People",
                 "from_previous": "From previous step",
+                "trend": f"vs previous {days}d",
                 "from_start": "From the start",
                 "lost": "Lost here",
             }
@@ -3827,6 +3882,7 @@ def _render_product_funnel() -> None:
         width="stretch",
         hide_index=True,
     )
+    _render_funnel_verdicts(steps, previous, days)
     st.caption(
         "People, not visits, and the steps must happen in this order within "
         f"{amplitude_client.DEFAULT_CONVERSION_DAYS} days of each other - wine is "
@@ -3849,6 +3905,7 @@ def _render_product_funnel() -> None:
             "Share of everyone who visited. An error one person met ten times is "
             "one person here, not ten.",
         )
+        _render_error_breakdowns(credentials, days)
     with ai_tab:
         _render_event_counts(
             credentials,
@@ -3860,6 +3917,123 @@ def _render_product_funnel() -> None:
             "engagement: it says how many people found it, not how much they used "
             "it.",
         )
+
+
+def _people_delta(
+    row: pd.Series, previous: pd.DataFrame | None, index: int
+) -> str | None:
+    """``+1,204 people`` against the same step in the previous window."""
+    if previous is None or index >= len(previous):
+        return None
+    change = int(row["users"]) - int(previous.iloc[index]["users"])
+    return f"{change:+,} people"
+
+
+def _rate_delta(
+    steps: pd.DataFrame, previous: pd.DataFrame | None, index: int, column: str
+) -> str | None:
+    """The move in one rate against the previous window, in points.
+
+    ``None`` when there is nothing to compare to, so the caller can leave the
+    space blank rather than print a zero that looks like a measurement.
+    """
+    if previous is None or index >= len(previous) or index >= len(steps):
+        return None
+    # Only comparable if the two windows describe the same step: a changed
+    # AMPLITUDE_FUNNEL between reads would otherwise subtract one screen's rate
+    # from another's.
+    if steps.iloc[index]["event"] != previous.iloc[index]["event"]:
+        return None
+    change = float(steps.iloc[index][column]) - float(previous.iloc[index][column])
+    if abs(change) < _NOISE_POINTS:
+        return "flat"
+    return _points(change)
+
+
+def _render_funnel_verdicts(
+    steps: pd.DataFrame, previous: pd.DataFrame | None, days: int
+) -> None:
+    """The table again, in sentences.
+
+    A column of percentages is a thing to interpret; this is the interpretation,
+    because the person the dashboard is for reads it between meetings and should
+    not have to do the arithmetic to find out which screen is losing the shop
+    its customers.
+    """
+    lines: list[str] = []
+    for index in range(1, len(steps)):
+        row = steps.iloc[index]
+        rate = float(row["from_previous"])
+        kept = round(rate * 100)
+        before = steps.iloc[index - 1]["step"]
+        sentence = (
+            f"**{before} \u2192 {row['step']}** \u2014 {_percent(rate)}: "
+            f"{kept} of every 100 people who got as far as {before} went on; "
+            f"{100 - kept} did not."
+        )
+        trend = _rate_delta(steps, previous, index, "from_previous")
+        if trend == "flat":
+            sentence += f" Unchanged on the previous {days} days."
+        elif trend:
+            direction = "Better" if trend.startswith("+") else "Worse"
+            sentence += f" {direction} than the previous {days} days ({trend})."
+        lines.append(sentence)
+    if not lines:
+        return
+    with st.expander("What each step means", expanded=True):
+        st.markdown("\n".join(f"- {line}" for line in lines))
+        worst = steps.iloc[1:].sort_values("lost", ascending=False).iloc[0]
+        st.markdown(
+            f"The one to fix first is **{worst['step']}**: "
+            f"{int(worst['lost']):,} people got as far as the step before it and "
+            "no further."
+        )
+
+
+def _render_error_breakdowns(
+    credentials: tuple[str, str, str], days: int
+) -> None:
+    """Where the errors happened and what they said.
+
+    The count above says how many people were let down; on its own nobody can
+    act on it. These two tables are the difference between "4% saw an error" and
+    a ticket with a page and a message in it.
+    """
+    st.markdown("**Where the errors are**")
+    columns = st.columns(len(amplitude_client.ERROR_BREAKDOWNS))
+    for column, (title, prop) in zip(columns, amplitude_client.ERROR_BREAKDOWNS):
+        with column:
+            st.caption(title)
+            try:
+                with st.spinner("Reading..."):
+                    frame = _breakdown_cached(
+                        credentials, amplitude_client.ERROR_EVENT, prop, days
+                    )
+            except Exception as exc:  # noqa: BLE001
+                st.caption(f"Could not read this breakdown: {str(exc)[:160]}")
+                continue
+            if frame.empty:
+                st.caption(f"No {prop} recorded on these errors.")
+                continue
+            shown = frame.head(amplitude_client.BREAKDOWN_ROWS)
+            st.dataframe(
+                shown.assign(events=shown["events"].map(lambda n: f"{int(n):,}")).rename(
+                    columns={"value": title, "events": "Times"}
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+            if len(frame) > len(shown):
+                st.caption(
+                    f"{len(frame) - len(shown):,} more values, "
+                    f"{int(frame['events'].iloc[len(shown):].sum()):,} times between them."
+                )
+    st.caption(
+        "Counted in times rather than people, so these add up: the same person "
+        "meeting the same error twice is two things to fix. Messages carrying a "
+        "build hash or an id are collapsed into one line, or a single broken "
+        "deploy would fill the table with near-identical rows."
+    )
 
 
 def _render_event_counts(
