@@ -65,7 +65,10 @@ profile when they are not all set.
 | `AMPLITUDE_FUNNEL`            | no                               | product page → cart → checkout → payment → order | The funnel's steps as `Label=event_name` pairs, in order, e.g. `Visited=_active,Bought=checkout_order_completed`                                                       |
 | `GOOGLE_ADS_BQ_PROJECT` | no | the project the credentials resolve to | GCP project holding the Google Ads data transfer; on Cloud Run the service's own project is right, so this is only for reading another project's dataset |
 | `GOOGLE_ADS_BQ_DATASET` | no | `google_ads` | Dataset the Ads transfer writes to; without a readable one the *Ads Spend & Return* section says so and everything else works |
+| `MARKETPLACE_COMMISSION_RATE` | no | `12%` | The share of a sale the marketplace keeps, as `12`, `12%` or `0.12`; it drives *commission per unit spent*, the one figure on *Ads Spend & Return* that is income rather than turnover |
 | `GOOGLE_ADS_CUSTOMER_ID` | no | every account in the dataset | Restrict the ads figures to one account, e.g. `887-686-4797`; by default every account the transfer writes is added up |
+| `OPENAI_ADMIN_KEY` | no | — | OpenAI **organization admin** key (Organization settings → API keys → Admin keys); needed for the AI line of *Burn*. An ordinary `sk-proj-…` project key is refused by the cost endpoint and is named as such rather than shown as a 401 |
+| `STRIPE_READONLY_API_KEY` | no | — | Stripe **restricted** key (`rk_…`) with read access to balance transactions, charges, disputes and payouts; needed for the payments line of *Burn*. A full `sk_…` secret key can move money and is refused |
 | `GCP_BIGQUERY_READONLY_KEY` | no | — | A BigQuery service-account key as JSON, for reading the Ads dataset from outside GCP; unset on Cloud Run, which authenticates as its own service account |
 | `DASHBOARD_PASSWORD`          | no locally, **yes on Cloud Run** | —                                                | Shared password visitors must enter; remembered per browser for 30 days in a signed cookie; leave it unset locally (a copy in `.env` prompts on every run), unset on Cloud Run (`K_SERVICE` present) refuses to serve at all                                     |
 | `DASHBOARD_COOKIE_KEY` | no, but set it when hosted | derived from `DASHBOARD_PASSWORD` with scrypt | Independent secret signing the access cookie, so the cookie is not a verifier for guesses at the password; rotating it signs every browser out without changing the password anyone types |
@@ -355,7 +358,12 @@ fully paid with nothing pending.
    sentences alike, is quoted in the ad account's own currency. Costs arrive as
    micros and are divided out; campaign names come from the newest daily snapshot
    rather than joined per day, or a campaign renamed mid-window would appear twice
-   with its spend split between the two names. Needs a readable dataset
+   with its spend split between the two names. The headline is **commission per
+   unit spent** — revenue in the window at `MARKETPLACE_COMMISSION_RATE`, divided
+   by spend — because the revenue an ad wins is the merchant's and only the
+   commission on it is income here: 1,226 of revenue at 12% against 176 of spend
+   is 0.84, and 1.00 is where an ad pays for itself. Gross return per unit spent
+   is kept beside it as the ceiling it is. Needs a readable dataset
    (`GOOGLE_ADS_BQ_DATASET`, default `google_ads`); read-only, every statement is a
    `SELECT` under a credential holding `bigquery.dataViewer` and
    `bigquery.jobUser` and no access to Google Ads itself.
@@ -406,7 +414,33 @@ fully paid with nothing pending.
    only comes in days, weeks or months: no interval spans an arbitrary window, so a
    count from it is a sum of buckets, and adding buckets counts somebody who came
    back next week as two people.
-14. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
+14. **Burn** (*Business* tab) — what the business spends and what its own payment
+   ledger says it kept, beside the revenue above it, on one window so a week of one
+   bill is never read against a month of another. **AI spend** is OpenAI's own
+   organization cost report, broken down by line item and project, because "$763 on
+   OpenAI" is not actionable and "$227 of it re-sending cached context" is: the
+   cached share is called out as its own tile, being the one line on an AI invoice
+   that is usually a choice rather than a fact. A month's run rate divides by every
+   day in the window rather than by the days that had charges — a quiet weekend is
+   part of the bill — and today *counts*, unlike the ad figures, because a provider
+   bills as it goes. Where the previous period came to under a twentieth of this one,
+   the change is reported as *this spend is new* rather than as a percentage: a month
+   that went from $3 to $763 is a true +25,000% and a useless sentence. The endpoint
+   is organization-scoped, so it needs an admin key, which is named plainly when a
+   project key is pasted instead. **Payments** is Stripe's balance transactions, and
+   what it holds was not what was expected: this account is a *Connect platform*, so
+   each sale's card fees are charged on the merchant's own connected account and what
+   lands here is the marketplace's commission — reported as commission kept, not as a
+   cost, with Stripe's own fees shown as the nil they are rather than omitted, since
+   "what do the card fees cost us" deserves an answer. It is deliberately not
+   reconciled with the CRM's captured revenue above: one is the platform's cut, the
+   other the merchants' takings. Disputes are counted, never subtracted — a dispute
+   is money at risk with an outcome still to come. Google Cloud is not here yet and
+   the panel says so instead of presenting the AI bill as the whole of the spend.
+   Needs `OPENAI_ADMIN_KEY` and `STRIPE_READONLY_API_KEY`; each line appears on its
+   own as the key arrives, and every call is a `GET` under a credential that cannot
+   write.
+15. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
    or unowned: no Jira key anywhere in the title, branch name or description
    (matched against every project key Jira exposes, plus `JIRA_EXTRA_PROJECT_KEYS`,
    so a string like `UTF-8` does not read as a ticket); open past
@@ -417,7 +451,7 @@ fully paid with nothing pending.
    first, because that is work one review away from shipping. Tickets merely In
    Progress are excluded: the code is still being written. Includes a per-author
    table and a CSV of everything flagged. Needs `DASHBOARD_GITHUB_TOKEN`.
-15. **Ticket Quality & Ready for Devin** — every ticket graded out of 5 on whether
+16. **Ticket Quality & Ready for Devin** — every ticket graded out of 5 on whether
    someone outside the original conversation could pick it up: a summary of at
    least four words, a description of at least 120 characters, explicit acceptance
    criteria (the words, or a checklist of three or more items), an estimate, and an
@@ -430,7 +464,7 @@ fully paid with nothing pending.
    Backlog tickets are always included regardless of *Include Backlogs* — an unowned
    backlog ticket is the best kind to hand off, and the worst-written ones collect
    there unseen.
-16. **Sprint Planner** — a first draft of one team's next sprint, built from goals
+17. **Sprint Planner** — a first draft of one team's next sprint, built from goals
    rather than from the top of a priority list. Name two or three goals for the
    sprint ("Onboarding, Quiz, Checkout", most important first) and every ticket
    that shares a word with one — in its summary, its epic's name or its labels —
@@ -450,9 +484,9 @@ fully paid with nothing pending.
    armed, and it only adds tickets to an active or future sprint. Jira moves an
    issue between sprints rather than copying it, so a ticket already on another
    open sprint leaves it; the section names those tickets before the button.
-17. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
+18. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
    age-vs-idle chart, sprint planning tables, and bulk Jira write-back actions.
-18. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
+19. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
    per person against what they are actually available for, which matters when most
    contributors are part-time: `JIRA_WEEKLY_HOURS` is spread over the weekdays
    between the sprint's start and end dates, so 20h/week across a 10-working-day

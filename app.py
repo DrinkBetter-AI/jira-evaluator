@@ -75,6 +75,7 @@ from hygiene import (
     stale_candidates,
 )
 import ads_client
+import cost_client
 import amplitude_client
 import orders
 import orders_client
@@ -3738,7 +3739,7 @@ def _money(amount: float, currency: str = "usd") -> str:
 
 
 def _business_readable() -> bool:
-    """Whether any of the order database, Amplitude or Google Ads can be read.
+    """Whether any of the CRM, Amplitude, Google Ads or the cost APIs can be read.
 
     Reading the environment is close enough to free that a deployment with no
     keys keeps the Business page out of the navigation entirely, rather than
@@ -3752,6 +3753,8 @@ def _business_readable() -> bool:
         orders_client.load_medusa_env,
         amplitude_client.load_amplitude_env,
         ads_client.load_ads_env,
+        cost_client.load_openai_env,
+        cost_client.load_stripe_env,
     )
     for load in loaders:
         try:
@@ -3761,6 +3764,7 @@ def _business_readable() -> bool:
             orders_client.MedusaConfigError,
             amplitude_client.AmplitudeConfigError,
             ads_client.AdsConfigError,
+            cost_client.CostConfigError,
         ):
             # Configured but wrongly - which is still worth rendering, because
             # the section is where the error message belongs.
@@ -3783,6 +3787,10 @@ def _render_business() -> None:
     # After the shop's own figures and before the funnel: what the orders cost to
     # win only means anything beside the orders themselves.
     _render_ads(order_book)
+    st.divider()
+    # Spend that is not advertising, after the spend that is: the two together
+    # are what the revenue above has to cover.
+    _render_burn()
     st.divider()
     _render_product_funnel()
 
@@ -4189,7 +4197,11 @@ def _ads_sales(
     book, currency, _others = orders.single_currency(order_book.orders)
     metrics = orders.window_metrics(book, span, now=end)
     return ads_client.Sales(
-        orders=metrics.paid_orders, revenue=metrics.revenue, currency=currency
+        orders=metrics.paid_orders,
+        revenue=metrics.revenue,
+        currency=currency,
+        prev_orders=metrics.prev_orders,
+        prev_revenue=metrics.prev_revenue,
     )
 
 
@@ -4287,7 +4299,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     money = currency.lower()
     unit = _one(money)
 
-    tiles = st.columns(5)
+    tiles = st.columns(6)
     tiles[0].metric(
         f"Spend ({days}d)",
         _money(spend.cost, money),
@@ -4306,13 +4318,62 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     # Comparable only if the shop takes money in the currency the ads are billed
     # in; otherwise the ratio is one currency divided by another.
     comparable = bool(sales and (not sales.currency or sales.currency == money))
+    # The one figure on this panel that is income rather than turnover, so it is
+    # the one to steer by: the revenue an ad wins belongs to the merchant and
+    # only the commission on it is ours. Break-even is 1.00, not 3x.
+    try:
+        keep = ads_client.commission_rate()
+    except ads_client.AdsConfigError as exc:
+        st.caption(str(exc))
+        keep = ads_client.DEFAULT_COMMISSION_RATE
+    earned = (
+        ads_client.commission_return(sales.revenue, spend.cost, keep)
+        if sales and comparable
+        else 0.0
+    )
+    before = (
+        ads_client.commission_return(sales.prev_revenue, spend.prev_cost, keep)
+        if sales and comparable
+        else 0.0
+    )
     tiles[3].metric(
+        f"Commission per {unit} spent",
+        f"{earned:.2f}" if earned else "\u2014",
+        **_delta_arrow(f"{earned - before:+.2f}" if earned and before else None),
+        help=(
+            f"Revenue in the window at {keep:.0%} commission, divided by spend. "
+            f"{ads_client.BREAK_EVEN_RETURN:.2f} is where the ads pay for "
+            "themselves."
+        ),
+    )
+    tiles[4].metric(
         f"Revenue per {unit} spent",
         f"{sales.revenue / spend.cost:.1f}x"
         if sales and comparable and spend.cost
         else "\u2014",
+        help="Gross, and mostly the merchants': the tile to its left is ours.",
     )
-    tiles[4].metric("Google's own conversions", f"{spend.conversions:,.0f}")
+    tiles[5].metric("Google's own conversions", f"{spend.conversions:,.0f}")
+
+    if earned:
+        goal = ads_client.BREAK_EVEN_RETURN
+        gap = goal - earned
+        standing = (
+            "The ads pay for themselves at this rate."
+            if gap <= 0
+            else f"{_money(gap, money)} short on every {unit}, which is "
+            f"{_money(spend.cost * gap, money)} over these {days} days."
+        )
+        trend = (
+            ""
+            if not before or earned == before
+            else f" {'Up' if earned > before else 'Down'} from "
+            f"{_money(before, money)} in the previous {days} days."
+        )
+        st.markdown(
+            f"### {_money(earned, money)} back for every {unit} of ad spend\n\n"
+            f"**Goal {goal:.2f}.** {standing}{trend}"
+        )
 
     if spend.partial:
         st.warning(
@@ -4369,7 +4430,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         sales = ads_client.Sales(
             orders=sales.orders, revenue=0.0, currency=sales.currency
         )
-    lines = ads_client.verdicts(spend, campaigns, sales, currency)
+    lines = ads_client.verdicts(spend, campaigns, sales, currency, rate=keep)
     if lines:
         with st.expander("What this means", expanded=True):
             st.markdown("\n".join(f"- {line}" for line in lines))
@@ -4389,6 +4450,258 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         "click and is not the same thing as an order: the CRM's orders are the "
         "figure to quote, and every order in the window counts towards them, "
         "including the ones no ad won."
+    )
+
+
+BURN_TTL_SECONDS = 900
+
+
+@st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
+def _openai_costs_cached(days: int) -> pd.DataFrame:
+    """Daily OpenAI cost by project and line item.
+
+    Not keyed on the credential: it comes from the environment, does not change
+    while the process lives, and an admin key has no business in a cache key.
+    """
+    key = cost_client.load_openai_env()
+    if not key:  # pragma: no cover - the caller checks first
+        raise cost_client.CostConfigError("No OpenAI admin key is configured.")
+    return cost_client.openai_costs(key, days)
+
+
+@st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
+def _stripe_cached(days: int) -> tuple[pd.DataFrame, bool, int]:
+    """Stripe's ledger for the window and the window before, and its disputes."""
+    key = cost_client.load_stripe_env()
+    if not key:  # pragma: no cover - the caller checks first
+        raise cost_client.CostConfigError("No Stripe key is configured.")
+    entries, truncated = cost_client.stripe_ledger(key, days)
+    return entries, truncated, cost_client.stripe_disputes(key, days)
+
+
+def _render_burn() -> None:
+    """What the business spends, and what its own payment ledger says it kept.
+
+    Revenue on its own is half a sentence. This is the other half, provider by
+    provider as each one's access arrives: OpenAI reports its organization costs,
+    Stripe reports the platform's commission, and Google Cloud follows its
+    billing export.
+    """
+    st.subheader("Burn")
+    # One window for every provider here: a leadership reader compares these
+    # figures with each other, and two windows on one page invite adding a week
+    # of one bill to a month of another.
+    days = st.radio(
+        "Window",
+        options=list(cost_client.LOOKBACK_WINDOWS),
+        format_func=lambda value: f"{value} days",
+        index=len(cost_client.LOOKBACK_WINDOWS) - 1,
+        horizontal=True,
+        key="burn_window_days",
+    )
+    _render_ai_costs(days)
+    _render_stripe(days)
+
+
+def _render_ai_costs(days: int) -> None:
+    """What the AI providers charged, and what the bill is actually made of."""
+    try:
+        key = cost_client.load_openai_env()
+    except cost_client.CostConfigError as exc:
+        st.caption(f"AI costs are misconfigured: {exc}")
+        return
+    if not key:
+        st.caption(
+            "AI spend comes from OpenAI's organization cost endpoint, which "
+            "needs an admin key rather than the project key the product uses. "
+            "Set OPENAI_ADMIN_KEY to show it."
+        )
+        return
+
+    try:
+        with st.spinner("Reading what the month cost..."):
+            costs = _openai_costs_cached(days)
+    except cost_client.CostConfigError as exc:
+        st.warning(str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Could not read OpenAI costs: {str(exc)[:200]}")
+        return
+
+    burn = cost_client.window(costs, days)
+    if not burn.cost and costs.empty:
+        st.info(
+            "OpenAI reports no charges for this organization in the last "
+            f"{days} days."
+        )
+        return
+
+    money = burn.currency
+    tiles = st.columns(3)
+    tiles[0].metric(
+        f"OpenAI ({days}d)",
+        _money(burn.cost, money),
+        **_delta_arrow(
+            _money_delta(burn.cost_change, money) if burn.prev_cost else None
+        ),
+    )
+    tiles[1].metric("At this rate, a month", _money(burn.monthly, money))
+    # The share of the bill that is context sent again rather than new work,
+    # which is the one line on an AI invoice that is usually a choice.
+    tiles[2].metric(
+        "Cached context",
+        f"{cost_client.cached_share(burn.lines):.0%}" if not burn.lines.empty else "\u2014",
+    )
+
+    if not burn.lines.empty:
+        st.dataframe(
+            burn.lines.head(12)
+            .assign(
+                cost=lambda frame: frame["cost"].map(
+                    lambda value: _money(value, money)
+                ),
+                share=lambda frame: frame["share"].map(lambda value: f"{value:.0%}"),
+            )
+            .rename(
+                columns={
+                    "line_item": "Line item",
+                    "cost": "Cost",
+                    "share": "Share",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+    # The window's own rows in the window's own currency, as the totals above:
+    # the fetch covers twice the window, and neither the earlier period nor a
+    # charge billed in euros belongs under a figure labelled with this one.
+    billed, _, _ = cost_client.main_currency(costs)
+    projects = cost_client.by_project(
+        billed[billed["day"] >= burn.first_day] if burn.first_day else billed.iloc[0:0]
+    )
+    if len(projects) > 1:
+        st.caption(
+            "By project: "
+            + ", ".join(
+                f"{row['project'] or 'unnamed'} {_money(float(row['cost']), money)}"
+                for _, row in projects.iterrows()
+            )
+        )
+
+    if burn.other_currencies:
+        st.caption(
+            "These figures are the "
+            f"{money.upper()} charges only; OpenAI also billed in "
+            + ", ".join(code.upper() for code in burn.other_currencies)
+            + ", which is never added to them."
+        )
+
+    lines = cost_client.verdicts(burn)
+    if lines:
+        with st.expander("What this means", expanded=True):
+            st.markdown("\n".join(f"- {line}" for line in lines))
+
+    st.caption(
+        "OpenAI's own organization cost report, read with an admin key that can "
+        "do nothing but read it. Today counts: a provider bills as it goes, so "
+        "the day's charges so far are real money. Google Cloud is not here yet - "
+        "its billing export is what that waits on - so this is the AI line of "
+        "the bill rather than all of it."
+    )
+
+
+def _render_stripe(days: int) -> None:
+    """What Stripe's books say the platform kept.
+
+    Read expecting a cost - card processing fees - and it is not one: this
+    account is a Connect platform, so each sale's fees are charged on the
+    merchant's own account and what lands here is the marketplace's commission.
+    The panel reports what is there rather than what was hoped for.
+    """
+    try:
+        key = cost_client.load_stripe_env()
+    except cost_client.CostConfigError as exc:
+        st.caption(f"Stripe figures are misconfigured: {exc}")
+        return
+    if not key:
+        st.caption(
+            "Payment figures come from Stripe's balance transactions. Set "
+            "STRIPE_READONLY_API_KEY to a restricted key with read access to "
+            "balance transactions, charges, disputes and payouts."
+        )
+        return
+
+    try:
+        with st.spinner("Reading Stripe's ledger..."):
+            entries, truncated, disputes = _stripe_cached(days)
+    except cost_client.CostConfigError as exc:
+        st.warning(str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Could not read Stripe: {str(exc)[:200]}")
+        return
+
+    ledger = cost_client.ledger_window(entries, days, disputes=disputes)
+    if not ledger.earnings and entries.empty:
+        st.info(
+            f"Stripe recorded no money moving in the last {days} days."
+            + (
+                f" {disputes} dispute{'s were' if disputes != 1 else ' was'} opened, "
+                "which is money at risk rather than money lost."
+                if disputes
+                else ""
+            )
+        )
+        return
+
+    money = ledger.currency
+    tiles = st.columns(4)
+    # Commission on a platform; on an ordinary account the same tile is its own
+    # takings less what Stripe charged to process them, which is not commission.
+    kept = "Commission" if ledger.platform else "Payments"
+    tiles[0].metric(
+        f"{kept} kept ({days}d)",
+        _money(ledger.net, money),
+        # Compared with the same quantity the tile shows - commission after
+        # refunds - so a heavily refunded period cannot read as a rise.
+        **_delta_arrow(
+            _money_delta(ledger.net_change, money) if ledger.prev_net else None
+        ),
+    )
+    tiles[1].metric("Refunded", _money(abs(ledger.refunds), money))
+    # Nil on a platform account, and worth showing as nil rather than omitting:
+    # the question "what do the card fees cost us" deserves an answer.
+    tiles[2].metric("Stripe's own fees", _money(abs(ledger.fees), money))
+    tiles[3].metric("Paid out to the bank", _money(abs(ledger.paid_out), money))
+
+    if ledger.other_currencies:
+        st.caption(
+            f"These figures are the {money.upper()} ledger only; Stripe also "
+            "settled in "
+            + ", ".join(code.upper() for code in ledger.other_currencies)
+            + ", which is never added to them."
+        )
+
+    if truncated:
+        st.warning(
+            "Stripe had more ledger entries than one read carries, and it "
+            "returns the newest first, so the oldest days of the comparison "
+            "period are missing. Read a shorter window for a figure that "
+            "compares like with like."
+        )
+
+    lines = cost_client.stripe_verdicts(ledger)
+    if lines:
+        with st.expander("What Stripe says", expanded=True):
+            st.markdown("\n".join(f"- {line}" for line in lines))
+
+    st.caption(
+        "Stripe's balance transactions, read with a restricted key that cannot "
+        "move money. This is the platform's own commission on merchants' sales, "
+        "not the merchants' takings, and not the same figure as the CRM's "
+        "captured revenue above. Card processing fees are charged on the "
+        "connected merchant accounts, which this key cannot see."
     )
 
 
