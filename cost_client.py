@@ -617,7 +617,11 @@ def stripe_verdicts(ledger: Ledger) -> list[str]:
     # keeps its own takings less what Stripe charged to process them.
     kept = "commission" if ledger.platform else "payments"
     if not ledger.earnings:
-        return [f"Stripe recorded no {kept} in the last {ledger.days} days."]
+        # Still say what is at risk: a quiet window with chargebacks in it is
+        # exactly the window where a hidden dispute count matters.
+        return [f"Stripe recorded no {kept} in the last {ledger.days} days."] + (
+            [_dispute_line(ledger)] if ledger.disputes else []
+        )
     money = ledger.currency
     lines = [
         f"**{_money(ledger.net, money)} of {kept} kept in {ledger.days} days** "
@@ -645,12 +649,17 @@ def stripe_verdicts(ledger: Ledger) -> list[str]:
             "sit on the merchants' own accounts and are not a cost here."
         )
     if ledger.disputes:
-        lines.append(
-            f"**{ledger.disputes} dispute"
-            f"{'s' if ledger.disputes != 1 else ''} opened** in the window, "
-            "which is money at risk rather than money lost."
-        )
+        lines.append(_dispute_line(ledger))
     return lines
+
+
+def _dispute_line(ledger: Ledger) -> str:
+    """Chargebacks opened in the window, said the same way wherever they appear."""
+    return (
+        f"**{ledger.disputes} dispute"
+        f"{'s' if ledger.disputes != 1 else ''} opened** in the window, "
+        "which is money at risk rather than money lost."
+    )
 
 
 __all__ = [

@@ -4215,7 +4215,15 @@ def _render_stripe(days: int) -> None:
 
     ledger = cost_client.ledger_window(entries, days, disputes=disputes)
     if not ledger.earnings and entries.empty:
-        st.info(f"Stripe recorded nothing in the last {days} days.")
+        st.info(
+            f"Stripe recorded no money moving in the last {days} days."
+            + (
+                f" {disputes} dispute{'s were' if disputes != 1 else ' was'} opened, "
+                "which is money at risk rather than money lost."
+                if disputes
+                else ""
+            )
+        )
         return
 
     money = ledger.currency
