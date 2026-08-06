@@ -3013,12 +3013,25 @@ def _render_sprint_capacity(
         ),
         unsafe_allow_html=True,
     )
-    c2.metric(
+    capacity_section = "Sprint capacity"
+    _report(TAB_ENGINEERING).figure(
+        capacity_section,
+        "Tickets in sprint",
+        f"{len(preview_workload)}",
+        f"out of {len(preview_scoped)}",
+    )
+    _tile(
+        c2,
+        TAB_ENGINEERING,
+        capacity_section,
         "Total estimated (sprint)",
         _fmt_seconds(preview_workload["estimate_seconds_live"].fillna(0).sum()),
         help="Sum of estimates for In Sprint ✅ tickets matching the selected statuses and assignee filter.",
     )
-    c3.metric(
+    _tile(
+        c3,
+        TAB_ENGINEERING,
+        capacity_section,
         "Grand Total (in sprint)",
         _fmt_seconds(preview_scoped["estimate_seconds_live"].fillna(0).sum()),
         help="Sum of estimates for all In Sprint ✅ tickets regardless of status filter.",
