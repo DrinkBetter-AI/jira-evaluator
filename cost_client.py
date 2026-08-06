@@ -1,0 +1,568 @@
+"""Read-only clients for what the business spends, provider by provider.
+
+The shop's revenue is only half a sentence. This module reads the other half from
+the providers themselves, so the dashboard can put spend beside takings instead of
+asking somebody to remember the invoices.
+
+Today that means OpenAI, whose organization cost endpoint is the only credential
+that reports it (project API keys are refused), and Stripe, which turns out to
+report the other direction: this account is a Connect platform, so its ledger is
+the marketplace's own earnings rather than a cost. Google Cloud follows its
+billing export. Everything here is a GET.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import os
+from dataclasses import dataclass, field
+
+import pandas as pd
+import requests
+
+OPENAI_BASE_URL = "https://api.openai.com"
+_OPENAI_KEY_ENV_VAR = "OPENAI_ADMIN_KEY"
+_COSTS_PATH = "/v1/organization/costs"
+
+STRIPE_BASE_URL = "https://api.stripe.com"
+_STRIPE_KEY_ENV_VAR = "STRIPE_READONLY_API_KEY"
+_BALANCE_PATH = "/v1/balance_transactions"
+
+_TIMEOUT_SECONDS = 60
+
+# The endpoint's own ceiling; asking for more is a 400. One bucket is one day, so
+# this caps a single call at roughly six months.
+_MAX_BUCKETS = 180
+
+# Enough pages to cover the widest window at the smallest sane page, and a stop
+# in case the cursor ever fails to advance.
+_MAX_PAGES = 20
+
+LOOKBACK_WINDOWS = (7, 30)
+
+# What the panel counts as an admin key. Deliberately loose - OpenAI has issued
+# several prefixes - but tight enough to catch a project key pasted by mistake,
+# which returns a bare 401 and looks like an outage.
+_PROJECT_KEY_HINT = "sk-proj-"
+
+
+class CostConfigError(RuntimeError):
+    """Raised when a cost credential is missing, malformed or refused."""
+
+
+def load_openai_env() -> str | None:
+    """Return the OpenAI admin key, or ``None`` when there is none set.
+
+    Names the project-key mistake rather than letting it become a 401 later: the
+    cost endpoint is organization-scoped and refuses the ordinary key that every
+    other OpenAI integration uses, so pasting that one is the likely error.
+    """
+    key = os.getenv(_OPENAI_KEY_ENV_VAR, "").strip()
+    if not key:
+        return None
+    if key.startswith(_PROJECT_KEY_HINT):
+        raise CostConfigError(
+            f"{_OPENAI_KEY_ENV_VAR} looks like a project key. The cost endpoint "
+            "is organization-scoped: create an admin key under Organization "
+            "settings, API keys, Admin keys."
+        )
+    return key
+
+
+@dataclass(frozen=True)
+class Burn:
+    """What one provider cost over a window, and over the one before it."""
+
+    days: int
+    provider: str
+    cost: float
+    prev_cost: float
+    currency: str
+    days_with_data: int
+    first_day: _dt.date | None
+    last_day: _dt.date | None
+    # Named lines, dearest first: "gpt-5.6-terra, cached input" and the like.
+    lines: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+    @property
+    def cost_change(self) -> float:
+        return self.cost - self.prev_cost
+
+    @property
+    def per_day(self) -> float:
+        """Averaged over the window, not over the days that had charges.
+
+        A quiet weekend is part of the monthly bill, so dividing by days with
+        charges would overstate what the next month is likely to cost.
+        """
+        return self.cost / self.days if self.days else 0.0
+
+    @property
+    def monthly(self) -> float:
+        """The window's rate carried out to a month, which is how bills arrive."""
+        return self.per_day * 30
+
+
+def openai_costs(key: str, days: int, now: _dt.date | None = None) -> pd.DataFrame:
+    """Daily OpenAI cost by project and line item, over ``2 * days``.
+
+    Twice the window because every figure the panel prints is a comparison with
+    the period before it. Grouped by line item because "$765 on OpenAI" is not
+    actionable and "$227 of it re-sending cached context" is.
+    """
+    today = now or _dt.date.today()
+    span = min(2 * days, _MAX_BUCKETS)
+    start = today - _dt.timedelta(days=span - 1)
+    rows: list[dict] = []
+    page: str | None = None
+    for _ in range(_MAX_PAGES):
+        payload = _get_costs(key, start, span, page)
+        for bucket in payload.get("data") or []:
+            day = _bucket_day(bucket)
+            for result in bucket.get("results") or []:
+                amount = (result or {}).get("amount") or {}
+                rows.append(
+                    {
+                        "day": day,
+                        "project": result.get("project_name") or "",
+                        "line_item": result.get("line_item") or "",
+                        "cost": float(amount.get("value") or 0.0),
+                        "currency": str(amount.get("currency") or "usd").lower(),
+                    }
+                )
+        page = payload.get("next_page")
+        if not payload.get("has_more") or not page:
+            break
+    frame = pd.DataFrame(
+        rows, columns=["day", "project", "line_item", "cost", "currency"]
+    )
+    # Buckets with no charges arrive empty rather than absent, and a day the
+    # provider has not closed yet arrives as zero; neither is worth a row.
+    return frame[frame["cost"] != 0.0].reset_index(drop=True)
+
+
+def _get_costs(key: str, start: _dt.date, span: int, page: str | None) -> dict:
+    params: list[tuple[str, str]] = [
+        ("start_time", str(_midnight(start))),
+        ("bucket_width", "1d"),
+        ("limit", str(min(span, _MAX_BUCKETS))),
+        ("group_by", "project_id"),
+        ("group_by", "line_item"),
+    ]
+    if page:
+        params.append(("page", page))
+    response = requests.get(
+        f"{OPENAI_BASE_URL}{_COSTS_PATH}",
+        params=params,
+        headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+        timeout=_TIMEOUT_SECONDS,
+    )
+    if response.status_code in (401, 403):
+        raise CostConfigError(
+            "OpenAI refused the key for organization costs. It has to be an "
+            "admin key from Organization settings, API keys, Admin keys - a "
+            "project key cannot read the organization's spend."
+        )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise CostConfigError("OpenAI returned an unexpected response shape.")
+    return payload
+
+
+def _midnight(day: _dt.date) -> int:
+    """The day's start as a UTC timestamp, which is what the endpoint takes."""
+    moment = _dt.datetime.combine(day, _dt.time.min, tzinfo=_dt.timezone.utc)
+    return int(moment.timestamp())
+
+
+def _bucket_day(bucket: dict) -> _dt.date:
+    stamp = bucket.get("start_time")
+    return _dt.datetime.fromtimestamp(int(stamp or 0), _dt.timezone.utc).date()
+
+
+def window(
+    costs: pd.DataFrame,
+    days: int,
+    provider: str = "OpenAI",
+    now: _dt.date | None = None,
+) -> Burn:
+    """Split a daily cost frame into this window and the one before it.
+
+    Today is included, unlike the ad panel: a provider bills as it goes and the
+    day's charges so far are real money, where an ad transfer simply has not
+    loaded the day yet.
+    """
+    today = now or _dt.date.today()
+    if costs.empty:
+        return Burn(days, provider, 0.0, 0.0, "usd", 0, None, None, pd.DataFrame())
+    frame = costs.copy()
+    frame["day"] = pd.to_datetime(frame["day"]).dt.date
+    start = today - _dt.timedelta(days=days - 1)
+    current = frame[frame["day"] >= start]
+    previous = frame[(frame["day"] < start) & (frame["day"] >= start - _dt.timedelta(days=days))]
+    return Burn(
+        days=days,
+        provider=provider,
+        cost=float(current["cost"].sum()),
+        prev_cost=float(previous["cost"].sum()),
+        currency=_one_currency(frame),
+        days_with_data=int(current["day"].nunique()),
+        first_day=min(current["day"]) if not current.empty else None,
+        last_day=max(current["day"]) if not current.empty else None,
+        lines=by_line(current),
+    )
+
+
+def _one_currency(frame: pd.DataFrame) -> str:
+    """The commonest currency in the frame; OpenAI bills one org in one.
+
+    Taken rather than assumed, so a change of billing currency shows up in the
+    tiles instead of being silently labelled dollars.
+    """
+    counted = frame["currency"].value_counts()
+    return str(counted.index[0]) if len(counted) else "usd"
+
+
+def by_line(costs: pd.DataFrame) -> pd.DataFrame:
+    """Cost per named line item, dearest first, with its share of the total."""
+    if costs.empty:
+        return pd.DataFrame(columns=["line_item", "cost", "share"])
+    grouped = (
+        costs.groupby("line_item", as_index=False)["cost"]
+        .sum()
+        .sort_values("cost", ascending=False)
+        .reset_index(drop=True)
+    )
+    total = float(grouped["cost"].sum())
+    grouped["share"] = grouped["cost"] / total if total else 0.0
+    return grouped
+
+
+def by_project(costs: pd.DataFrame) -> pd.DataFrame:
+    """Cost per project, dearest first: which application is spending."""
+    if costs.empty:
+        return pd.DataFrame(columns=["project", "cost"])
+    return (
+        costs.groupby("project", as_index=False)["cost"]
+        .sum()
+        .sort_values("cost", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+# A line item whose name says the tokens were served from cache or written to it.
+# Worth separating because it is the one part of an AI bill that is usually a
+# choice rather than a workload: it is context sent again.
+_CACHE_WORDS = ("cached", "cache write", "cache read")
+
+
+def cached_share(costs: pd.DataFrame) -> float:
+    """The fraction of the bill that is cache traffic rather than new work."""
+    if costs.empty or "line_item" not in costs:
+        return 0.0
+    total = float(costs["cost"].sum())
+    if not total:
+        return 0.0
+    names = costs["line_item"].fillna("").str.lower()
+    cache = costs[names.str.contains("|".join(_CACHE_WORDS))]
+    return float(cache["cost"].sum()) / total
+
+
+# Below this, the period before the window is too small to be a comparison: the
+# usage started inside the window, and a percentage would read as a spike.
+_NEW_SPEND_SHARE = 0.05
+
+
+def verdicts(burn: Burn) -> list[str]:
+    """The bill in sentences: what it runs to a month, and what it is made of."""
+    if burn.cost <= 0:
+        return [f"No {burn.provider} charges in the last {burn.days} days."]
+    lines = [
+        f"**{_money(burn.cost)} on {burn.provider} in {burn.days} days** - "
+        f"{_money(burn.monthly)} a month at this rate."
+    ]
+    if burn.prev_cost < burn.cost * _NEW_SPEND_SHARE:
+        lines.append(
+            f"**This spend is new** - the {burn.days} days before came to "
+            f"{_money(burn.prev_cost)}, so there is no earlier period to read "
+            "it against yet."
+        )
+    else:
+        share = burn.cost_change / burn.prev_cost
+        if abs(share) >= 0.1:
+            word = "up" if share > 0 else "down"
+            lines.append(
+                f"**Spend is {word} {_money(abs(burn.cost_change))} "
+                f"({share:+.0%}) on the {burn.days} days before**, so this is a "
+                "change in usage rather than the usual bill."
+            )
+    cached = cached_share(burn.lines)
+    if cached >= 0.25:
+        lines.append(
+            f"**{cached:.0%} of it is cached context** - "
+            f"{_money(burn.cost * cached)} spent re-sending prompts rather than "
+            "on new work, which is usually the cheapest thing to cut."
+        )
+    if not burn.lines.empty:
+        top = burn.lines.iloc[0]
+        if float(top["share"]) >= 0.3:
+            lines.append(
+                f"**{top['line_item']} is {float(top['share']):.0%} of the "
+                f"bill** at {_money(float(top['cost']))}."
+            )
+    return lines
+
+
+def _money(amount: float) -> str:
+    """Whole dollars above ten; cents in a monthly bill are noise."""
+    return f"${amount:,.0f}" if abs(amount) >= 10 else f"${amount:,.2f}"
+
+
+# A live secret key can write; the panel only ever reads, and a key that can do
+# more than the panel needs should not be sitting in the environment.
+_STRIPE_LIVE_SECRET_PREFIX = "sk_"
+
+
+def load_stripe_env() -> str | None:
+    """Return the Stripe restricted key, or ``None`` when there is none set.
+
+    Refuses a full secret key outright rather than quietly using it: this panel
+    needs four read permissions, and a key that can also issue refunds has no
+    business being here.
+    """
+    key = os.getenv(_STRIPE_KEY_ENV_VAR, "").strip()
+    if not key:
+        return None
+    if key.startswith(_STRIPE_LIVE_SECRET_PREFIX):
+        raise CostConfigError(
+            f"{_STRIPE_KEY_ENV_VAR} is a full secret key, which can move money. "
+            "Create a restricted key with read access to balance transactions, "
+            "charges, disputes and payouts instead."
+        )
+    return key
+
+
+# Stripe returns at most this many objects per call, and the ledger of a busy
+# platform runs to hundreds a month, so the reads page.
+_STRIPE_PAGE = 100
+
+# The ledger entries this panel understands. A Connect platform's own income
+# arrives as an application fee taken from the merchant's charge, and Stripe's
+# processing fees are charged on that merchant's account rather than here.
+_PLATFORM_EARNING = "application_fee"
+_PLATFORM_REFUND = "application_fee_refund"
+_PAYOUT = "payout"
+
+
+@dataclass(frozen=True)
+class Ledger:
+    """What Stripe's own books say happened over a window.
+
+    Named for what the account really holds rather than what the panel wanted:
+    on a Connect platform the takings are commission, and ``fees`` is the money
+    Stripe charged *this* account, which is nil while every charge belongs to a
+    connected merchant.
+    """
+
+    days: int
+    earnings: float
+    refunds: float
+    fees: float
+    paid_out: float
+    disputes: int
+    currency: str
+    prev_earnings: float
+    first_day: _dt.date | None
+    last_day: _dt.date | None
+
+    @property
+    def net(self) -> float:
+        """Commission kept: earnings less refunds less anything Stripe charged."""
+        return self.earnings - abs(self.refunds) - abs(self.fees)
+
+    @property
+    def earnings_change(self) -> float:
+        return self.earnings - self.prev_earnings
+
+
+def stripe_ledger(key: str, days: int, now: _dt.date | None = None) -> pd.DataFrame:
+    """Balance-transaction lines over ``2 * days``, one row per entry.
+
+    The balance transaction is the only object that covers every kind of money
+    movement at once - commission, refunds, Stripe's own fees, payouts - so the
+    panel reads that rather than stitching charges and payouts together.
+    """
+    today = now or _dt.date.today()
+    start = today - _dt.timedelta(days=2 * days - 1)
+    rows: list[dict] = []
+    after: str | None = None
+    for _ in range(_MAX_PAGES):
+        payload = _get_balance(key, start, after)
+        data = payload.get("data") or []
+        for entry in data:
+            rows.append(
+                {
+                    "day": _stamp_day(entry.get("created")),
+                    "type": str(entry.get("type") or ""),
+                    "category": str(entry.get("reporting_category") or ""),
+                    # Stripe counts in the currency's smallest unit.
+                    "amount": float(entry.get("amount") or 0) / 100.0,
+                    "fee": float(entry.get("fee") or 0) / 100.0,
+                    "currency": str(entry.get("currency") or "usd").lower(),
+                }
+            )
+        if not payload.get("has_more") or not data:
+            break
+        after = data[-1].get("id")
+        if not after:  # pragma: no cover - defensive: no cursor, no next page
+            break
+    return pd.DataFrame(
+        rows, columns=["day", "type", "category", "amount", "fee", "currency"]
+    )
+
+
+def _get_balance(key: str, start: _dt.date, after: str | None) -> dict:
+    params: list[tuple[str, str]] = [
+        ("limit", str(_STRIPE_PAGE)),
+        ("created[gte]", str(_midnight(start))),
+    ]
+    if after:
+        params.append(("starting_after", after))
+    response = requests.get(
+        f"{STRIPE_BASE_URL}{_BALANCE_PATH}",
+        params=params,
+        headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+        timeout=_TIMEOUT_SECONDS,
+    )
+    if response.status_code in (401, 403):
+        raise CostConfigError(
+            "Stripe refused the restricted key for balance transactions. Give it "
+            "read access to balance transactions, charges, disputes and payouts."
+        )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise CostConfigError("Stripe returned an unexpected response shape.")
+    return payload
+
+
+def _stamp_day(stamp) -> _dt.date:
+    return _dt.datetime.fromtimestamp(int(stamp or 0), _dt.timezone.utc).date()
+
+
+def stripe_disputes(key: str, days: int, now: _dt.date | None = None) -> int:
+    """How many disputes were opened in the window.
+
+    Counted rather than summed: a dispute is money at risk with an outcome still
+    to come, so adding it to a cost total would report a loss that may not happen.
+    """
+    today = now or _dt.date.today()
+    start = today - _dt.timedelta(days=days - 1)
+    response = requests.get(
+        f"{STRIPE_BASE_URL}/v1/disputes",
+        params=[("limit", str(_STRIPE_PAGE)), ("created[gte]", str(_midnight(start)))],
+        headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+        timeout=_TIMEOUT_SECONDS,
+    )
+    if response.status_code in (401, 403):
+        raise CostConfigError(
+            "Stripe refused the restricted key for disputes; give it read access "
+            "to disputes or the panel cannot report them."
+        )
+    response.raise_for_status()
+    payload = response.json()
+    return len((payload or {}).get("data") or [])
+
+
+def ledger_window(
+    entries: pd.DataFrame,
+    days: int,
+    disputes: int = 0,
+    now: _dt.date | None = None,
+) -> Ledger:
+    """Fold Stripe's ledger into this window and the takings of the one before."""
+    today = now or _dt.date.today()
+    if entries.empty:
+        return Ledger(days, 0.0, 0.0, 0.0, 0.0, disputes, "usd", 0.0, None, None)
+    frame = entries.copy()
+    frame["day"] = pd.to_datetime(frame["day"]).dt.date
+    start = today - _dt.timedelta(days=days - 1)
+    current = frame[frame["day"] >= start]
+    previous = frame[
+        (frame["day"] < start) & (frame["day"] >= start - _dt.timedelta(days=days))
+    ]
+
+    def takings(rows: pd.DataFrame) -> float:
+        return float(rows.loc[rows["type"] == _PLATFORM_EARNING, "amount"].sum())
+
+    return Ledger(
+        days=days,
+        earnings=takings(current),
+        refunds=float(
+            current.loc[current["type"] == _PLATFORM_REFUND, "amount"].sum()
+        ),
+        # What Stripe charged this account, which is nil while every charge sits
+        # on a connected merchant's books.
+        fees=float(current["fee"].sum()),
+        paid_out=float(current.loc[current["type"] == _PAYOUT, "amount"].sum()),
+        disputes=disputes,
+        currency=_one_currency(current if not current.empty else frame),
+        prev_earnings=takings(previous),
+        first_day=min(current["day"]) if not current.empty else None,
+        last_day=max(current["day"]) if not current.empty else None,
+    )
+
+
+def stripe_verdicts(ledger: Ledger) -> list[str]:
+    """The platform's own take, in sentences, and what Stripe is silent about."""
+    if not ledger.earnings:
+        return [
+            f"Stripe recorded no platform earnings in the last {ledger.days} days."
+        ]
+    lines = [
+        f"**{_money(ledger.net)} of commission kept in {ledger.days} days** "
+        f"({_money(ledger.earnings)} earned"
+        + (f", {_money(abs(ledger.refunds))} refunded" if ledger.refunds else "")
+        + ")."
+    ]
+    if ledger.prev_earnings:
+        share = ledger.earnings_change / ledger.prev_earnings
+        if abs(share) >= 0.1:
+            word = "up" if share > 0 else "down"
+            lines.append(
+                f"**Commission is {word} {_money(abs(ledger.earnings_change))} "
+                f"({share:+.0%}) on the {ledger.days} days before.**"
+            )
+    if not ledger.fees:
+        lines.append(
+            "**Stripe charged this account nothing to process it** - the "
+            "platform takes a fee from each merchant's charge, so the card fees "
+            "sit on the merchants' own accounts and are not a cost here."
+        )
+    if ledger.disputes:
+        lines.append(
+            f"**{ledger.disputes} dispute"
+            f"{'s' if ledger.disputes != 1 else ''} opened** in the window, "
+            "which is money at risk rather than money lost."
+        )
+    return lines
+
+
+__all__ = [
+    "Burn",
+    "Ledger",
+    "CostConfigError",
+    "LOOKBACK_WINDOWS",
+    "by_line",
+    "by_project",
+    "cached_share",
+    "ledger_window",
+    "load_openai_env",
+    "load_stripe_env",
+    "openai_costs",
+    "stripe_ledger",
+    "stripe_verdicts",
+    "verdicts",
+    "window",
+]
