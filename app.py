@@ -3798,8 +3798,21 @@ def _render_product_funnel() -> None:
         st.warning(f"Could not read the funnel from Amplitude: {str(exc)[:200]}")
         return
 
+    active = _active_people(credentials, days)
     if steps.empty or not steps["users"].iloc[0]:
-        st.info(f"Amplitude recorded nobody at the first step in the last {days} days.")
+        # No funnel to draw, but errors and Voss AI use do not depend on it and
+        # are the numbers most likely to explain why: an event renamed in the
+        # storefront empties the funnel while thousands of people are still here.
+        st.info(
+            f"Amplitude recorded nobody at the funnel's first step in the last "
+            f"{days} days, so there is no funnel to draw. Check the events behind "
+            "it are still being sent, or name your own with AMPLITUDE_FUNNEL."
+        )
+        if active:
+            st.metric(
+                f"{amplitude_client.ACTIVE_STEP.label} ({days}d)", f"{active:,}"
+            )
+            _render_friction_tabs(credentials, days, active, "used the site")
         return
 
     # The same window again, ending where this one starts. A conversion rate on
@@ -3822,7 +3835,6 @@ def _render_product_funnel() -> None:
     # before it to have lost anybody from.
     worst = steps.iloc[1:].sort_values("lost", ascending=False).iloc[0]
     tiles = st.columns(5)
-    active = _active_people(credentials, days)
     tiles[0].metric(
         f"{amplitude_client.ACTIVE_STEP.label} ({days}d)",
         f"{active:,}" if active is not None else "\u2014",
@@ -3910,9 +3922,26 @@ def _render_product_funnel() -> None:
     # Errors and AI use happen anywhere, not only past the first funnel step, so
     # the share they are quoted against is everybody who used the site when that
     # figure arrived, and the funnel's own first step only when it did not.
-    everyone = active or int(top["users"])
-    denominator = "used the site" if active else f"reached {top['step']}".lower()
+    _render_friction_tabs(
+        credentials,
+        days,
+        active or int(top["users"]),
+        "used the site" if active else f"reached {top['step']}".lower(),
+    )
 
+
+def _render_friction_tabs(
+    credentials: tuple[str, str, str],
+    days: int,
+    everyone: int,
+    denominator: str,
+) -> None:
+    """What went wrong, and whether Voss AI is used, as a share of ``everyone``.
+
+    Kept apart from the funnel because neither depends on it: an empty funnel is
+    usually an event that stopped being sent, and the errors are the likeliest
+    explanation, so they should not disappear along with it.
+    """
     friction_tab, ai_tab = st.tabs(["What went wrong", "Voss AI"])
     with friction_tab:
         _render_event_counts(
