@@ -55,6 +55,7 @@ from teams import (
     team_summary,
 )
 from theme import inject_styles, kpi_strip
+import report as reporting
 from hygiene import (
     DEFAULT_STALE_DAYS,
     estimate_policy,
@@ -490,6 +491,66 @@ def _metrics_df(df: pd.DataFrame, include_backlogs: bool) -> pd.DataFrame:
     return df[~statuses.isin(BACKLOG_STATUSES)]
 
 
+TAB_ENGINEERING = "Engineering"
+TAB_BUSINESS = "Business"
+REPORTS_KEY = "tab_reports"
+
+
+def _report(tab: str) -> reporting.Report:
+    """The report being gathered for one tab on this run.
+
+    Streamlit redraws a tab from scratch on every interaction, so the figures
+    are collected afresh each run and the file offered for download is always
+    the page as it currently reads.
+    """
+    reports = st.session_state.setdefault(REPORTS_KEY, {})
+    return reports.setdefault(tab, reporting.Report(tab))
+
+
+def _reset_reports() -> None:
+    st.session_state[REPORTS_KEY] = {}
+
+
+def _tile(column, tab: str, section: str, label: str, value: str, **kwargs) -> None:
+    """One metric, drawn on the page and kept for the printable report."""
+    _report(tab).figure(section, label, value, str(kwargs.get("delta") or ""))
+    column.metric(label, value, **kwargs)
+
+
+def _kpis(tab: str, section: str, cards: list[tuple[str, str, str, str]]) -> None:
+    """A KPI strip, drawn on the page and kept for the printable report."""
+    for label, value, note, _accent in cards:
+        _report(tab).figure(section, label, value, note)
+    kpi_strip(cards)
+
+
+def _said(tab: str, section: str, lines: list[str]) -> None:
+    """Verdict lines, drawn as bullets and kept for the printable report."""
+    for line in lines:
+        _report(tab).note(section, line)
+    st.markdown("\n".join(f"- {line}" for line in lines))
+
+
+def _download_report(slot, tab: str) -> None:
+    """Offer this tab's figures as a page that prints to a PDF.
+
+    Drawn into a slot reserved before the sections run, because the file can
+    only be built once they have: the button sits at the top of the tab where a
+    reader looks for it, and holds what the whole tab ended up saying.
+    """
+    built = _report(tab)
+    if built.empty:
+        return
+    slot.download_button(
+        "Download report",
+        data=built.html(),
+        file_name=built.filename(),
+        mime="text/html",
+        key=f"download_{tab.lower()}",
+        help="A one-page summary of this tab. Open it and print to PDF.",
+    )
+
+
 def _render_metrics(
     df: pd.DataFrame,
     include_backlogs: bool = False,
@@ -543,7 +604,9 @@ def _render_metrics(
         owners = owner_df["assignee"].fillna("").astype(str).str.strip().str.lower()
         unassigned = int(owners.isin({"", "unassigned", "none"}).sum())
 
-    kpi_strip(
+    _kpis(
+        TAB_ENGINEERING,
+        "Ticket health",
         [
             ("Open tickets", f"{total_open}", "current scope", "neutral"),
             (
@@ -3393,9 +3456,16 @@ def _render_new_and_triage(
     """Intake health: brand-new work and tickets sitting in triage too long."""
     st.subheader("New & Untriaged Work")
     c1, c2, c3 = st.columns(3)
-    c1.metric("New tickets (24h)", _metric_value(new_24h))
-    c2.metric("New tickets (7d)", _metric_value(new_7d))
-    c3.metric(f"Stuck in triage (> {triage_hours}h)", _metric_value(triage_stuck))
+    intake = "New & untriaged work"
+    _tile(c1, TAB_ENGINEERING, intake, "New tickets (24h)", _metric_value(new_24h))
+    _tile(c2, TAB_ENGINEERING, intake, "New tickets (7d)", _metric_value(new_7d))
+    _tile(
+        c3,
+        TAB_ENGINEERING,
+        intake,
+        f"Stuck in triage (> {triage_hours}h)",
+        _metric_value(triage_stuck),
+    )
 
     with st.expander(f"Stuck in triage — {', '.join(TRIAGE_STATUSES)} > {triage_hours}h, oldest first", expanded=True):
         _render_ticket_list(
@@ -3595,10 +3665,19 @@ def _render_orders(order_book: orders_client.OrderBook, base_url: str) -> None:
     month = orders.window_metrics(book, 30)
     for window, label in ((week, "7 days"), (month, "30 days")):
         tiles = st.columns(4)
-        tiles[0].metric(
-            f"Orders ({label})", f"{window.orders:,}", delta=f"{window.orders_delta:+,}"
+        shop = "Orders, Revenue & AOV"
+        _tile(
+            tiles[0],
+            TAB_BUSINESS,
+            shop,
+            f"Orders ({label})",
+            f"{window.orders:,}",
+            delta=f"{window.orders_delta:+,}",
         )
-        tiles[1].metric(
+        _tile(
+            tiles[1],
+            TAB_BUSINESS,
+            shop,
             f"Revenue ({label})",
             _money(window.revenue, currency),
             delta=(
@@ -3606,10 +3685,15 @@ def _render_orders(order_book: orders_client.OrderBook, base_url: str) -> None:
                 f"{_money(abs(window.revenue_delta), currency)}"
             ),
         )
-        tiles[2].metric(f"AOV ({label})", _money(window.aov, currency))
+        _tile(
+            tiles[2], TAB_BUSINESS, shop, f"AOV ({label})", _money(window.aov, currency)
+        )
         # Cancelled and unpaid are the gap between "orders" and "revenue", and
         # the reason the two tiles do not divide into each other.
-        tiles[3].metric(
+        _tile(
+            tiles[3],
+            TAB_BUSINESS,
+            shop,
             f"Cancelled / unpaid ({label})",
             f"{window.canceled} / {window.unpaid_orders}",
         )
@@ -3923,19 +4007,29 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     money = currency.lower()
     unit = _one(money)
 
+    ads = "Ads Spend & Return"
     tiles = st.columns(6)
-    tiles[0].metric(
+    _tile(
+        tiles[0],
+        TAB_BUSINESS,
+        ads,
         f"Spend ({days}d)",
         _money(spend.cost, money),
         **_delta_arrow(
             _money_delta(spend.cost_change, money) if spend.prev_cost else None
         ),
     )
-    tiles[1].metric(
+    _tile(
+        tiles[1],
+        TAB_BUSINESS,
+        ads,
         "Orders (CRM)",
         f"{sales.orders:,}" if sales else "\u2014",
     )
-    tiles[2].metric(
+    _tile(
+        tiles[2],
+        TAB_BUSINESS,
+        ads,
         "Ad spend per order",
         _money(spend.cost / sales.orders, money) if sales and sales.orders else "\u2014",
     )
@@ -3960,7 +4054,10 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         if sales and comparable
         else 0.0
     )
-    tiles[3].metric(
+    _tile(
+        tiles[3],
+        TAB_BUSINESS,
+        ads,
         f"Commission per {unit} spent",
         f"{earned:.2f}" if earned else "\u2014",
         **_delta_arrow(f"{earned - before:+.2f}" if earned and before else None),
@@ -3970,14 +4067,23 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
             "themselves."
         ),
     )
-    tiles[4].metric(
+    _tile(
+        tiles[4],
+        TAB_BUSINESS,
+        ads,
         f"Revenue per {unit} spent",
         f"{sales.revenue / spend.cost:.1f}x"
         if sales and comparable and spend.cost
         else "\u2014",
         help="Gross, and mostly the merchants': the tile to its left is ours.",
     )
-    tiles[5].metric("Google's own conversions", f"{spend.conversions:,.0f}")
+    _tile(
+        tiles[5],
+        TAB_BUSINESS,
+        ads,
+        "Google's own conversions",
+        f"{spend.conversions:,.0f}",
+    )
 
     if earned:
         goal = ads_client.BREAK_EVEN_RETURN
@@ -3994,10 +4100,16 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
             else f" {'Up' if earned > before else 'Down'} from "
             f"{_money(before, money)} in the previous {days} days."
         )
-        st.markdown(
+        headline = (
             f"### {_money(earned, money)} back for every {unit} of ad spend\n\n"
             f"**Goal {goal:.2f}.** {standing}{trend}"
         )
+        _report(TAB_BUSINESS).note(
+            ads,
+            f"**{_money(earned, money)} back for every {unit} of ad spend.** "
+            f"Goal {goal:.2f}. {standing}{trend}",
+        )
+        st.markdown(headline)
 
     if spend.partial:
         st.warning(
@@ -4057,7 +4169,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     lines = ads_client.verdicts(spend, campaigns, sales, currency, rate=keep)
     if lines:
         with st.expander("What this means", expanded=True):
-            st.markdown("\n".join(f"- {line}" for line in lines))
+            _said(TAB_BUSINESS, ads, lines)
 
     if read.other_currencies:
         st.caption(
@@ -4161,18 +4273,31 @@ def _render_ai_costs(days: int) -> None:
         return
 
     money = burn.currency
+    ai = "AI costs"
     tiles = st.columns(3)
-    tiles[0].metric(
+    _tile(
+        tiles[0],
+        TAB_BUSINESS,
+        ai,
         f"OpenAI ({days}d)",
         _money(burn.cost, money),
         **_delta_arrow(
             _money_delta(burn.cost_change, money) if burn.prev_cost else None
         ),
     )
-    tiles[1].metric("At this rate, a month", _money(burn.monthly, money))
+    _tile(
+        tiles[1],
+        TAB_BUSINESS,
+        ai,
+        "At this rate, a month",
+        _money(burn.monthly, money),
+    )
     # The share of the bill that is context sent again rather than new work,
     # which is the one line on an AI invoice that is usually a choice.
-    tiles[2].metric(
+    _tile(
+        tiles[2],
+        TAB_BUSINESS,
+        ai,
         "Cached context",
         f"{cost_client.cached_share(burn.lines):.0%}" if not burn.lines.empty else "\u2014",
     )
@@ -4224,7 +4349,7 @@ def _render_ai_costs(days: int) -> None:
     lines = cost_client.verdicts(burn)
     if lines:
         with st.expander("What this means", expanded=True):
-            st.markdown("\n".join(f"- {line}" for line in lines))
+            _said(TAB_BUSINESS, ai, lines)
 
     st.caption(
         "OpenAI's own organization cost report, read with an admin key that can "
@@ -4280,11 +4405,15 @@ def _render_stripe(days: int) -> None:
         return
 
     money = ledger.currency
+    payments = "Payments"
     tiles = st.columns(4)
     # Commission on a platform; on an ordinary account the same tile is its own
     # takings less what Stripe charged to process them, which is not commission.
     kept = "Commission" if ledger.platform else "Payments"
-    tiles[0].metric(
+    _tile(
+        tiles[0],
+        TAB_BUSINESS,
+        payments,
         f"{kept} kept ({days}d)",
         _money(ledger.net, money),
         # Compared with the same quantity the tile shows - commission after
@@ -4293,11 +4422,25 @@ def _render_stripe(days: int) -> None:
             _money_delta(ledger.net_change, money) if ledger.prev_net else None
         ),
     )
-    tiles[1].metric("Refunded", _money(abs(ledger.refunds), money))
+    _tile(
+        tiles[1], TAB_BUSINESS, payments, "Refunded", _money(abs(ledger.refunds), money)
+    )
     # Nil on a platform account, and worth showing as nil rather than omitting:
     # the question "what do the card fees cost us" deserves an answer.
-    tiles[2].metric("Stripe's own fees", _money(abs(ledger.fees), money))
-    tiles[3].metric("Paid out to the bank", _money(abs(ledger.paid_out), money))
+    _tile(
+        tiles[2],
+        TAB_BUSINESS,
+        payments,
+        "Stripe's own fees",
+        _money(abs(ledger.fees), money),
+    )
+    _tile(
+        tiles[3],
+        TAB_BUSINESS,
+        payments,
+        "Paid out to the bank",
+        _money(abs(ledger.paid_out), money),
+    )
 
     if ledger.other_currencies:
         st.caption(
@@ -4318,7 +4461,7 @@ def _render_stripe(days: int) -> None:
     lines = cost_client.stripe_verdicts(ledger)
     if lines:
         with st.expander("What Stripe says", expanded=True):
-            st.markdown("\n".join(f"- {line}" for line in lines))
+            _said(TAB_BUSINESS, payments, lines)
 
     st.caption(
         "Stripe's balance transactions, read with a restricted key that cannot "
@@ -4466,27 +4609,43 @@ def _render_product_funnel() -> None:
     # The step that loses the most people, ignoring the first: it has nothing
     # before it to have lost anybody from.
     worst = steps.iloc[1:].sort_values("lost", ascending=False).iloc[0]
+    funnel = "Product funnel"
     tiles = st.columns(5)
-    tiles[0].metric(
+    _tile(
+        tiles[0],
+        TAB_BUSINESS,
+        funnel,
         f"{amplitude_client.ACTIVE_STEP.label} ({days}d)",
         f"{active:,}" if active is not None else "\u2014",
     )
-    tiles[1].metric(
+    _tile(
+        tiles[1],
+        TAB_BUSINESS,
+        funnel,
         f"{top['step']} ({days}d)",
         f"{int(top['users']):,}",
         **_delta_arrow(_people_delta(top, previous, 0)),
     )
-    tiles[2].metric(
+    _tile(
+        tiles[2],
+        TAB_BUSINESS,
+        funnel,
         f"{end['step']} ({days}d)",
         f"{int(end['users']):,}",
         **_delta_arrow(_people_delta(end, previous, len(steps) - 1)),
     )
-    tiles[3].metric(
+    _tile(
+        tiles[3],
+        TAB_BUSINESS,
+        funnel,
         f"{top['step']} to {end['step'].lower()}",
         _percent(float(end["from_start"])),
         **_delta_arrow(_rate_delta(steps, previous, len(steps) - 1, "from_start")),
     )
-    tiles[4].metric(
+    _tile(
+        tiles[4],
+        TAB_BUSINESS,
+        funnel,
         "Biggest drop-off",
         worst["step"],
         delta=f"-{int(worst['lost']):,} people",
@@ -4723,7 +4882,7 @@ def _render_funnel_verdicts(
     if not lines:
         return
     with st.expander("What each step means", expanded=True):
-        st.markdown("\n".join(f"- {line}" for line in lines))
+        _said(TAB_BUSINESS, "Product funnel", lines)
         worst = steps.iloc[1:].sort_values("lost", ascending=False).iloc[0]
         st.markdown(
             f"The one to fix first is **{worst['step']}**: "
@@ -4834,10 +4993,19 @@ def _render_resolved_summary(
     st.subheader("Resolved in the Last 7 / 30 Days")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Tickets resolved (7d)", _metric_value(ticket_count_7))
-    c2.metric("Tickets resolved (30d)", _metric_value(ticket_count_30))
-    c3.metric("PRs merged (7d)", _metric_value(pr_count_7))
-    c4.metric("PRs merged (30d)", _metric_value(pr_count_30))
+    shipped = "Resolved in the last 7 / 30 days"
+    _tile(
+        c1, TAB_ENGINEERING, shipped, "Tickets resolved (7d)", _metric_value(ticket_count_7)
+    )
+    _tile(
+        c2,
+        TAB_ENGINEERING,
+        shipped,
+        "Tickets resolved (30d)",
+        _metric_value(ticket_count_30),
+    )
+    _tile(c3, TAB_ENGINEERING, shipped, "PRs merged (7d)", _metric_value(pr_count_7))
+    _tile(c4, TAB_ENGINEERING, shipped, "PRs merged (30d)", _metric_value(pr_count_30))
 
     # None means the ticket fetch failed (distinct from an empty 30-day window),
     # so the pie can say "could not load" instead of asserting nobody resolved any.
@@ -4933,9 +5101,16 @@ def _render_pr_section(
     stuck = prs[prs["stuck"]]
     no_review = prs[prs["total_reviews"].fillna(0).astype(int) == 0]
     c1, c2, c3 = st.columns(3)
-    c1.metric("Open PRs", open_count)
-    c2.metric("Stuck (no approving review)", int(len(stuck)))
-    c3.metric("Never reviewed", int(len(no_review)))
+    review = "Pull requests"
+    _tile(c1, TAB_ENGINEERING, review, "Open PRs", str(open_count))
+    _tile(
+        c2,
+        TAB_ENGINEERING,
+        review,
+        "Stuck (no approving review)",
+        f"{len(stuck)}",
+    )
+    _tile(c3, TAB_ENGINEERING, review, "Never reviewed", f"{len(no_review)}")
     if open_count_exact is not None and fetched < open_count_exact:
         st.caption(
             f"Per-person and stuck lists cover the {fetched} oldest of {open_count_exact} "
@@ -5093,14 +5268,18 @@ def _render_pr_hygiene(
     )
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Critical in flight", int(len(critical)))
-    c2.metric("No Jira key", int(len(no_key)))
-    c3.metric(
+    hygiene_section = "PR hygiene"
+    _tile(c1, TAB_ENGINEERING, hygiene_section, "Critical in flight", f"{len(critical)}")
+    _tile(c2, TAB_ENGINEERING, hygiene_section, "No Jira key", f"{len(no_key)}")
+    _tile(
+        c3,
+        TAB_ENGINEERING,
+        hygiene_section,
         f"Stale (>{pr_hygiene.STALE_AGE_DAYS:.0f}d old or "
         f">{pr_hygiene.STALE_IDLE_DAYS:.0f}d idle)",
-        int(len(stale)),
+        f"{len(stale)}",
     )
-    c4.metric("No reviewer", int(len(unowned)))
+    _tile(c4, TAB_ENGINEERING, hygiene_section, "No reviewer", f"{len(unowned)}")
     st.caption(
         "A key is looked for in the PR title, branch name and description"
         + (f", matched against {len(project_keys)} known project keys." if project_keys else ".")
@@ -5226,10 +5405,17 @@ def _render_ticket_quality(df: pd.DataFrame) -> None:
     unclear = gradable[gradable["quality_score"] <= 2]
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Ready for Devin", int(len(ready)))
-    c2.metric("Nearly ready", int(len(maybe)))
-    c3.metric("Unclear (score ≤2)", int(len(unclear)))
-    c4.metric("Average score", f"{gradable['quality_score'].mean():.1f} / 5")
+    clarity = "Ticket clarity"
+    _tile(c1, TAB_ENGINEERING, clarity, "Ready for Devin", f"{len(ready)}")
+    _tile(c2, TAB_ENGINEERING, clarity, "Nearly ready", f"{len(maybe)}")
+    _tile(c3, TAB_ENGINEERING, clarity, "Unclear (score \u22642)", f"{len(unclear)}")
+    _tile(
+        c4,
+        TAB_ENGINEERING,
+        clarity,
+        "Average score",
+        f"{gradable['quality_score'].mean():.1f} / 5",
+    )
     st.caption(
         "Scored out of 5: a summary that says what the work is, a real description, "
         "acceptance criteria, an estimate, and an epic. Epics and initiatives are exempt. "
@@ -5485,14 +5671,20 @@ def main() -> None:
         except Exception:  # noqa: BLE001
             return None
 
-    engineering_tab, business_tab = st.tabs(["Engineering", "Business"])
+    engineering_tab, business_tab = st.tabs([TAB_ENGINEERING, TAB_BUSINESS])
+
+    # Gathered fresh on every run, because every figure below is.
+    _reset_reports()
 
     # The shop's numbers answer a different question from the rest of the page,
     # and everyone scrolling for an engineering signal was scrolling past them.
     with business_tab:
+        business_slot = st.columns([5, 1])[1]
         _render_business()
+        _download_report(business_slot, TAB_BUSINESS)
 
     with engineering_tab:
+        engineering_slot = st.columns([5, 1])[1]
         _render_resolved_summary(
             _resolved_count(7),
             _resolved_count(30),
@@ -5872,6 +6064,8 @@ def main() -> None:
             "Team member filter uses Jira assignee display names from fetched data. "
             "For stricter JQL filtering, use assignee account IDs in JQL."
         )
+
+        _download_report(engineering_slot, TAB_ENGINEERING)
 
 
 if __name__ == "__main__":

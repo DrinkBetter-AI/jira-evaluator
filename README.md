@@ -148,7 +148,15 @@ past changes matters:
 The page splits in two at the top: an **Engineering** tab holding everything below,
 and a **Business** tab holding the shop's numbers on their own. They answer a
 different question from ticket and PR health, and the sidebar scope and filters do
-not apply to them. The Business tab holds:
+not apply to them.
+
+Each tab carries a **Download report** button at its top right: the tab's headline
+figures and the sentences explaining them, as a self-contained HTML page that
+prints to a PDF (open it and press Cmd/Ctrl-P). It holds what the tab currently
+reads, so a scope or window changed in the sidebar is reflected in it, and a
+figure that could not be read is left out rather than printed as a dash.
+
+The Business tab holds:
 
 - *Orders, Revenue & AOV* for the last 7 and 30 days, each against the window
   before it.
