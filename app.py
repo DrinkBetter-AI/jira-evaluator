@@ -619,6 +619,32 @@ def _gather(
     return results, errors
 
 
+def _parallel(tasks: dict[str, Callable[[], Any]]) -> dict[str, Any]:
+    """Run independent reads together, and raise if any of them fails.
+
+    The sibling of ``_gather`` for a single section rather than a whole page.
+    ``_gather`` returns failures instead of raising them, because one dead Jira
+    query should cost its own panel and not the twenty beside it; a section that
+    already catches and reports its own errors wants the opposite, so the first
+    failure comes out here rather than leaving the caller to notice a blank.
+
+    Workers are handed the calling script's run context for the same reason as
+    there: without it the ``st.cache_data`` wrappers inside a task cannot see the
+    session's cache and log a missing-context warning per call.
+    """
+    if not tasks:
+        return {}
+    context = get_script_run_ctx()
+
+    def _run(task: Callable[[], Any]) -> Any:
+        add_script_run_ctx(threading.current_thread(), context)
+        return task()
+
+    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_REQUESTS, len(tasks))) as pool:
+        running = {name: pool.submit(_run, task) for name, task in tasks.items()}
+        return {name: future.result() for name, future in running.items()}
+
+
 def _engineering_reads(max_results: int, page_size: int) -> dict[str, Callable[[], Any]]:
     """The queries the engineering page opens with, as callables to run together."""
     return {
@@ -3751,6 +3777,7 @@ def _render_business() -> None:
     for it. The year of orders costs about a sixth of a second anyway - the
     button was guarding the cheapest read on the dashboard.
     """
+    _prefetch_ads()
     order_book = _render_business_sections()
     st.divider()
     # After the shop's own figures and before the funnel: what the orders cost to
@@ -3931,7 +3958,34 @@ def _render_wines_and_merchants(
             )
 
 
-ADS_TTL_SECONDS = 900
+# Ad figures are a day old the moment they exist: the grain is a day, the last
+# one is yesterday, and Google's transfer writes them once a day. Refreshing
+# every quarter of an hour, which is what the order book needs, bought no
+# freshness at all here and paid a full round of BigQuery jobs for it. Both
+# entries are keyed on the date as well, so they roll over when the transfer
+# does rather than at some arbitrary point mid-morning.
+ADS_TTL_SECONDS = 6 * 3600
+# Names, currencies and the day a transfer's history begins move about once
+# ever, so they are held apart from the spend and for a day at a time; on the
+# spend's cycle they cost two extra BigQuery jobs per account per refresh.
+ADS_ACCOUNTS_TTL_SECONDS = 24 * 3600
+# The widest window the panel offers, which is the only one read. `daily_stats`
+# fetches twice what it is asked for so the previous period can be compared, so
+# the widest option's rows contain every narrower option's, and `window` and
+# `by_campaign` both slice by day in pandas - a click on the radio now redraws
+# from the frame in hand instead of going back to BigQuery for a subset of what
+# it already had.
+ADS_WINDOW_DAYS = max(ads_client.LOOKBACK_WINDOWS)
+
+
+class AdsAccount(NamedTuple):
+    """One ad account in the dataset, and the things about it that never move."""
+
+    customer_id: str
+    name: str
+    currency: str
+    # The earliest day the transfer has loaded for this account.
+    history_start: _dt.date | None
 
 
 class AdsRead(NamedTuple):
@@ -3949,58 +4003,164 @@ class AdsRead(NamedTuple):
     other_currencies: list[str]
 
 
+def _ads_config(project: str, dataset: str) -> ads_client.AdsConfig:
+    """The Ads configuration, checked to be the one the cache key was cut from.
+
+    The cached reads take the project and dataset as arguments and the credential
+    from the environment, because a service account key has no business in a
+    cache key. That leaves one way for the two to disagree - the environment
+    changing between the key being cut and the read running - which is caught
+    here rather than answered with figures from the wrong dataset.
+    """
+    config = ads_client.load_ads_env()
+    if config is None:  # pragma: no cover - the caller checks first
+        raise ads_client.AdsConfigError("Google Ads figures are not configured.")
+    if (config.project, config.dataset) != (project, dataset):
+        raise ads_client.AdsConfigError(
+            "The Google Ads configuration changed while it was being read."
+        )
+    return config
+
+
+@st.cache_resource(show_spinner=False)
+def _ads_bigquery_client(project: str, dataset: str):
+    """The BigQuery client, built once per process rather than once per read.
+
+    Building one loads the credential and opens a session to Google, which is
+    work that has nothing to do with how stale the figures are; the client is
+    thread-safe and outlives every cache entry that uses it.
+    """
+    return ads_client.build_client(_ads_config(project, dataset))
+
+
+@st.cache_data(
+    ttl=ADS_ACCOUNTS_TTL_SECONDS, show_spinner=False, refresh_mode="background"
+)
+def _ads_accounts(project: str, dataset: str, today: _dt.date) -> list[AdsAccount]:
+    """Every ad account in the dataset, with the things about it that hold still.
+
+    ``today`` is a cache key and not an argument: the earliest loaded day is
+    clamped to yesterday, so the entry has to roll over at the day boundary or it
+    would go on reporting the day before that.
+
+    The two reads per account are independent and each is a BigQuery job with a
+    second or so of latency in front of it, so they go out together rather than
+    one after another - as do the accounts.
+    """
+    config = _ads_config(project, dataset)
+    client = _ads_bigquery_client(project, dataset)
+    customers = ads_client.customer_ids(client, config)
+    if not customers:
+        return []
+    read = _parallel(
+        {
+            f"{kind}:{customer_id}": (
+                lambda call=call, customer_id=customer_id: call(
+                    client, config, customer_id
+                )
+            )
+            for customer_id in customers
+            for kind, call in (
+                ("account", ads_client.account),
+                ("loaded", ads_client.loaded_from),
+            )
+        }
+    )
+    return [
+        AdsAccount(
+            customer_id,
+            *read[f"account:{customer_id}"],
+            read[f"loaded:{customer_id}"],
+        )
+        for customer_id in customers
+    ]
+
+
 @st.cache_data(ttl=ADS_TTL_SECONDS, show_spinner=False, refresh_mode="background")
-def _ads_cached(project: str, dataset: str, days: int) -> AdsRead:
+def _ads_cached(project: str, dataset: str, today: _dt.date) -> AdsRead:
     """Campaign stats by day, campaign names, the account's name and currency.
 
     Keyed on the dataset rather than the credential: the credential is read from
     the environment and does not change while the process lives, and a service
-    account key has no business in a cache key.
+    account key has no business in a cache key. ``today`` is a key too, so the
+    entry expires when the transfer loads a new day rather than on a timer alone.
 
     A dataset can hold several ad accounts, and their spend can only be added if
     they bill in the same currency, so the most common currency wins and the rest
     are set aside - the same rule the order book follows for takings.
     """
-    config = ads_client.load_ads_env()
-    if config is None:  # pragma: no cover - the caller checks first
-        raise ads_client.AdsConfigError("Google Ads figures are not configured.")
-    client = ads_client.build_client(config)
-    customers = ads_client.customer_ids(client, config)
+    config = _ads_config(project, dataset)
+    client = _ads_bigquery_client(project, dataset)
+    accounts = _ads_accounts(project, dataset, today)
     empty = pd.DataFrame()
-    if not customers:
+    if not accounts:
         return AdsRead(empty, empty, "", "USD", None, [])
 
-    accounts = [
-        (customer_id,) + ads_client.account(client, config, customer_id)
-        for customer_id in customers
-    ]
-    counted = collections.Counter(currency for _, _, currency in accounts)
+    counted = collections.Counter(account.currency for account in accounts)
     main = counted.most_common(1)[0][0]
-    others = sorted({c for c in counted if c != main})
+    others = sorted({code for code in counted if code != main})
+    billing = [account for account in accounts if account.currency == main]
 
-    stats: list[pd.DataFrame] = []
-    names: list[pd.DataFrame] = []
-    labels: list[str] = []
-    starts: list[_dt.date] = []
-    for customer_id, name, currency in accounts:
-        if currency != main:
-            continue
-        stats.append(ads_client.daily_stats(client, config, customer_id, days))
-        names.append(ads_client.campaign_names(client, config, customer_id))
-        loaded = ads_client.loaded_from(client, config, customer_id)
-        if loaded is not None:
-            starts.append(loaded)
-        labels.append(name or customer_id)
+    tasks: dict[str, Callable[[], Any]] = {}
+    for account in billing:
+        customer_id = account.customer_id
+        tasks[f"stats:{customer_id}"] = (
+            lambda customer_id=customer_id: ads_client.daily_stats(
+                client, config, customer_id, ADS_WINDOW_DAYS
+            )
+        )
+        tasks[f"names:{customer_id}"] = (
+            lambda customer_id=customer_id: ads_client.campaign_names(
+                client, config, customer_id
+            )
+        )
+    read = _parallel(tasks)
+    stats = [read[f"stats:{account.customer_id}"] for account in billing]
+    names = [read[f"names:{account.customer_id}"] for account in billing]
+    starts = [
+        account.history_start
+        for account in billing
+        if account.history_start is not None
+    ]
     return AdsRead(
         stats=pd.concat(stats, ignore_index=True) if stats else empty,
         names=pd.concat(names, ignore_index=True) if names else empty,
-        account=", ".join(labels),
+        account=", ".join(account.name or account.customer_id for account in billing),
         currency=main,
         # The latest of the accounts' first days: the window is only wholly
         # loaded once every account it sums has reached it.
         history_start=max(starts) if starts else None,
         other_currencies=others,
     )
+
+
+def _prefetch_ads() -> None:
+    """Start the BigQuery read while the order book is still being read.
+
+    The ads panel is drawn below the shop's own figures, so it was only asked for
+    once the order book had come back from Postgres - two networks waited on one
+    after the other for no reason but the order they appear on the page. Nothing
+    is returned: the read lands in the cache entry the panel goes on to ask for,
+    so by the time it does it either finds the answer waiting or waits on the
+    query it would have run itself. Failures are left for the panel to report,
+    which is where the reader can see them.
+    """
+    try:
+        config = ads_client.load_ads_env()
+    except ads_client.AdsConfigError:
+        return
+    if config is None:
+        return
+    context = get_script_run_ctx()
+
+    def _read() -> None:
+        add_script_run_ctx(threading.current_thread(), context)
+        try:
+            _ads_cached(config.project, config.dataset, _dt.date.today())
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Ads prefetch failed; the panel will report it: %s", exc)
+
+    threading.Thread(target=_read, name="ads-prefetch", daemon=True).start()
 
 
 def _ads_sales(
@@ -4081,7 +4241,10 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     )
     try:
         with st.spinner("Reading ad spend..."):
-            read = _ads_cached(config.project, config.dataset, days)
+            # Not keyed on the window: the widest one was read, and both options
+            # are cut out of that frame below, so this is only a wait the first
+            # time the page is opened.
+            read = _ads_cached(config.project, config.dataset, _dt.date.today())
     except ads_client.AdsConfigError as exc:
         st.warning(str(exc))
         return
@@ -5727,6 +5890,13 @@ def _clear_page_caches(page_title: str) -> None:
         fetch_merged_prs_cached,
         fetch_merged_pr_count_cached,
         fetch_available_transition_statuses,
+        # The sprint editor's dropdowns are drawn from these. They are held for
+        # longer than the counts because they move rarely, but "rarely" is not
+        # "never": somebody who has just been added to Jira and presses Refresh
+        # to find themselves should find themselves.
+        fetch_project_keys,
+        fetch_all_priorities,
+        fetch_all_users,
     )
     business = (
         _order_book,
@@ -5734,6 +5904,10 @@ def _clear_page_caches(page_title: str) -> None:
         _funnel_cached,
         _breakdown_cached,
         _event_users_cached,
+        # Both ads entries, or Refresh would drop the spend and go straight back
+        # to a day-old list of accounts to read it for.
+        _ads_cached,
+        _ads_accounts,
     )
     for cached in business if page_title == BUSINESS_PAGE_TITLE else engineering:
         cached.clear()

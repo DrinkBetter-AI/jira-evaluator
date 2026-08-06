@@ -68,6 +68,7 @@ profile when they are not all set.
 | `GOOGLE_ADS_CUSTOMER_ID` | no | every account in the dataset | Restrict the ads figures to one account, e.g. `887-686-4797`; by default every account the transfer writes is added up |
 | `GCP_BIGQUERY_READONLY_KEY` | no | — | A BigQuery service-account key as JSON, for reading the Ads dataset from outside GCP; unset on Cloud Run, which authenticates as its own service account |
 | `DASHBOARD_PASSWORD`          | no locally, **yes on Cloud Run** | —                                                | Shared password visitors must enter; remembered per browser for 30 days in a signed cookie; leave it unset locally (a copy in `.env` prompts on every run), unset on Cloud Run (`K_SERVICE` present) refuses to serve at all                                     |
+| `DASHBOARD_COOKIE_KEY` | no, but set it when hosted | derived from `DASHBOARD_PASSWORD` with scrypt | Independent secret signing the access cookie, so the cookie is not a verifier for guesses at the password; rotating it signs every browser out without changing the password anyone types |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
 env mode; otherwise the YAML profile is used:
@@ -128,6 +129,11 @@ If the project is outside an Organization, deploy publicly with the password gat
 instead of the IAM binding:
 
 ```bash
+# A signing key for the "remember this browser" cookie, independent of the
+# password. Rotate this secret to sign every browser out at once.
+python -c 'import secrets; print(secrets.token_urlsafe(32))' | tr -d '\n' | \
+  gcloud secrets create dashboard-cookie-key --data-file=- --project "$PROJECT"
+
 gcloud run deploy jira-dashboard \
   --source . \
   --project "$PROJECT" --region "$REGION" \
@@ -135,7 +141,7 @@ gcloud run deploy jira-dashboard \
   --session-affinity --max-instances 1 \
   --network default --subnet default --vpc-egress private-ranges-only \
   --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>,DASHBOARD_PASSWORD=<shared-password>" \
-  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest,POSTGRES_PASSWORD=orders-db-password:latest"
+  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest,POSTGRES_PASSWORD=orders-db-password:latest,DASHBOARD_COOKIE_KEY=dashboard-cookie-key:latest"
 ```
 
 The order database answers on a private VPC address, so without
@@ -157,6 +163,21 @@ from asking again, none of which survive Streamlit's per-websocket session state
 Two consequences worth knowing: changing `DASHBOARD_PASSWORD` signs everyone out,
 and **Sign out** in the sidebar is the way to end a session early, since closing
 the tab leaves the cookie in place.
+
+Be clear about what that cookie is: a bearer token. Streamlit can only set it
+from JavaScript, so it cannot be `HttpOnly` and any script in the page could read
+it. Three things narrow the blast radius rather than close it — the signature
+covers the browser the cookie was issued to, so it does not replay from a
+different one; `Secure` is set on every https origin (decided by the page's own
+scheme, not by whether the deployment happens to be Cloud Run); and the signing
+key is stretched out of the password with scrypt, so a leaked cookie is not a
+cheap oracle for guessing a short shared password.
+
+**Set `DASHBOARD_COOKIE_KEY` on any real deployment.** It replaces the password
+in that derivation with an independent secret, so the cookie says nothing about
+the password at any price, and rotating it signs every browser out *without*
+making anyone learn a new password — the central revocation a shared password
+otherwise cannot offer. Rotate it if a laptop goes missing.
 
 The command prints the service URL. Streamlit holds per-user state on a websocket,
 hence `--session-affinity` and the single instance: they keep a viewer's reconnects
@@ -475,6 +496,31 @@ went from ~30s to ~12s by removing waiting, not work:
   everybody. *Refresh data* clears the caches for the page being looked at — not
   every cache in the process, which used to throw away the year of orders to
   refresh a ticket count.
+- **Each cache is kept for as long as its source actually moves.** *Ads Spend &
+  Return* is the clearest case: the grain is a day, the newest day is yesterday,
+  and Google's transfer writes it once a day, so re-reading every fifteen minutes
+  bought no freshness and paid a round of BigQuery jobs for it. The spend is held
+  six hours and the account list a day, both keyed on the date so they roll over
+  when the transfer does rather than mid-morning.
+- **The ads panel reads one window, not the one selected.** `daily_stats` already
+  fetches twice the days it is asked for so the previous period can be compared,
+  so the widest option contains every narrower one and the 7/30 radio slices the
+  frame in pandas. Moving it used to be a cold BigQuery read; it is now a redraw.
+- **BigQuery jobs go out together too.** Per ad account the dashboard wants the
+  account's name and currency, the transfer's first loaded day, the campaign names
+  and the daily stats — four independent jobs with about a second of latency each,
+  run in series. `_parallel` is `_gather`'s sibling for a single section: same
+  thread pool and run-context handling, but it raises rather than returning
+  failures, because the section reports its own errors. Against the live dataset
+  a cold read of both windows went from ~8s to ~3s, and switching window from
+  seconds to about a millisecond.
+- **The ads read starts while the order book is still being read.** They are
+  different systems drawn one above the other, so the page waited on the sum of
+  two networks for no reason but layout; the read is now kicked off at the top of
+  the Business page and lands in the cache entry the panel goes on to ask for.
+- **The BigQuery client is built once per process.** Loading the credential and
+  opening a session took ~2.7s and was paid again on every cache miss; it is an
+  `st.cache_resource`, which is what that cache is for.
 
 While the reads are outstanding the page shows a progress bar. It is paced by the
 clock rather than by how many queries have answered: a dozen of the fourteen come
@@ -495,6 +541,7 @@ Everything is read live and cached briefly; nothing is precomputed or exported.
 | Tickets, resolved/created/triage counts, PRs | Jira and GitHub APIs | up to 5 minutes |
 | Sprint statuses, priorities, user directory | Jira API | 10 minutes; the project list, an hour |
 | *Orders, Revenue & AOV*, *Best Sellers & Merchants* | the CRM's own Postgres tables | up to 15 minutes |
+| *Ads Spend & Return* | Google's Ads-to-BigQuery transfer | **a day**, by design |
 | *Product Funnel & Friction* | Amplitude Dashboard API | **a day**, by design |
 
 The order book is the freshest thing here in kind, not just in minutes: it is a
@@ -503,6 +550,10 @@ commits it, and the only delay is the 15-minute cache. The funnel is different �
 its window deliberately ends *yesterday*, because today is still being written and
 a half-finished day reads as a slump. So the funnel is never a report on today,
 whatever the cache does, and Amplitude's own ingestion lag sits on top of that.
+The ads figures end yesterday for the same reason and arrive once a day from
+Google's transfer, so their cache is measured in hours rather than minutes: there
+is no fresher answer to fetch, and *Refresh data* is there for anyone who wants to
+prove it.
 
 Caches refresh in the background, which trades a little more staleness for never
 making a reader wait: once a TTL lapses the next visitor is served the old answer

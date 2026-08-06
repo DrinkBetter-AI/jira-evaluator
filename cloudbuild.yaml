@@ -4,8 +4,9 @@
 # `gcloud run deploy`.
 #
 # IMPORTANT: this pipeline updates an ALREADY-EXISTING service. The dashboard's
-# secrets/env (DASHBOARD_PASSWORD, JIRA_* / DASHBOARD_GITHUB_TOKEN,
-# POSTGRES_PASSWORD) must be set when the service is first created (see README
+# secrets/env (DASHBOARD_PASSWORD, DASHBOARD_COOKIE_KEY, JIRA_* /
+# DASHBOARD_GITHUB_TOKEN, POSTGRES_PASSWORD) must be set when the service is
+# first created (see README
 # "Deploying to Cloud Run") — a `--image` deploy preserves them but does not
 # create them, so a from-scratch service would come up unconfigured and refuse to
 # serve. The scaling flags the app needs for Streamlit's websocket state

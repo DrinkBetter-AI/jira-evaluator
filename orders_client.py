@@ -327,8 +327,19 @@ join {SCHEMA}.order_item oi
   on oi.order_id = p.id
  and oi.version = p.version
  and oi.deleted_at is null
+-- Both tables soft-delete, and a live `order_item` row does not imply a live
+-- line item behind it: an edit that removes a line can leave one. Nothing in
+-- the shop's data hits this today, but it costs nothing and the alternative is
+-- a removed bottle quietly counted as sold.
 join {SCHEMA}.order_line_item oli
   on oli.id = oi.item_id
+ and oli.deleted_at is null
+-- One row per live `order_item`, which is the grain the quantities are held at.
+-- The HTTP path this replaced de-duplicated on (order_id, item_id); nothing
+-- does here, deliberately. `order_item` is unique only on `id`, so the schema
+-- does not forbid a second row for the same item at the same version - but a
+-- `distinct` would answer a data bug by hiding it, and the shop has none:
+-- 0 duplicate (order_id, version, item_id) across 6,509 live rows.
 order by p.created_at
 """
 )

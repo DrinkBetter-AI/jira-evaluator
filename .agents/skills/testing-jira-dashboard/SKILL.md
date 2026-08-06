@@ -42,7 +42,9 @@ can be driven directly — `find(at.toggle, "Allow Jira edits").set_value(True).
 `at.run()` measures cold load and rerun cost directly. Note form submit buttons appear in
 `at.button`, not under a `form_submit_button` type.
 
-Requirements: streamlit must be `>=1.49` (older versions crash on `width="stretch"`).
+Requirements: streamlit must be `>=1.61` — `st.cache_data(refresh_mode="background")` was added
+in 1.61.0 and every cached read passes it, so 1.60 and below raise a `TypeError` at import of
+`app.py`. (`width="stretch"` needs 1.49 and top navigation 1.46, both below that floor.)
 
 ## Make the synthetic data adversarial
 

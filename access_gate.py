@@ -11,10 +11,23 @@ second tab or a Cloud Run cold start used to re-prompt someone who had just
 logged in. The browser instead keeps a signed, expiring cookie that carries no
 secret of its own and is only accepted while it verifies against the current
 ``DASHBOARD_PASSWORD`` — rotating the password logs everyone out.
+
+What this is and is not. The cookie is a bearer token written from JavaScript,
+so it cannot be ``HttpOnly`` and any script running in the page could read it;
+it is signed over the browser it was issued to and sent ``Secure`` on every
+https origin, which limits replay but does not prevent it, and the signing key
+is stretched with scrypt so that holding a cookie is not a cheap oracle for
+guessing the password. Setting ``DASHBOARD_COOKIE_KEY`` removes the password
+from that derivation altogether and gives the one thing a shared password
+cannot otherwise offer — revocation for everybody without changing what anybody
+types. A shared password in front of an app is a doormat, not a lock: anything
+needing real sessions, real revocation or per-person audit wants an identity
+proxy (IAP) in front of the service instead.
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import hmac
 import json
@@ -35,6 +48,22 @@ _SESSION_KEY = "_access_granted"
 # not already have.
 _COOKIE_NAME = "jira_dashboard_access"
 _COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+# An independent signing secret, when a deployment sets one. Worth setting: it
+# takes the password out of the cookie's derivation entirely, and rotating it
+# signs every browser out without making anyone learn a new password.
+_COOKIE_KEY_ENV = "DASHBOARD_COOKIE_KEY"
+# Prefixed to the cookie so a change of scheme invalidates rather than
+# misreads. `1` was `<expiry>.<sha256-keyed signature>`.
+_TOKEN_VERSION = "v2"
+# Fixed rather than random: a salt kept in one process would not verify a cookie
+# on the next instance or after a restart. It is doing the smaller of a salt's
+# two jobs - no shared rainbow table across deployments - while scrypt's cost
+# does the work that matters.
+_KDF_SALT = b"jira-dashboard-access-cookie"
+# ~100ms and 16MB per derivation here, once per process; per guess for anybody
+# working backwards from a cookie.
+_SCRYPT_COST = 2**14
+_SCRYPT_BLOCK_SIZE = 8
 # Writing the cookie is a rendered iframe, so it happens once per session rather
 # than on every rerun; the expiry slides forward each time someone comes back.
 _COOKIE_WRITTEN_KEY = "_access_cookie_written"
@@ -56,20 +85,76 @@ _failed_attempts = 0
 _HOSTED_ENV = "K_SERVICE"
 
 
+@functools.lru_cache(maxsize=4)
+def _signing_key(expected: str) -> bytes:
+    """The HMAC key behind the cookie, which is not one hash of the password.
+
+    The cookie is ``<expiry>.<signature>`` and the expiry is plaintext, so anyone
+    holding a cookie - off a shared laptop, a proxy log, a screenshot of dev
+    tools - has a verifier for guesses at the password. A single SHA-256 makes
+    checking a guess as cheap as one hash, which against a short human-chosen
+    shared secret is no obstacle at all, and the prize is Jira write access
+    rather than one session.
+
+    Two answers, in order of preference. ``DASHBOARD_COOKIE_KEY``, when set, is
+    an independent secret: the cookie is then signed by something the password
+    cannot be guessed from at any price, and rotating it signs everyone out
+    *without* changing the password people type - the central revocation the gate
+    otherwise lacks. Unset, the key is stretched out of the password with scrypt
+    instead, which costs this process about a tenth of a second once and costs an
+    attacker that much per guess.
+
+    Cached because scrypt is deliberately slow and the answer only changes when
+    the password does, which is a restart.
+    """
+    override = os.getenv(_COOKIE_KEY_ENV, "").strip()
+    if override:
+        return hashlib.sha256(override.encode("utf-8")).digest()
+    return hashlib.scrypt(
+        expected.encode("utf-8"),
+        salt=_KDF_SALT,
+        n=_SCRYPT_COST,
+        r=_SCRYPT_BLOCK_SIZE,
+        p=1,
+        dklen=32,
+    )
+
+
 def _signature(expected: str, expiry: int) -> str:
-    """Sign an expiry with a key derived from the password, never the password."""
-    key = hashlib.sha256(expected.encode("utf-8")).digest()
-    return hmac.new(key, str(expiry).encode("utf-8"), hashlib.sha256).hexdigest()
+    """Sign an expiry, and the browser it was issued to, never the password."""
+    message = f"{expiry}|{_browser_fingerprint()}".encode("utf-8")
+    return hmac.new(_signing_key(expected), message, hashlib.sha256).hexdigest()
+
+
+def _browser_fingerprint() -> str:
+    """A stable-enough mark of the browser the cookie was minted for.
+
+    Not identity and not a defence against anyone who can also copy headers - it
+    is one cheap step up from a bearer token that works from anywhere, so a
+    cookie lifted out of one browser does not replay from another. The cost is
+    that a browser which changes its user agent, as an update can, asks for the
+    password once more; that is the right way round for a month-long token.
+    """
+    headers = getattr(st.context, "headers", None) or {}
+    agent = headers.get("User-Agent") or headers.get("user-agent") or ""
+    return hashlib.sha256(agent.encode("utf-8")).hexdigest()[:16]
 
 
 def _mint_token(expected: str) -> str:
     expiry = int(time.time()) + _COOKIE_MAX_AGE_SECONDS
-    return f"{expiry}.{_signature(expected, expiry)}"
+    return f"{_TOKEN_VERSION}.{expiry}.{_signature(expected, expiry)}"
 
 
 def _token_is_valid(token: str, expected: str) -> bool:
     """True only for a well-formed, unexpired token signed by this password."""
-    raw_expiry, _, signature = token.partition(".")
+    version, _, rest = token.partition(".")
+    # Anything minted before the signature covered a browser, or by an older
+    # derivation, is not upgraded in place - it is simply not accepted, and the
+    # holder types the password once. A gate that honoured its own weaker tokens
+    # would have gained nothing by strengthening them.
+    if version != _TOKEN_VERSION:
+        return False
+    raw_expiry, _, signature = rest.partition(".")
     if not signature or not raw_expiry.isdigit():
         return False
     expiry = int(raw_expiry)
@@ -95,14 +180,23 @@ def _cookie_grants_access(expected: str) -> bool:
 
 
 def _write_cookie(value: str, max_age: int) -> None:
-    """Set the cookie from inside the component iframe's parent document."""
-    secure = "; Secure" if os.getenv(_HOSTED_ENV, "").strip() else ""
-    payload = json.dumps(f"{_COOKIE_NAME}={value}; Path=/; Max-Age={max_age}; SameSite=Lax{secure}")
+    """Set the cookie from inside the component iframe's parent document.
+
+    ``Secure`` is decided in the browser by the scheme actually in use, not by
+    ``K_SERVICE``: keying it on Cloud Run meant any other hosted deployment -
+    behind a company proxy, on a VM, anywhere with a certificate but no Google
+    environment variable - sent a month-long token over plain HTTP. The one
+    place this must not fire is ``http://localhost``, and that is precisely what
+    the scheme says.
+    """
+    payload = json.dumps(f"{_COOKIE_NAME}={value}; Path=/; Max-Age={max_age}; SameSite=Lax")
     components.html(
         f"""
         <script>
         try {{
-            (window.parent || window).document.cookie = {payload};
+            const target = (window.parent || window);
+            const secure = target.location.protocol === "https:" ? "; Secure" : "";
+            target.document.cookie = {payload} + secure;
         }} catch (err) {{
             document.cookie = {payload};
         }}
