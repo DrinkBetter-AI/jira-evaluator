@@ -419,10 +419,23 @@ def _segmentation_totals(payload: dict, event: str) -> list[tuple[str, int]]:
         if index >= len(labels) or not isinstance(values, list):
             continue
         label = _series_label(labels[index])
-        if len(series) == 1 and label == event:
+        if len(series) == 1 and _names_the_event(label, event):
             return []
         rows.append((label, sum(_as_ints(values))))
     return rows
+
+
+def _names_the_event(label: str, event: str) -> bool:
+    """Whether a lone series is the event itself rather than a group of it.
+
+    Compared loosely because the label may be the event type or the display name
+    Amplitude shows for it (``Checkout Started`` for ``checkout_started``), and a
+    row called after the event would be a breakdown that breaks nothing down.
+    """
+    def loosely(text: str) -> str:
+        return text.strip().casefold().replace("_", " ")
+
+    return loosely(label) == loosely(event)
 
 
 def _series_label(label) -> str:
