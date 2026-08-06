@@ -141,12 +141,15 @@ def load_medusa_env() -> DbConfig | None:
             break
     if not password:
         return None
-    port_text = os.getenv("MEDUSA_DB_PORT", "").strip()
+    port_text = (
+        os.getenv("MEDUSA_DB_PORT", "").strip()
+        or os.getenv("POSTGRES_PORT", "").strip().strip('"')
+    )
     try:
         port = int(port_text) if port_text else DEFAULT_PORT
     except ValueError as exc:
         raise MedusaConfigError(
-            f"MEDUSA_DB_PORT must be a port number, not {port_text!r}."
+            f"The order database port must be a port number, not {port_text!r}."
         ) from exc
     return DbConfig(
         host=os.getenv("MEDUSA_DB_HOST", "").strip()

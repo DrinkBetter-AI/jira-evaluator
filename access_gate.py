@@ -9,8 +9,11 @@ Once entered, the password is remembered in the browser rather than only in
 ``st.session_state``: session state dies with the websocket, so a refresh, a
 second tab or a Cloud Run cold start used to re-prompt someone who had just
 logged in. The browser instead keeps a signed, expiring cookie that carries no
-secret of its own and is only accepted while it verifies against the current
-``DASHBOARD_PASSWORD`` — rotating the password logs everyone out.
+secret of its own. When ``DASHBOARD_COOKIE_KEY`` is set, the cookie is signed
+with that independent key and rotating the password does NOT invalidate existing
+sessions; only rotating the cookie key does. When ``DASHBOARD_COOKIE_KEY`` is
+unset, the cookie is derived from the password and rotating the password logs
+everyone out.
 
 What this is and is not. The cookie is a bearer token written from JavaScript,
 so it cannot be ``HttpOnly`` and any script running in the page could read it;
@@ -207,10 +210,15 @@ def _write_cookie(value: str, max_age: int) -> None:
 
 
 def _remember_browser(expected: str) -> None:
+    # Only set the flag if the cookie is actually present in the browser.
+    # If we set it before the iframe reaches the browser (e.g., a rerun discards
+    # the render), we suppress every subsequent attempt for the session.
+    if st.context.cookies.get(_COOKIE_NAME):
+        st.session_state[_COOKIE_WRITTEN_KEY] = True
+        return
     if st.session_state.get(_COOKIE_WRITTEN_KEY):
         return
     _write_cookie(_mint_token(expected), _COOKIE_MAX_AGE_SECONDS)
-    st.session_state[_COOKIE_WRITTEN_KEY] = True
 
 
 def sign_out() -> None:
