@@ -614,6 +614,27 @@ def commission_return(revenue: float, cost: float, rate: float) -> float:
     return round(revenue * rate / cost, 2) if cost else 0.0
 
 
+@dataclass(frozen=True)
+class Commission:
+    """The commission a window earned, and whether it was counted or assumed.
+
+    Merchants are on different agreements - 10% for some, 12% for others - so a
+    single rate estimates a figure Stripe already holds exactly: the application
+    fee it took from each sale. When that is readable, the return is money the
+    marketplace actually charged; when it is not, the configured rate stands in
+    and the panel says which of the two it is showing.
+    """
+
+    now: float
+    before: float
+    measured: bool
+
+
+def earned_return(commission: float, cost: float) -> float:
+    """Commission per unit of ad spend, from commission already counted."""
+    return round(commission / cost, 2) if cost else 0.0
+
+
 # How far Google's conversion count may sit from the CRM's order count before it
 # is worth saying out loud. Some gap is normal - different days, different
 # attribution - but a large one means one of the two is not measuring the shop.
@@ -626,6 +647,7 @@ def verdicts(
     sales: Sales | None,
     currency: str = "USD",
     rate: float | None = None,
+    commission: Commission | None = None,
 ) -> list[str]:
     """The tables again, in sentences somebody can act on.
 
@@ -641,14 +663,21 @@ def verdicts(
 
     keep = commission_rate() if rate is None else rate
     unit = _money(1, currency).replace("1.00", "1")
-    if sales is not None and sales.revenue:
+    counted = commission is not None and commission.measured
+    if counted or (sales is not None and sales.revenue):
         # First, because it is the only line here that is income rather than
         # turnover: the revenue belongs to the merchants and this is our share.
-        now = commission_return(sales.revenue, spend.cost, keep)
-        before = commission_return(sales.prev_revenue, spend.prev_cost, keep)
+        if counted:
+            now = earned_return(commission.now, spend.cost)
+            before = earned_return(commission.before, spend.prev_cost)
+            basis = f"{money(commission.now)} of commission actually charged"
+        else:
+            now = commission_return(sales.revenue, spend.cost, keep)
+            before = commission_return(sales.prev_revenue, spend.prev_cost, keep)
+            basis = f"{money(sales.revenue)} of revenue at {keep:.0%}"
         lines.append(
             f"**{money(now)} of commission back for every {unit} of ad "
-            f"spend** - {money(sales.revenue)} of revenue at {keep:.0%} "
+            f"spend** - {basis} "
             f"against {money(spend.cost)} spent. Break even is "
             f"{BREAK_EVEN_RETURN:.2f}, so the ads "
             + (
@@ -781,6 +810,7 @@ __all__ = [
     "AdsConfigError",
     "BREAK_EVEN_RETURN",
     "BREAK_EVEN_ROAS",
+    "Commission",
     "DEFAULT_COMMISSION_RATE",
     "DEFAULT_DATASET",
     "LOOKBACK_WINDOWS",
@@ -795,6 +825,7 @@ __all__ = [
     "commission_return",
     "customer_ids",
     "daily_stats",
+    "earned_return",
     "load_ads_env",
     "paused_spenders",
     "verdicts",

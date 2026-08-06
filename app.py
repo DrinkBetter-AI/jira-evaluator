@@ -3970,6 +3970,32 @@ def _money_delta(change: float, currency: str) -> str:
     return f"{sign}{_money(abs(change), currency)}"
 
 
+def _charged_commission(days: int, currency: str) -> ads_client.Commission | None:
+    """What the marketplace actually charged over this window, per Stripe.
+
+    Commission is the only part of a sale that is income here, and every
+    merchant is on their own rate, so the assumed rate is a guess at a figure
+    the payments ledger already holds exactly. ``None`` when Stripe cannot be
+    read, when the account takes no commission at all, or when it bills in a
+    currency the ads are not billed in - in each case a rate is the honest
+    fallback, and the tile says which it used.
+    """
+    if not cost_client.load_stripe_env():
+        return None
+    try:
+        entries, _truncated, _disputes = _stripe_cached(days)
+        ledger = cost_client.ledger_window(entries, days)
+    except Exception:  # noqa: BLE001 - the ads panel is not the place to report it
+        return None
+    if not ledger.platform or ledger.currency != currency:
+        return None
+    if not ledger.earnings and not ledger.prev_earnings:
+        return None
+    return ads_client.Commission(
+        now=ledger.net, before=ledger.prev_net, measured=True
+    )
+
+
 def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     """What the orders cost to win: spend, cost per order and return.
 
@@ -4081,16 +4107,34 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     except ads_client.AdsConfigError as exc:
         st.caption(str(exc))
         keep = ads_client.DEFAULT_COMMISSION_RATE
-    earned = (
-        ads_client.commission_return(sales.revenue, spend.cost, keep)
-        if sales and comparable
-        else 0.0
-    )
-    before = (
-        ads_client.commission_return(sales.prev_revenue, spend.prev_cost, keep)
-        if sales and comparable
-        else 0.0
-    )
+    # Merchants sit on different agreements, so a single rate is a guess at a
+    # number Stripe already holds: what it actually charged each sale. Read that
+    # when it is readable, and fall back to the rate when it is not.
+    commission = _charged_commission(days, money)
+    if commission is not None:
+        earned = ads_client.earned_return(commission.now, spend.cost)
+        before = ads_client.earned_return(commission.before, spend.prev_cost)
+        basis = (
+            f"Commission Stripe charged in the window, divided by spend. "
+            f"{ads_client.BREAK_EVEN_RETURN:.2f} is where the ads pay for "
+            "themselves."
+        )
+    else:
+        earned = (
+            ads_client.commission_return(sales.revenue, spend.cost, keep)
+            if sales and comparable
+            else 0.0
+        )
+        before = (
+            ads_client.commission_return(sales.prev_revenue, spend.prev_cost, keep)
+            if sales and comparable
+            else 0.0
+        )
+        basis = (
+            f"Revenue in the window at {keep:.0%} commission, divided by spend. "
+            f"{ads_client.BREAK_EVEN_RETURN:.2f} is where the ads pay for "
+            "themselves."
+        )
     _tile(
         tiles[3],
         TAB_BUSINESS,
@@ -4105,11 +4149,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
             if earned and before
             else None
         ),
-        help=(
-            f"Revenue in the window at {keep:.0%} commission, divided by spend. "
-            f"{ads_client.BREAK_EVEN_RETURN:.2f} is where the ads pay for "
-            "themselves."
-        ),
+        help=basis,
     )
     _tile(
         tiles[4],
@@ -4154,6 +4194,15 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
             f"Goal {goal:.2f}. {standing}{trend}",
         )
         st.markdown(headline)
+        st.caption(
+            "Commission here is what Stripe charged across every merchant in "
+            "the window, so the different rates they are on are already in it, "
+            f"rather than {keep:.0%} assumed on captured revenue."
+            if commission is not None
+            else f"Commission is assumed at {keep:.0%} of captured revenue. "
+            "Connect a Stripe key with Application Fees read access and this "
+            "becomes what was actually charged, per merchant agreement."
+        )
 
     if spend.partial:
         st.warning(
@@ -4210,7 +4259,9 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         sales = ads_client.Sales(
             orders=sales.orders, revenue=0.0, currency=sales.currency
         )
-    lines = ads_client.verdicts(spend, campaigns, sales, currency, rate=keep)
+    lines = ads_client.verdicts(
+        spend, campaigns, sales, currency, rate=keep, commission=commission
+    )
     if lines:
         with st.expander("What this means", expanded=True):
             _said(TAB_BUSINESS, ads, lines)
