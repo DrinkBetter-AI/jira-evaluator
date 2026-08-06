@@ -4886,6 +4886,14 @@ def _render_cloud(days: int) -> None:
             hide_index=True,
         )
 
+    if burn.other_currencies:
+        st.caption(
+            "These figures are the "
+            f"{money.upper()} charges only; Google Cloud also billed in "
+            + ", ".join(code.upper() for code in burn.other_currencies)
+            + ", which is never added to them."
+        )
+
     lines = cost_client.verdicts(burn)
     # Both ends of the export are said before the verdicts, since either one
     # changes how every figure above reads.
@@ -4897,8 +4905,6 @@ def _render_cloud(days: int) -> None:
             "today, so this window ends there rather than now. Google writes it "
             "in arrears and backfills over hours after it is switched on.",
         )
-    # It is not retroactive either, so a window starting before it was switched
-    # on is a shorter period wearing a longer label.
     # More than one export in the dataset is more than one billing account, and
     # two accounts' bills are no more addable than two currencies.
     if len(read.tables) > 1:
@@ -4908,6 +4914,8 @@ def _render_cloud(days: int) -> None:
             f"billing account. These figures are `{read.tables[0].rsplit('.', 1)[1]}` "
             "alone.",
         )
+    # It is not retroactive either, so a window starting before it was switched
+    # on is a shorter period wearing a longer label.
     covered = (covered_to - history_start).days + 1
     # Equal is the same case: a window as long as the export's whole history has
     # nothing behind it, and saying the comparison rests on nought days is worse
@@ -6753,6 +6761,12 @@ def _clear_page_caches(page_title: str) -> None:
         # to a day-old list of accounts to read it for.
         _ads_cached,
         _ads_accounts,
+        # Burn holds the three bills, and a quarter of an hour is long enough
+        # that a reader who presses Refresh expects them to move too.
+        _openai_costs_cached,
+        _cloud_costs_cached,
+        _stripe_ledger_cached,
+        _stripe_disputes_cached,
     )
     for cached in business if page_title == BUSINESS_PAGE_TITLE else engineering:
         cached.clear()
