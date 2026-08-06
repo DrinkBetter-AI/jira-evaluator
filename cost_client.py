@@ -294,6 +294,10 @@ def by_project(costs: pd.DataFrame) -> pd.DataFrame:
 # choice rather than a workload: it is context sent again.
 _CACHE_WORDS = ("cached", "cache write", "cache read")
 
+# The providers whose line items are tokens, and so where a cache line means
+# context re-sent rather than a service that happens to be a cache.
+TOKEN_PROVIDERS = ("OpenAI", "Anthropic")
+
 
 def cached_share(costs: pd.DataFrame) -> float:
     """The fraction of the bill that is cache traffic rather than new work."""
@@ -339,7 +343,9 @@ def verdicts(burn: Burn) -> list[str]:
                     f"({share:+.0%}) on the {burn.days} days before**, so this is "
                     "a change in usage rather than the usual bill."
                 )
-    cached = cached_share(burn.lines)
+    # Only of a token bill: a Cloud line called "Cloud Memorystore for
+    # Memcached" is a cache, but it is not context sent again.
+    cached = cached_share(burn.lines) if burn.provider in TOKEN_PROVIDERS else 0.0
     if cached >= 0.25:
         lines.append(
             f"**{cached:.0%} of it is cached context** - "
