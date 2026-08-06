@@ -207,8 +207,16 @@ and filters do not apply to them. Pages rather than tabs because Streamlit runs
 the body of every tab on every rerun whichever one the browser is showing, so a
 reader watching the shop's figures was paying to rebuild twenty engineering
 sections; a page that is not open does not run at all. The Business page is
-listed only when the order database, Google Ads or Amplitude is configured. It
-holds:
+listed only when the order database, Google Ads or Amplitude is configured.
+
+Each page carries a **Download report** button at its top right: the page's
+headline figures and the sentences explaining them, as a self-contained HTML
+page that prints to a PDF (open it and press Cmd/Ctrl-P). It holds what the
+page currently reads, so a scope or window changed in the sidebar is reflected
+in it, and a figure that could not be read is left out rather than printed as
+a dash.
+
+The Business page holds:
 
 - *Orders, Revenue & AOV* for the last 7 and 30 days, each against the window
   before it.
