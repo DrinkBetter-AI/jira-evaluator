@@ -50,6 +50,10 @@ class WindowMetrics:
     # can be read as rising or falling rather than in isolation.
     prev_orders: int
     prev_revenue: float
+    # Paid, cancelled orders excluded, as ``paid_orders`` is: ``prev_orders``
+    # counts everything placed, so it is the counterpart of ``orders`` and not
+    # of ``paid_orders``, and comparing the two would flatter the earlier window.
+    prev_paid_orders: int = 0
 
     @property
     def unpaid_orders(self) -> int:
@@ -161,6 +165,7 @@ def window_metrics(
         aov=round(revenue / earning, 2) if earning else 0.0,
         prev_orders=int(len(previous)),
         prev_revenue=round(float(_kept(_paid(previous)).sum()), 2),
+        prev_paid_orders=int(len(_paid(previous))),
     )
 
 

@@ -3827,7 +3827,7 @@ def _ads_sales(
         orders=metrics.paid_orders,
         revenue=metrics.revenue,
         currency=currency,
-        prev_orders=metrics.prev_orders,
+        prev_orders=metrics.prev_paid_orders,
         prev_revenue=metrics.prev_revenue,
     )
 
@@ -3963,7 +3963,14 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     tiles[3].metric(
         f"Commission per {unit} spent",
         f"{earned:.2f}" if earned else "\u2014",
-        **_delta_arrow(f"{earned - before:+.2f}" if earned and before else None),
+        # A ratio, not money: hundredths are the whole movement here, so a
+        # rise of 0.05 is said in words the arrow helper reads as a change
+        # rather than as the standing still that "+0.0..." means to it.
+        **_delta_arrow(
+            (f"{earned - before:+.2f}" if round(earned - before, 2) else "flat")
+            if earned and before
+            else None
+        ),
         help=(
             f"Revenue in the window at {keep:.0%} commission, divided by spend. "
             f"{ads_client.BREAK_EVEN_RETURN:.2f} is where the ads pay for "
