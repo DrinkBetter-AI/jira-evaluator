@@ -112,10 +112,12 @@ class Spend:
     days_with_data: int
     first_day: _dt.date | None
     last_day: _dt.date | None
-    # The window asked for, and the earliest day the transfer has loaded anything
-    # at all. Between them they tell a window whose history has not arrived from
-    # one whose account simply spent nothing: a quiet day has no row either.
+    # The window asked for, and the earliest day the transfer has loaded at all -
+    # read from the table rather than inferred from these rows, since a paused
+    # account has no rows for days that are perfectly well loaded. Between them
+    # they tell a window whose history has not arrived from one that was quiet.
     window_start: _dt.date | None = None
+    window_end: _dt.date | None = None
     history_start: _dt.date | None = None
 
     @property
@@ -392,8 +394,43 @@ def _run(client, sql: str, **params) -> pd.DataFrame:
     return client.query(sql, job_config=job_config).result().to_dataframe()
 
 
-def window(stats: pd.DataFrame, days: int, now: _dt.date | None = None) -> Spend:
-    """Fold ``daily_stats`` into one window and the window before it."""
+def loaded_from(
+    client, config: AdsConfig, customer_id: str, now: _dt.date | None = None
+) -> _dt.date | None:
+    """The earliest day the transfer has loaded, over the whole table.
+
+    Asked separately, and unbounded by any window, because it is the only honest
+    way to tell "these days have not arrived" from "nothing ran on these days":
+    the stats table has no row for a day with no activity, so the earliest row
+    *within* a window says nothing about whether the window is loaded. Reads one
+    column of a partitioned table, so it is the cheapest query here.
+    """
+    sql = f"""
+        SELECT MIN(segments_date) AS first_day
+        FROM {_table(config, _STATS_TABLE, customer_id)}
+    """
+    rows = list(client.query(sql).result())
+    if not rows or rows[0]["first_day"] is None:
+        return None
+    first = rows[0]["first_day"]
+    day = first.date() if isinstance(first, _dt.datetime) else first
+    # A transfer part-way through a backfill can hold a day beyond the window;
+    # today is never a complete day, so it is not treated as history either.
+    return min(day, (now or _dt.date.today()) - _dt.timedelta(days=1))
+
+
+def window(
+    stats: pd.DataFrame,
+    days: int,
+    now: _dt.date | None = None,
+    history_start: _dt.date | None = None,
+) -> Spend:
+    """Fold ``daily_stats`` into one window and the window before it.
+
+    ``history_start`` comes from :func:`loaded_from`. Without it the window is
+    reported as complete: a missing figure is better than a warning that fires
+    every time an account pauses.
+    """
     end = now or _dt.date.today()
     last = end - _dt.timedelta(days=1)
     first = last - _dt.timedelta(days=days - 1)
@@ -413,7 +450,8 @@ def window(stats: pd.DataFrame, days: int, now: _dt.date | None = None) -> Spend
             first_day=None,
             last_day=None,
             window_start=first,
-            history_start=None,
+            window_end=last,
+            history_start=history_start,
         )
 
     current = stats[(stats["day"] >= first) & (stats["day"] <= last)]
@@ -432,10 +470,8 @@ def window(stats: pd.DataFrame, days: int, now: _dt.date | None = None) -> Spend
         first_day=days_present[0] if days_present else None,
         last_day=days_present[-1] if days_present else None,
         window_start=first,
-        # Across both periods, not just the current one: the query asks for twice
-        # the window, so the earliest row in it is where the transfer's history
-        # begins whenever that is later than the query's own start.
-        history_start=min(stats["day"]),
+        window_end=last,
+        history_start=history_start,
     )
 
 
@@ -533,7 +569,12 @@ BREAK_EVEN_ROAS = 3.0
 ATTRIBUTION_TOLERANCE = 0.25
 
 
-def verdicts(spend: Spend, campaigns: pd.DataFrame, sales: Sales | None) -> list[str]:
+def verdicts(
+    spend: Spend,
+    campaigns: pd.DataFrame,
+    sales: Sales | None,
+    currency: str = "USD",
+) -> list[str]:
     """The tables again, in sentences somebody can act on.
 
     Deliberately not a score. Each line either names money that bought nothing,
@@ -543,18 +584,21 @@ def verdicts(spend: Spend, campaigns: pd.DataFrame, sales: Sales | None) -> list
     if spend.cost <= 0:
         return ["Nothing was spent on Google Ads in this window."]
 
+    def money(amount: float) -> str:
+        return _money(amount, currency)
+
     if sales is not None and sales.orders:
         per_order = spend.cost / sales.orders
         # The basket is only quoted when there is revenue to quote: a caller that
         # cannot compare the two currencies passes the orders without it.
         basket = (
-            f", against an average basket of {_money(sales.revenue / sales.orders)}"
+            f", against an average basket of {money(sales.revenue / sales.orders)}"
             if sales.revenue
             else ""
         )
         lines.append(
-            f"**{_money(spend.cost)} bought {sales.orders:,} orders** - "
-            f"{_money(per_order)} of ad spend per order{basket}."
+            f"**{money(spend.cost)} bought {sales.orders:,} orders** - "
+            f"{money(per_order)} of ad spend per order{basket}."
         )
         if sales.revenue:
             true_roas = sales.revenue / spend.cost
@@ -565,14 +609,14 @@ def verdicts(spend: Spend, campaigns: pd.DataFrame, sales: Sales | None) -> list
             )
             lines.append(
                 f"**{true_roas:.1f}x on money actually captured** - "
-                f"{_money(sales.revenue)} of revenue per {_money(spend.cost)} "
+                f"{money(sales.revenue)} of revenue per {money(spend.cost)} "
                 f"spent, {verdict} {BREAK_EVEN_ROAS:.0f}x. Every order in the "
                 "window counts here, including the ones ads had nothing to do "
                 "with, so read it as a ceiling."
             )
     elif sales is not None:
         lines.append(
-            f"**{_money(spend.cost)} spent and the CRM recorded no orders at "
+            f"**{money(spend.cost)} spent and the CRM recorded no orders at "
             "all in these days**, which is either a very bad window or a break "
             "in the order feed."
         )
@@ -596,7 +640,7 @@ def verdicts(spend: Spend, campaigns: pd.DataFrame, sales: Sales | None) -> list
         more = f" and {len(silent) - 3} more" if len(silent) > 3 else ""
         plural = "campaign" if len(silent) == 1 else "campaigns"
         lines.append(
-            f"**{_money(cost)} went to {len(silent)} {plural} that recorded no "
+            f"**{money(cost)} went to {len(silent)} {plural} that recorded no "
             f"conversion at all**: {names}{more}."
         )
 
@@ -606,7 +650,7 @@ def verdicts(spend: Spend, campaigns: pd.DataFrame, sales: Sales | None) -> list
         if share >= 0.1:
             word = "up" if change > 0 else "down"
             lines.append(
-                f"**Spend is {word} {_money(abs(change))} ({share:.0%}) on the "
+                f"**Spend is {word} {money(abs(change))} ({share:.0%}) on the "
                 f"previous {spend.days} days.**"
             )
 
@@ -621,9 +665,15 @@ def verdicts(spend: Spend, campaigns: pd.DataFrame, sales: Sales | None) -> list
     return lines
 
 
-def _money(amount: float) -> str:
-    """Whole dollars above ten, because cents in a spend figure are noise."""
-    return f"${amount:,.0f}" if abs(amount) >= 10 else f"${amount:,.2f}"
+def _money(amount: float, currency: str = "USD") -> str:
+    """Whole units above ten, because cents in a spend figure are noise.
+
+    In the ad account's own currency, which is not always dollars: the tiles read
+    it off the account and the sentences beneath them must agree.
+    """
+    symbol = {"usd": "$", "eur": "\u20ac", "gbp": "\u00a3"}.get(currency.lower(), "")
+    figure = f"{amount:,.0f}" if abs(amount) >= 10 else f"{amount:,.2f}"
+    return f"{symbol}{figure}" if symbol else f"{figure} {currency.upper()}"
 
 
 def wasted(campaigns: pd.DataFrame) -> pd.DataFrame:
