@@ -3878,16 +3878,24 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         )
         return
 
+    spend = ads_client.window(read.stats, days, history_start=read.history_start)
+
     if read.stats.empty:
-        # No rows in the window means one of two quite different things, and the
-        # transfer's own history is what tells them apart: an account paused for
-        # longer than the window writes no rows either.
+        # No rows in the window means three different things, and only the
+        # transfer's own history tells them apart: nothing has loaded, some of
+        # the window has, or all of it has and the account simply stopped.
         if read.history_start is None:
             st.info(
                 "The Ads dataset is readable but holds no spend yet. Google's "
                 "transfer loads one day per run and backfills only when asked, "
                 "so a new transfer has nothing in it until its first run "
                 "completes."
+            )
+        elif spend.partial:
+            st.warning(
+                f"Only {spend.days_loaded} of these {days} days have been "
+                f"loaded: the transfer's history starts on {spend.history_start}"
+                ", and no spend was recorded in the part that has arrived."
             )
         else:
             st.info(
@@ -3897,7 +3905,6 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
             )
         return
 
-    spend = ads_client.window(read.stats, days, history_start=read.history_start)
     campaigns = ads_client.by_campaign(read.stats, read.names, days)
     sales = _ads_sales(order_book, spend)
     currency = read.currency
