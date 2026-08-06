@@ -1,5 +1,6 @@
 .git
 .agents
+.env
 __pycache__
 *.pyc
 notebooks
