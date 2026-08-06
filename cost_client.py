@@ -83,6 +83,9 @@ class Burn:
     last_day: _dt.date | None
     # Named lines, dearest first: "gpt-5.6-terra, cached input" and the like.
     lines: pd.DataFrame = field(default_factory=pd.DataFrame)
+    # Currencies set aside rather than added to the figure above, which is what
+    # the caller names so the reader knows the total is not the whole bill.
+    other_currencies: tuple[str, ...] = ()
 
     @property
     def cost_change(self) -> float:
@@ -201,7 +204,8 @@ def window(
     today = now or _dt.date.today()
     if costs.empty:
         return Burn(days, provider, 0.0, 0.0, "usd", 0, None, None, pd.DataFrame())
-    frame = costs.copy()
+    frame, money, others = main_currency(costs.copy())
+    frame = frame.copy()
     frame["day"] = pd.to_datetime(frame["day"]).dt.date
     start = today - _dt.timedelta(days=days - 1)
     current = frame[frame["day"] >= start]
@@ -211,22 +215,31 @@ def window(
         provider=provider,
         cost=float(current["cost"].sum()),
         prev_cost=float(previous["cost"].sum()),
-        currency=_one_currency(frame),
+        currency=money,
         days_with_data=int(current["day"].nunique()),
         first_day=min(current["day"]) if not current.empty else None,
         last_day=max(current["day"]) if not current.empty else None,
         lines=by_line(current),
+        other_currencies=others,
     )
 
 
-def _one_currency(frame: pd.DataFrame) -> str:
-    """The commonest currency in the frame; OpenAI bills one org in one.
+def main_currency(frame: pd.DataFrame) -> tuple[pd.DataFrame, str, tuple[str, ...]]:
+    """The rows billed in the commonest currency, that currency, and the rest.
 
-    Taken rather than assumed, so a change of billing currency shows up in the
-    tiles instead of being silently labelled dollars.
+    Euros are never added to dollars, here as in the order book and the ad
+    account: the totals stay in one currency and the caller names what was left
+    out. Both providers bill one account in one currency today, so this is a
+    guard rather than a feature.
     """
+    if frame.empty or "currency" not in frame.columns:
+        return frame, "usd", ()
     counted = frame["currency"].value_counts()
-    return str(counted.index[0]) if len(counted) else "usd"
+    main = str(counted.index[0])
+    others = tuple(sorted(str(code) for code in counted.index[1:]))
+    if not others:
+        return frame, main, ()
+    return frame[frame["currency"].eq(main)], main, others
 
 
 def by_line(costs: pd.DataFrame) -> pd.DataFrame:
@@ -283,22 +296,23 @@ def verdicts(burn: Burn) -> list[str]:
     """The bill in sentences: what it runs to a month, and what it is made of."""
     if burn.cost <= 0:
         return [f"No {burn.provider} charges in the last {burn.days} days."]
+    money = burn.currency
     lines = [
-        f"**{_money(burn.cost)} on {burn.provider} in {burn.days} days** - "
-        f"{_money(burn.monthly)} a month at this rate."
+        f"**{_money(burn.cost, money)} on {burn.provider} in {burn.days} days** - "
+        f"{_money(burn.monthly, money)} a month at this rate."
     ]
     if burn.prev_cost < burn.cost * _NEW_SPEND_SHARE:
         lines.append(
             f"**This spend is new** - the {burn.days} days before came to "
-            f"{_money(burn.prev_cost)}, so there is no earlier period to read "
-            "it against yet."
+            f"{_money(burn.prev_cost, money)}, so there is no earlier period to "
+            "read it against yet."
         )
     else:
         share = burn.cost_change / burn.prev_cost
         if abs(share) >= 0.1:
             word = "up" if share > 0 else "down"
             lines.append(
-                f"**Spend is {word} {_money(abs(burn.cost_change))} "
+                f"**Spend is {word} {_money(abs(burn.cost_change), money)} "
                 f"({share:+.0%}) on the {burn.days} days before**, so this is a "
                 "change in usage rather than the usual bill."
             )
@@ -306,22 +320,28 @@ def verdicts(burn: Burn) -> list[str]:
     if cached >= 0.25:
         lines.append(
             f"**{cached:.0%} of it is cached context** - "
-            f"{_money(burn.cost * cached)} spent re-sending prompts rather than "
-            "on new work, which is usually the cheapest thing to cut."
+            f"{_money(burn.cost * cached, money)} spent re-sending prompts rather "
+            "than on new work, which is usually the cheapest thing to cut."
         )
     if not burn.lines.empty:
         top = burn.lines.iloc[0]
         if float(top["share"]) >= 0.3:
             lines.append(
                 f"**{top['line_item']} is {float(top['share']):.0%} of the "
-                f"bill** at {_money(float(top['cost']))}."
+                f"bill** at {_money(float(top['cost']), money)}."
             )
     return lines
 
 
-def _money(amount: float) -> str:
-    """Whole dollars above ten; cents in a monthly bill are noise."""
-    return f"${amount:,.0f}" if abs(amount) >= 10 else f"${amount:,.2f}"
+def _money(amount: float, currency: str = "usd") -> str:
+    """Whole units above ten; cents in a monthly bill are noise.
+
+    In the provider's own billing currency, because the tiles read it off the
+    account and the sentences beneath them have to agree.
+    """
+    symbol = {"usd": "$", "eur": "\u20ac", "gbp": "\u00a3"}.get(currency.lower(), "")
+    figure = f"{amount:,.0f}" if abs(amount) >= 10 else f"{amount:,.2f}"
+    return f"{symbol}{figure}" if symbol else f"{figure} {currency.upper()}"
 
 
 # A live secret key can write; the panel only ever reads, and a key that can do
@@ -388,6 +408,7 @@ class Ledger:
     prev_fees: float
     first_day: _dt.date | None
     last_day: _dt.date | None
+    other_currencies: tuple[str, ...] = ()
 
     @property
     def net(self) -> float:
@@ -538,7 +559,8 @@ def ledger_window(
         return Ledger(
             days, 0.0, 0.0, 0.0, 0.0, disputes, "usd", 0.0, 0.0, 0.0, None, None
         )
-    frame = entries.copy()
+    frame, money, others = main_currency(entries.copy())
+    frame = frame.copy()
     frame["day"] = pd.to_datetime(frame["day"]).dt.date
     start = today - _dt.timedelta(days=days - 1)
     current = frame[frame["day"] >= start]
@@ -561,12 +583,13 @@ def ledger_window(
         fees=float(current["fee"].sum()),
         paid_out=float(current.loc[current["type"] == _PAYOUT, "amount"].sum()),
         disputes=disputes,
-        currency=_one_currency(current if not current.empty else frame),
+        currency=money,
         prev_earnings=takings(previous),
         prev_refunds=refunded(previous),
         prev_fees=float(previous["fee"].sum()),
         first_day=min(current["day"]) if not current.empty else None,
         last_day=max(current["day"]) if not current.empty else None,
+        other_currencies=others,
     )
 
 
@@ -576,10 +599,15 @@ def stripe_verdicts(ledger: Ledger) -> list[str]:
         return [
             f"Stripe recorded no platform earnings in the last {ledger.days} days."
         ]
+    money = ledger.currency
     lines = [
-        f"**{_money(ledger.net)} of commission kept in {ledger.days} days** "
-        f"({_money(ledger.earnings)} earned"
-        + (f", {_money(abs(ledger.refunds))} refunded" if ledger.refunds else "")
+        f"**{_money(ledger.net, money)} of commission kept in {ledger.days} days** "
+        f"({_money(ledger.earnings, money)} earned"
+        + (
+            f", {_money(abs(ledger.refunds), money)} refunded"
+            if ledger.refunds
+            else ""
+        )
         + ")."
     ]
     if ledger.prev_net:
@@ -587,7 +615,7 @@ def stripe_verdicts(ledger: Ledger) -> list[str]:
         if abs(share) >= 0.1:
             word = "up" if share > 0 else "down"
             lines.append(
-                f"**Commission is {word} {_money(abs(ledger.net_change))} "
+                f"**Commission is {word} {_money(abs(ledger.net_change), money)} "
                 f"({share:+.0%}) on the {ledger.days} days before.**"
             )
     if not ledger.fees:
@@ -615,6 +643,7 @@ __all__ = [
     "cached_share",
     "ledger_window",
     "load_openai_env",
+    "main_currency",
     "load_stripe_env",
     "openai_costs",
     "stripe_ledger",

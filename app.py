@@ -4144,8 +4144,11 @@ def _render_ai_costs(days: int) -> None:
             hide_index=True,
         )
 
+    # Only the window's own rows: the fetch covers twice the window, and a
+    # breakdown of the earlier period beneath tiles reading zero would be read
+    # as this window's spend.
     projects = cost_client.by_project(
-        costs[costs["day"] >= burn.first_day] if burn.first_day else costs
+        costs[costs["day"] >= burn.first_day] if burn.first_day else costs.iloc[0:0]
     )
     if len(projects) > 1:
         st.caption(
@@ -4154,6 +4157,14 @@ def _render_ai_costs(days: int) -> None:
                 f"{row['project'] or 'unnamed'} {_money(float(row['cost']), money)}"
                 for _, row in projects.iterrows()
             )
+        )
+
+    if burn.other_currencies:
+        st.caption(
+            "These figures are the "
+            f"{money.upper()} charges only; OpenAI also billed in "
+            + ", ".join(code.upper() for code in burn.other_currencies)
+            + ", which is never added to them."
         )
 
     lines = cost_client.verdicts(burn)
@@ -4222,6 +4233,14 @@ def _render_stripe(days: int) -> None:
     # the question "what do the card fees cost us" deserves an answer.
     tiles[2].metric("Stripe's own fees", _money(abs(ledger.fees), money))
     tiles[3].metric("Paid out to the bank", _money(abs(ledger.paid_out), money))
+
+    if ledger.other_currencies:
+        st.caption(
+            f"These figures are the {money.upper()} ledger only; Stripe also "
+            "settled in "
+            + ", ".join(code.upper() for code in ledger.other_currencies)
+            + ", which is never added to them."
+        )
 
     if truncated:
         st.warning(
