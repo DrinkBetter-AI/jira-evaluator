@@ -59,6 +59,7 @@ from hygiene import (
     policy_compliance_by_owner,
     stale_candidates,
 )
+import ads_client
 import amplitude_client
 import orders
 import orders_client
@@ -3483,11 +3484,20 @@ def _business_readable() -> bool:
     so plainly rather than offered a button that goes on to admit it cannot read
     anything.
     """
-    for load in (orders_client.load_medusa_env, amplitude_client.load_amplitude_env):
+    loaders = (
+        orders_client.load_medusa_env,
+        amplitude_client.load_amplitude_env,
+        ads_client.load_ads_env,
+    )
+    for load in loaders:
         try:
             if load() is not None:
                 return True
-        except (orders_client.MedusaConfigError, amplitude_client.AmplitudeConfigError):
+        except (
+            orders_client.MedusaConfigError,
+            amplitude_client.AmplitudeConfigError,
+            ads_client.AdsConfigError,
+        ):
             # Configured but wrongly - which is still worth rendering, because
             # the section is where the error message belongs.
             return True
@@ -3514,25 +3524,30 @@ def _render_business() -> None:
             st.session_state[BUSINESS_OPENED_KEY] = True
             st.rerun()
         return
-    _render_business_sections()
+    order_book = _render_business_sections()
+    st.divider()
+    # After the shop's own figures and before the funnel: what the orders cost to
+    # win only means anything beside the orders themselves.
+    _render_ads(order_book)
     st.divider()
     _render_product_funnel()
 
 
-def _render_business_sections() -> None:
+def _render_business_sections() -> orders_client.OrderBook | None:
+    """The order book's own sections, and the book itself for other panels."""
     try:
         config = orders_client.load_medusa_env()
     except orders_client.MedusaConfigError as exc:
         st.subheader("Orders, Revenue & AOV")
         st.caption(f"Order figures are misconfigured: {exc}")
-        return
+        return None
     if config is None:
         st.subheader("Orders, Revenue & AOV")
         st.caption(
             "Order figures need a Medusa admin key. Create a secret key in the CRM "
             "(Settings -> Secret API Keys) and set MEDUSA_ADMIN_API_KEY."
         )
-        return
+        return None
 
     api_key, base_url = config
     try:
@@ -3541,11 +3556,12 @@ def _render_business_sections() -> None:
     except Exception as exc:  # noqa: BLE001
         st.subheader("Orders, Revenue & AOV")
         st.warning(f"Could not read orders from the CRM: {str(exc)[:200]}")
-        return
+        return None
 
     _render_orders(order_book, base_url)
     st.divider()
     _render_wines_and_merchants(order_book, api_key, base_url)
+    return order_book
 
 
 def _render_orders(order_book: orders_client.OrderBook, base_url: str) -> None:
@@ -3695,6 +3711,209 @@ def _render_wines_and_merchants(
                 f"{', '.join(code.upper() for code in other_currencies)} is left "
                 "out rather than added to a total in another currency."
             )
+
+
+ADS_TTL_SECONDS = 900
+
+
+@st.cache_data(ttl=ADS_TTL_SECONDS, show_spinner=False)
+def _ads_cached(
+    project: str, dataset: str, days: int
+) -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
+    """Campaign stats by day, campaign names, the account's name and currency.
+
+    Keyed on the dataset rather than the credential: the credential is read from
+    the environment and does not change while the process lives, and a service
+    account key has no business in a cache key.
+    """
+    config = ads_client.load_ads_env()
+    if config is None:  # pragma: no cover - the caller checks first
+        raise ads_client.AdsConfigError("Google Ads figures are not configured.")
+    client = ads_client.build_client(config)
+    customers = ads_client.customer_ids(client, config)
+    if not customers:
+        empty = pd.DataFrame()
+        return empty, empty, "", "USD"
+
+    stats: list[pd.DataFrame] = []
+    names: list[pd.DataFrame] = []
+    labels: list[str] = []
+    currency = "USD"
+    for customer_id in customers:
+        stats.append(ads_client.daily_stats(client, config, customer_id, days))
+        names.append(ads_client.campaign_names(client, config, customer_id))
+        name, currency = ads_client.account(client, config, customer_id)
+        labels.append(name or customer_id)
+    return (
+        pd.concat(stats, ignore_index=True),
+        pd.concat(names, ignore_index=True),
+        ", ".join(labels),
+        currency,
+    )
+
+
+def _ads_sales(
+    order_book: orders_client.OrderBook | None, spend: ads_client.Spend
+) -> ads_client.Sales | None:
+    """The CRM's orders over exactly the days the spend covers, or ``None``.
+
+    The same days matter more than they look. Ads figures end yesterday and are
+    counted in the account's own timezone, so comparing them against a CRM window
+    ending now would divide a full month of spend by a month plus today's orders.
+    """
+    if order_book is None or spend.last_day is None or spend.first_day is None:
+        return None
+    span = (spend.last_day - spend.first_day).days + 1
+    end = _dt.datetime.combine(
+        spend.last_day + _dt.timedelta(days=1),
+        _dt.time.min,
+        tzinfo=_dt.timezone.utc,
+    )
+    metrics = orders.window_metrics(order_book.orders, span, now=end)
+    return ads_client.Sales(orders=metrics.paid_orders, revenue=metrics.revenue)
+
+
+def _money_delta(change: float, currency: str) -> str:
+    """``+$412.90``, signed where Streamlit looks for the sign.
+
+    ``st.metric`` colours a delta by whether the string starts with a minus, and
+    a currency symbol in front of it would draw every fall in spend as a rise.
+    """
+    if not round(change, 2):
+        return "flat"
+    sign = "+" if change > 0 else "-"
+    return f"{sign}{_money(abs(change), currency)}"
+
+
+def _render_ads(order_book: orders_client.OrderBook | None) -> None:
+    """What the orders cost to win: spend, cost per order and return.
+
+    The order book says what the shop earned and the funnel says how people got
+    there; neither says what was paid to bring them. This is the number a
+    leadership meeting asks for first and the dashboard could not answer.
+    """
+    st.subheader("Ads Spend & Return")
+    try:
+        config = ads_client.load_ads_env()
+    except ads_client.AdsConfigError as exc:
+        st.caption(f"Google Ads figures are misconfigured: {exc}")
+        return
+    if config is None:
+        st.caption(
+            "Ad figures come from Google's own Ads-to-BigQuery transfer, which "
+            "needs no Ads API token. Point the dashboard at the dataset with "
+            "GOOGLE_ADS_BQ_PROJECT and GOOGLE_ADS_BQ_DATASET."
+        )
+        return
+
+    days = st.radio(
+        "Window",
+        options=list(ads_client.LOOKBACK_WINDOWS),
+        format_func=lambda value: f"{value} days",
+        index=len(ads_client.LOOKBACK_WINDOWS) - 1,
+        horizontal=True,
+        key="ads_window_days",
+    )
+    try:
+        with st.spinner("Reading ad spend..."):
+            stats, names, account, currency = _ads_cached(
+                config.project, config.dataset, days
+            )
+    except ads_client.AdsConfigError as exc:
+        st.warning(str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001
+        st.warning(
+            f"Could not read `{config.project}.{config.dataset}`: {str(exc)[:200]}"
+        )
+        return
+
+    if stats.empty:
+        st.info(
+            "The Ads dataset is readable but holds no spend yet. Google's "
+            "transfer loads one day per run and backfills only when asked, so a "
+            "new transfer has nothing in it until its first run completes."
+        )
+        return
+
+    spend = ads_client.window(stats, days)
+    campaigns = ads_client.by_campaign(stats, names, days)
+    sales = _ads_sales(order_book, spend)
+    money = currency.lower()
+
+    tiles = st.columns(5)
+    tiles[0].metric(
+        f"Spend ({days}d)",
+        _money(spend.cost, money),
+        **_delta_arrow(
+            _money_delta(spend.cost_change, money) if spend.prev_cost else None
+        ),
+    )
+    tiles[1].metric(
+        "Orders (CRM)",
+        f"{sales.orders:,}" if sales else "\u2014",
+    )
+    tiles[2].metric(
+        "Ad spend per order",
+        _money(spend.cost / sales.orders, money) if sales and sales.orders else "\u2014",
+    )
+    tiles[3].metric(
+        "Revenue per $1 spent",
+        f"{sales.revenue / spend.cost:.1f}x" if sales and spend.cost else "\u2014",
+    )
+    tiles[4].metric("Google's own conversions", f"{spend.conversions:,.0f}")
+
+    if spend.partial:
+        st.warning(
+            f"Only {spend.days_with_data} of these {days} days have arrived "
+            f"({spend.first_day} to {spend.last_day}), so the spend figure is "
+            "that much of the window rather than all of it."
+        )
+
+    st.dataframe(
+        campaigns.assign(
+            cost=campaigns["cost"].map(lambda value: _money(value, money)),
+            conversion_value=campaigns["conversion_value"].map(
+                lambda value: _money(value, money)
+            ),
+            cost_per_conversion=campaigns["cost_per_conversion"].map(
+                lambda value: _money(value, money) if value else "\u2014"
+            ),
+            roas=campaigns["roas"].map(lambda value: f"{value:.1f}x" if value else "\u2014"),
+            budget=campaigns["budget"].map(lambda value: _money(value, money)),
+            conversions=campaigns["conversions"].map(lambda value: f"{value:,.1f}"),
+        ).rename(
+            columns={
+                "campaign": "Campaign",
+                "status": "Status",
+                "channel": "Type",
+                "cost": "Spend",
+                "clicks": "Clicks",
+                "conversions": "Conversions",
+                "conversion_value": "Value",
+                "cost_per_conversion": "Cost per conversion",
+                "roas": "Value per $1",
+                "budget": "Daily budget",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+    lines = ads_client.verdicts(spend, campaigns, sales)
+    if lines:
+        with st.expander("What this means", expanded=True):
+            st.markdown("\n".join(f"- {line}" for line in lines))
+
+    st.caption(
+        f"{account or 'Google Ads'}, read from Google's daily transfer into "
+        f"`{config.dataset}` rather than the Ads API, which needs a manager "
+        "account. Spend ends yesterday and is counted in the ad account's own "
+        "timezone. 'Conversions' is Google's own count against the day of the "
+        "click and is not the same thing as an order: the CRM's orders are the "
+        "figure to quote, and every order in the window counts towards them, "
+        "including the ones no ad won."
+    )
 
 
 # How far back the funnel looks. A week is what a sprint changes; a month is
