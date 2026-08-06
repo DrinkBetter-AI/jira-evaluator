@@ -406,13 +406,29 @@ def _segmentation_totals(payload: dict, event: str) -> list[tuple[str, int]]:
     property - comes back as the ungrouped shape: one series labelled with the
     event itself. That is dropped, because a table whose only row is
     ``app_error_occurred`` claims to be a breakdown and is not one.
+
+    A shape with no series in it at all raises rather than returning nothing: an
+    empty table reads as "this never happened", which is a claim, and it should
+    not be made on the strength of a response nobody recognised.
     """
     data = payload.get("data")
+    # The funnels endpoint wraps its one block in a list, so tolerate the same
+    # here rather than reporting a working project as silent.
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        data = data[0]
     if not isinstance(data, dict):
-        return []
+        raise AmplitudeConfigError(
+            "Amplitude returned a breakdown this dashboard does not recognise, "
+            "so it has no numbers to show rather than none to report."
+        )
     series = data.get("series")
     labels = data.get("seriesLabels")
     if not isinstance(series, list) or not isinstance(labels, list):
+        raise AmplitudeConfigError(
+            "Amplitude's breakdown carried no series and no labels, so there is "
+            "nothing here to read - which is not the same as nothing happening."
+        )
+    if not series:
         return []
     rows: list[tuple[str, int]] = []
     for index, values in enumerate(series):

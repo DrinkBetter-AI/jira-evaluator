@@ -3865,8 +3865,14 @@ def _render_product_funnel() -> None:
         ],
     )
     # The first step has nothing before it, and printing 0% there reads as a step
-    # that loses everybody rather than as the top of the funnel.
-    table.loc[table.index[0], ["from_previous", "lost", "trend"]] = "\u2014"
+    # that loses everybody rather than as the top of the funnel. The same goes for
+    # any step whose predecessor nobody reached: a rate over nobody is unknown.
+    unreached = [table.index[0]] + [
+        table.index[index]
+        for index in range(1, len(steps))
+        if not int(steps.iloc[index - 1]["users"])
+    ]
+    table.loc[unreached, ["from_previous", "lost", "trend"]] = "\u2014"
     st.dataframe(
         table.rename(
             columns={
@@ -3983,9 +3989,17 @@ def _render_funnel_verdicts(
     lines: list[str] = []
     for index in range(1, len(steps)):
         row = steps.iloc[index]
+        before = steps.iloc[index - 1]["step"]
+        if not int(steps.iloc[index - 1]["users"]):
+            # Nobody got this far, so there is no rate: a step's 0% here would
+            # read as one that loses everybody rather than one nobody saw.
+            lines.append(
+                f"**{before} \u2192 {row['step']}** \u2014 nobody reached "
+                f"{before} in this window, so there is nothing to convert."
+            )
+            continue
         rate = float(row["from_previous"])
         kept = round(rate * 100)
-        before = steps.iloc[index - 1]["step"]
         sentence = (
             f"**{before} \u2192 {row['step']}** \u2014 {_percent(rate)}: "
             f"{kept} of every 100 people who got as far as {before} went on; "
