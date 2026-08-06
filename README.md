@@ -50,7 +50,7 @@ profile when they are not all set.
 | `AMPLITUDE_API_KEY` | no | — | Amplitude project API key (Settings → Projects → your project); needed with the secret key for *Product Funnel & Friction* |
 | `AMPLITUDE_SECRET_KEY` | no | — | The same project's secret key; Amplitude's Dashboard API authenticates on the pair, and the API key alone is refused |
 | `AMPLITUDE_API_URL` | no | `https://amplitude.com` | Set to `https://analytics.eu.amplitude.com` for an EU-region project, whose keys the US host refuses |
-| `AMPLITUDE_FUNNEL` | no | visit → product page → cart → checkout → payment → order | The funnel's steps as `Label=event_name` pairs, in order, e.g. `Visited=_active,Bought=checkout_order_completed` |
+| `AMPLITUDE_FUNNEL` | no | product page → cart → checkout → payment → order | The funnel's steps as `Label=event_name` pairs, in order, e.g. `Visited=_active,Bought=checkout_order_completed` |
 | `DASHBOARD_PASSWORD` | no locally, **yes on Cloud Run** | — | Shared password visitors must enter; unset locally means no gate, unset on Cloud Run (`K_SERVICE` present) refuses to serve at all |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
@@ -239,12 +239,19 @@ engineering numbers would still wait for the shop's.
    so an order awaiting payment counts there while revenue still waits for
    capture; ice packs are add-ons and are kept out of the wine ranking.
 12. **Product Funnel & Friction** (*Business* tab) — how far visitors get towards
-   being one of those orders, read from Amplitude. The default funnel starts at any
-   activity and runs product page → cart → checkout → payment → order, deliberately
-   *not* home page → search → product: on this shop the overwhelming majority of
-   visitors arrive on a product page from a search engine and never see the home
-   page, so a funnel starting there would describe a few hundred people out of tens
-   of thousands. Counted in people rather than visits, steps must happen in that
+   being one of those orders, read from Amplitude. The default funnel runs product
+   page → cart → checkout → payment → order, deliberately *not* home page → search
+   → product: on this shop the overwhelming majority of visitors arrive on a product
+   page from a search engine and never see the home page, so a funnel starting there
+   would describe a few hundred people out of tens of thousands. *Used the site* —
+   everybody who did anything at all — is a tile beside the funnel rather than its
+   first step, for the same reason from the other direction: Amplitude counts a step
+   only when it happened *after* the one before, and for somebody who lands straight
+   on a product page that view is the first thing they ever did, so "did anything"
+   then "viewed a product" cannot both be satisfied. Read against production, using
+   it as step one reported 9,656 product-page viewers where 30,530 people saw one,
+   and dragged every rate below it down in proportion. Counted in people rather than
+   visits, steps must happen in that
    order within 7 days of each other (wine is read about and bought later, so a
    one-day window would report the shop as worse than it is), and the window ends
    *yesterday*, because today is still being recorded and always reads as a slump.
@@ -267,8 +274,9 @@ engineering numbers would still wait for the shop's.
    That breakdown alone is counted in *times* rather than people — the one figure
    here that can honestly be added up across days — and message values are collapsed
    into families first (`Loading chunk 36187 failed` and the same line with another
-   build hash are one problem), or a single broken deploy fills the table with
-   near-identical rows and pushes the real second-biggest problem off the bottom.
+   build hash are one problem, as is the same line whose `(error: …)` aside was
+   truncated before its closing bracket), or a single broken deploy fills the table
+   with near-identical rows and pushes the real second-biggest problem off the bottom.
    **Voss AI** is reach rather than engagement: how many people opened it, asked it
    something, and got nothing back. Needs `AMPLITUDE_API_KEY` and
    `AMPLITUDE_SECRET_KEY`; read-only, every call is a `GET /api/2/funnels` bar the

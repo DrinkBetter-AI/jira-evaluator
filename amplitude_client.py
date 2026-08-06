@@ -52,11 +52,19 @@ class Step:
     event: str
 
 
-# Deliberately not home -> search -> product: on this shop 28k of 39k monthly
+# How many people used the shop at all. Reported beside the funnel rather than as
+# its first step: in an ordered funnel every later step must happen *after* the
+# one before it, and for somebody who arrives straight on a product page the
+# first thing they ever did is that product view, so the pair "did anything" then
+# "viewed a product" cannot both be satisfied. Measured against production, using
+# it as step one reported 9,656 product-page viewers where 30,530 people saw one:
+# a third of the truth, and every rate below it in proportion.
+ACTIVE_STEP = Step("Used the site", _ANY_EVENT)
+
+# Deliberately not home -> search -> product: on this shop 30k of 38k monthly
 # visitors land straight on a product page from search engines and never see the
 # home page, so a funnel starting there would describe a few hundred people.
 DEFAULT_FUNNEL = (
-    Step("Visited", _ANY_EVENT),
     Step("Product page", "pdp_viewed"),
     Step("Added to cart", "cart_product_added"),
     Step("Started checkout", "checkout_started"),
@@ -482,6 +490,12 @@ _VARIABLE_PART = re.compile(r"\b(?:[0-9a-f]{8,}|\d+)", re.IGNORECASE)
 _BRACKETED_URL = re.compile(r"[([{][^()\[\]{}]*https?://[^()\[\]{}]*[)\]}]")
 _URL = re.compile(r"https?://\S+")
 
+# The same aside with nothing to close it, because the address held a bracket of
+# its own or the message was truncated where it was logged. Production had 62 of
+# these reading "Loading chunk # failed. (error" as a family separate from the
+# 1,494 identical ones that happened to close their bracket.
+_DANGLING_ASIDE = re.compile(r"[([{][^()\[\]{}]*$")
+
 
 def collapse_value(value: str) -> str:
     """One error, however many builds it happened on.
@@ -497,6 +511,7 @@ def collapse_value(value: str) -> str:
     text = text.replace("\n", " ")
     text = _BRACKETED_URL.sub("", text)
     text = _URL.sub("", text)
+    text = _DANGLING_ASIDE.sub("", text)
     text = _VARIABLE_PART.sub("#", text)
     text = " ".join(text.split()).strip(" .:-()")
     return text or "(not set)"
@@ -506,6 +521,7 @@ __all__ = [
     "AI_EVENTS",
     "AmplitudeConfigError",
     "BREAKDOWN_ROWS",
+    "ACTIVE_STEP",
     "DEFAULT_CONVERSION_DAYS",
     "DEFAULT_FUNNEL",
     "ERROR_BREAKDOWNS",
