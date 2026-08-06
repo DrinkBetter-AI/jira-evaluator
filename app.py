@@ -4144,11 +4144,12 @@ def _render_ai_costs(days: int) -> None:
             hide_index=True,
         )
 
-    # Only the window's own rows: the fetch covers twice the window, and a
-    # breakdown of the earlier period beneath tiles reading zero would be read
-    # as this window's spend.
+    # The window's own rows in the window's own currency, as the totals above:
+    # the fetch covers twice the window, and neither the earlier period nor a
+    # charge billed in euros belongs under a figure labelled with this one.
+    billed, _, _ = cost_client.main_currency(costs)
     projects = cost_client.by_project(
-        costs[costs["day"] >= burn.first_day] if burn.first_day else costs.iloc[0:0]
+        billed[billed["day"] >= burn.first_day] if burn.first_day else billed.iloc[0:0]
     )
     if len(projects) > 1:
         st.caption(
@@ -4219,8 +4220,11 @@ def _render_stripe(days: int) -> None:
 
     money = ledger.currency
     tiles = st.columns(4)
+    # Commission on a platform; on an ordinary account the same tile is its own
+    # takings less what Stripe charged to process them, which is not commission.
+    kept = "Commission" if ledger.platform else "Payments"
     tiles[0].metric(
-        f"Commission kept ({days}d)",
+        f"{kept} kept ({days}d)",
         _money(ledger.net, money),
         # Compared with the same quantity the tile shows - commission after
         # refunds - so a heavily refunded period cannot read as a rise.

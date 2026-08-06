@@ -385,6 +385,11 @@ _PLATFORM_EARNING = "application_fee"
 _PLATFORM_REFUND = "application_fee_refund"
 _PAYOUT = "payout"
 
+# How an ordinary (non-platform) account takes money instead: the sale itself,
+# with Stripe's processing fee charged on the same entry.
+_CHARGE = "charge"
+_REFUND = "refund"
+
 
 @dataclass(frozen=True)
 class Ledger:
@@ -409,6 +414,10 @@ class Ledger:
     first_day: _dt.date | None
     last_day: _dt.date | None
     other_currencies: tuple[str, ...] = ()
+    # Whether the takings above are commission from connected merchants or the
+    # account's own sales. The two are not the same money, and only one of them
+    # has Stripe's processing fee charged against it here.
+    platform: bool = True
 
     @property
     def net(self) -> float:
@@ -568,11 +577,19 @@ def ledger_window(
         (frame["day"] < start) & (frame["day"] >= start - _dt.timedelta(days=days))
     ]
 
+    # An account with no application fees at all is not a platform: its income is
+    # the charge itself, and Stripe's processing fee is charged against it here.
+    # Counting only application fees on such an account leaves the fees taken off
+    # nothing, which reports the takings as a loss.
+    platform = bool((frame["type"] == _PLATFORM_EARNING).any())
+    earning = _PLATFORM_EARNING if platform else _CHARGE
+    refund = _PLATFORM_REFUND if platform else _REFUND
+
     def takings(rows: pd.DataFrame) -> float:
-        return float(rows.loc[rows["type"] == _PLATFORM_EARNING, "amount"].sum())
+        return float(rows.loc[rows["type"] == earning, "amount"].sum())
 
     def refunded(rows: pd.DataFrame) -> float:
-        return float(rows.loc[rows["type"] == _PLATFORM_REFUND, "amount"].sum())
+        return float(rows.loc[rows["type"] == refund, "amount"].sum())
 
     return Ledger(
         days=days,
@@ -590,18 +607,20 @@ def ledger_window(
         first_day=min(current["day"]) if not current.empty else None,
         last_day=max(current["day"]) if not current.empty else None,
         other_currencies=others,
+        platform=platform,
     )
 
 
 def stripe_verdicts(ledger: Ledger) -> list[str]:
-    """The platform's own take, in sentences, and what Stripe is silent about."""
+    """The account's own take, in sentences, and what Stripe is silent about."""
+    # A platform keeps commission from other people's sales; an ordinary account
+    # keeps its own takings less what Stripe charged to process them.
+    kept = "commission" if ledger.platform else "payments"
     if not ledger.earnings:
-        return [
-            f"Stripe recorded no platform earnings in the last {ledger.days} days."
-        ]
+        return [f"Stripe recorded no {kept} in the last {ledger.days} days."]
     money = ledger.currency
     lines = [
-        f"**{_money(ledger.net, money)} of commission kept in {ledger.days} days** "
+        f"**{_money(ledger.net, money)} of {kept} kept in {ledger.days} days** "
         f"({_money(ledger.earnings, money)} earned"
         + (
             f", {_money(abs(ledger.refunds), money)} refunded"
@@ -615,10 +634,11 @@ def stripe_verdicts(ledger: Ledger) -> list[str]:
         if abs(share) >= 0.1:
             word = "up" if share > 0 else "down"
             lines.append(
-                f"**Commission is {word} {_money(abs(ledger.net_change), money)} "
+                f"**{kept.capitalize()} {'is' if ledger.platform else 'are'} "
+                f"{word} {_money(abs(ledger.net_change), money)} "
                 f"({share:+.0%}) on the {ledger.days} days before.**"
             )
-    if not ledger.fees:
+    if ledger.platform and not ledger.fees:
         lines.append(
             "**Stripe charged this account nothing to process it** - the "
             "platform takes a fee from each merchant's charge, so the card fees "
