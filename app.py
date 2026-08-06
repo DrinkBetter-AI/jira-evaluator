@@ -4385,9 +4385,11 @@ def _charged_commission(
     if not ledger.earnings and not ledger.prev_earnings:
         return None
     # Stripe returns newest first, so a read that hit its ceiling is missing its
-    # oldest days - which are the previous window, and only that. The window's
-    # own commission is whole, so it stands; the comparison is dropped rather
-    # than reported as a rise against a period that was cut short.
+    # oldest days. Where the cut falls past this window's start the window's own
+    # commission is whole and only the comparison goes; where it falls inside,
+    # the measured figure is short of sales and the rate is the honest fallback.
+    if truncated and not cost_client.reaches_past(entries, span, now=spend.window_end):
+        return None
     before = 0.0 if truncated else ledger.prev_net
     return ads_client.Commission(now=ledger.net, before=before, measured=True)
 
@@ -5103,6 +5105,9 @@ def _render_stripe(days: int) -> None:
         st.warning(f"Could not read Stripe: {str(exc)[:200]}")
         return
 
+    # Where the read's cap fell short of this window's own start, the window is
+    # missing sales too, and neither it nor the comparison can be trusted.
+    whole = not truncated or cost_client.reaches_past(entries, days)
     ledger = cost_client.ledger_window(
         entries, days, disputes=disputes, comparable=not truncated
     )
@@ -5169,7 +5174,14 @@ def _render_stripe(days: int) -> None:
             + ", which is never added to them."
         )
 
-    if truncated:
+    if truncated and not whole:
+        st.warning(
+            f"Stripe had more ledger entries in the last {days} days than one "
+            "read carries, and it returns the newest first, so the oldest of "
+            "those days are missing from these figures as well as from the "
+            "period before them. Read a shorter window to see it whole."
+        )
+    elif truncated:
         st.warning(
             "Stripe had more ledger entries than one read carries, and it "
             "returns the newest first, so the oldest days of the comparison "

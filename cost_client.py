@@ -588,6 +588,19 @@ def stripe_disputes(key: str, days: int, now: _dt.date | None = None) -> int:
     return counted
 
 
+def reaches_past(entries: pd.DataFrame, days: int, now: _dt.date | None = None) -> bool:
+    """Whether the oldest row read is older than this window's first day.
+
+    A capped read is missing its oldest days, and how much that matters depends
+    on where the cap fell: past the window's start and the window itself is
+    whole, short of it and every figure in the window is missing sales too.
+    """
+    if entries.empty or "day" not in entries:
+        return False
+    today = now or _dt.date.today()
+    return min(entries["day"]) < today - _dt.timedelta(days=days - 1)
+
+
 def ledger_window(
     entries: pd.DataFrame,
     days: int,
