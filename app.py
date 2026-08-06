@@ -4390,7 +4390,12 @@ def _charged_commission(
     # the measured figure is short of sales and the rate is the honest fallback.
     if truncated and not cost_client.reaches_past(entries, span, now=spend.window_end):
         return None
-    before = 0.0 if truncated else ledger.prev_net
+    before = (
+        ledger.prev_net
+        if not truncated
+        or cost_client.reaches_past(entries, 2 * span, now=spend.window_end)
+        else 0.0
+    )
     return ads_client.Commission(now=ledger.net, before=before, measured=True)
 
 
@@ -5125,7 +5130,13 @@ def _render_stripe(days: int) -> None:
     # missing sales too, and neither it nor the comparison can be trusted.
     whole = not truncated or cost_client.reaches_past(entries, days)
     ledger = cost_client.ledger_window(
-        entries, days, disputes=disputes, comparable=not truncated
+        entries,
+        days,
+        disputes=disputes,
+        # The previous window starts a further ``days`` back, and the read is of
+        # two months whatever window is chosen: a cap can lose the older window
+        # while leaving a seven-day comparison whole.
+        comparable=not truncated or cost_client.reaches_past(entries, 2 * days),
     )
     # The window's own rows, not the download's: one read now covers two months
     # for every panel, so a quiet week inside a busy quarter has to still be
@@ -5197,7 +5208,7 @@ def _render_stripe(days: int) -> None:
             "those days are missing from these figures as well as from the "
             "period before them. Read a shorter window to see it whole."
         )
-    elif truncated:
+    elif truncated and not ledger.comparable:
         st.warning(
             "Stripe had more ledger entries than one read carries, and it "
             "returns the newest first, so the oldest days of the comparison "

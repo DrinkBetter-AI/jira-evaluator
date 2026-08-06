@@ -883,7 +883,9 @@ def cloud_costs(
 _BILLING_DAY_FLOOR = 0.01
 
 
-def billing_coverage(client, table: str) -> tuple[_dt.date | None, _dt.date | None]:
+def billing_coverage(
+    client, table: str, now: _dt.date | None = None
+) -> tuple[_dt.date | None, _dt.date | None]:
     """The first and last days the export covers.
 
     Both ends matter and neither is today. The export is not retroactive, so it
@@ -901,7 +903,14 @@ def billing_coverage(client, table: str) -> tuple[_dt.date | None, _dt.date | No
     rows = list(job.result())
     if not rows:
         return None, None
-    return rows[0]["first"], rows[0]["last"]
+    first, last = rows[0]["first"], rows[0]["last"]
+    # Never today, wherever the export has reached it: a day still being written
+    # is hours of charges wearing a whole day's label, and ends the window on a
+    # cheap day nobody had. The ads reader excludes today for the same reason.
+    yesterday = (now or _dt.date.today()) - _dt.timedelta(days=1)
+    if last is None or first is None or first > yesterday:
+        return None, None
+    return first, min(last, yesterday)
 
 
 __all__ = [
