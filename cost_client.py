@@ -14,6 +14,7 @@ billing export. Everything here is a GET.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 from dataclasses import dataclass, field
 
@@ -690,25 +691,43 @@ class Billing:
 def load_billing_env() -> Billing | None:
     """Where to read Google Cloud costs from, or ``None`` when unconfigured.
 
-    Shares the Ads panel's project and credential, since both read BigQuery in
-    the same project under the same service account; only the dataset differs,
-    and it has a default because the export's own console names it.
+    Nothing here is read from the Ads settings, though both read BigQuery under
+    the same credential: an invalid Ads customer id is not a reason to stop
+    reporting the Cloud bill, and it once was. The project comes from this
+    panel's own variable, else the key's own project, else the project Google's
+    libraries would default to - which on Cloud Run is the one the export is in.
     """
     import ads_client  # noqa: PLC0415 - avoids a cycle at import time
 
-    try:
-        ads = ads_client.load_ads_env()
-    except ads_client.AdsConfigError as exc:
-        raise CostConfigError(str(exc)) from exc
-    project = os.getenv(_BILLING_PROJECT_ENV_VAR, "").strip() or (
-        ads.project if ads else ""
-    )
-    if not project:
-        return None
+    project = os.getenv(_BILLING_PROJECT_ENV_VAR, "").strip()
     dataset = (
         os.getenv(_BILLING_DATASET_ENV_VAR, "").strip() or DEFAULT_BILLING_DATASET
     )
-    return Billing(project, dataset, os.getenv(_BQ_KEY_ENV_VAR, "").strip() or None)
+    key_json = os.getenv(_BQ_KEY_ENV_VAR, "").strip() or None
+    if not project and key_json:
+        try:
+            info = json.loads(key_json)
+        except ValueError as exc:
+            raise CostConfigError(
+                f"{_BQ_KEY_ENV_VAR} is not valid JSON: paste the whole service "
+                "account key file, braces included."
+            ) from exc
+        project = str(info.get("project_id", "")).strip()
+    project = project or ads_client.default_project()
+    if not project:
+        return None
+    # Both are interpolated into a backquoted table reference, where a backquote
+    # would end the identifier and leave the rest of the value as SQL.
+    if not ads_client.valid_name(dataset):
+        raise CostConfigError(
+            f"{_BILLING_DATASET_ENV_VAR} is not a valid dataset name."
+        )
+    if not ads_client.valid_project(project):
+        raise CostConfigError(
+            f"{project!r} is not a GCP project id; check "
+            f"{_BILLING_PROJECT_ENV_VAR} and the key's project_id."
+        )
+    return Billing(project, dataset, key_json)
 
 
 def build_billing_client(config: Billing):
@@ -721,12 +740,14 @@ def build_billing_client(config: Billing):
         raise CostConfigError(str(exc)) from exc
 
 
-def billing_table(client, config: Billing) -> str | None:
-    """The export table in the dataset, or ``None`` while none has been written.
+def billing_tables(client, config: Billing) -> list[str]:
+    """The export tables in the dataset, oldest name first.
 
-    A dataset created for the export but not yet written to is the normal state
-    for hours after it is switched on, and is worth saying rather than reading
-    as an error - as is a billing account whose export was never enabled.
+    Usually one, and empty for the hours between the dataset being created and
+    Google writing to it - the normal state then, not an error, as is a billing
+    account whose export was never enabled. More than one means more than one
+    billing account exports here, and the panel reads the first and says so
+    rather than adding two accounts' bills into one figure.
     """
     try:
         tables = list(client.list_tables(f"{config.project}.{config.dataset}"))
@@ -734,14 +755,14 @@ def billing_table(client, config: Billing) -> str | None:
         raise CostConfigError(
             f"Could not read `{config.project}.{config.dataset}`: {str(exc)[:200]}"
         ) from exc
-    named = sorted(
-        table.table_id
-        for table in tables
-        if table.table_id.startswith(BILLING_TABLE_PREFIX)
-    )
-    if not named:
-        return None
-    return f"{config.project}.{config.dataset}.{named[0]}"
+    return [
+        f"{config.project}.{config.dataset}.{name}"
+        for name in sorted(
+            table.table_id
+            for table in tables
+            if table.table_id.startswith(BILLING_TABLE_PREFIX)
+        )
+    ]
 
 
 def cloud_costs(
@@ -818,7 +839,7 @@ __all__ = [
     "DEFAULT_BILLING_DATASET",
     "LOOKBACK_WINDOWS",
     "billing_coverage",
-    "billing_table",
+    "billing_tables",
     "build_billing_client",
     "by_line",
     "cloud_costs",

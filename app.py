@@ -4761,11 +4761,20 @@ def _render_burn() -> None:
     _render_stripe(days)
 
 
+class CloudRead(NamedTuple):
+    """Cloud charges, and what the export they came from covers."""
+
+    costs: pd.DataFrame
+    history_start: _dt.date | None
+    covered_to: _dt.date | None
+    # Fully-qualified, and more than one when several billing accounts export
+    # into the same dataset. The first is the one read.
+    tables: tuple[str, ...] = ()
+
+
 @st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
-def _cloud_costs_cached(
-    days: int,
-) -> tuple[pd.DataFrame, _dt.date | None, _dt.date | None]:
-    """Google Cloud's billing export, and the first and last days it covers.
+def _cloud_costs_cached(days: int) -> CloudRead:
+    """Google Cloud's billing export, and what the export covers.
 
     Read to the export's own last day rather than to today: it is written in
     arrears, so the days it has not reached are days it has no charges for, and
@@ -4775,13 +4784,18 @@ def _cloud_costs_cached(
     if config is None:  # pragma: no cover - the caller checks first
         raise cost_client.CostConfigError("No billing export is configured.")
     client = cost_client.build_billing_client(config)
-    table = cost_client.billing_table(client, config)
-    if table is None:
-        return pd.DataFrame(), None, None
-    first, last = cost_client.billing_coverage(client, table)
+    tables = cost_client.billing_tables(client, config)
+    if not tables:
+        return CloudRead(pd.DataFrame(), None, None)
+    first, last = cost_client.billing_coverage(client, tables[0])
     if last is None:
-        return pd.DataFrame(), None, None
-    return cost_client.cloud_costs(client, table, days, now=last), first, last
+        return CloudRead(pd.DataFrame(), None, None, tuple(tables))
+    return CloudRead(
+        cost_client.cloud_costs(client, tables[0], days, now=last),
+        first,
+        last,
+        tuple(tables),
+    )
 
 
 def _render_cloud(days: int) -> None:
@@ -4805,7 +4819,7 @@ def _render_cloud(days: int) -> None:
 
     try:
         with st.spinner("Reading what Google Cloud charged..."):
-            costs, history_start, covered_to = _cloud_costs_cached(days)
+            read = _cloud_costs_cached(days)
     except cost_client.CostConfigError as exc:
         st.warning(str(exc))
         return
@@ -4813,6 +4827,7 @@ def _render_cloud(days: int) -> None:
         st.warning(f"Could not read the billing export: {str(exc)[:200]}")
         return
 
+    history_start, covered_to = read.history_start, read.covered_to
     if history_start is None or covered_to is None:
         st.caption(
             "The billing export dataset is readable but Google has not written "
@@ -4821,7 +4836,9 @@ def _render_cloud(days: int) -> None:
         )
         return
 
-    burn = cost_client.window(costs, days, provider="Google Cloud", now=covered_to)
+    burn = cost_client.window(
+        read.costs, days, provider="Google Cloud", now=covered_to
+    )
     cloud = "Cloud costs"
     money = burn.currency
     tiles = st.columns(3)
@@ -4882,8 +4899,20 @@ def _render_cloud(days: int) -> None:
         )
     # It is not retroactive either, so a window starting before it was switched
     # on is a shorter period wearing a longer label.
+    # More than one export in the dataset is more than one billing account, and
+    # two accounts' bills are no more addable than two currencies.
+    if len(read.tables) > 1:
+        lines.insert(
+            0,
+            f"**The dataset holds {len(read.tables)} billing exports**, one per "
+            f"billing account. These figures are `{read.tables[0].rsplit('.', 1)[1]}` "
+            "alone.",
+        )
     covered = (covered_to - history_start).days + 1
-    if covered < days:
+    # Equal is the same case: a window as long as the export's whole history has
+    # nothing behind it, and saying the comparison rests on nought days is worse
+    # than saying there is no comparison.
+    if covered <= days:
         lines.insert(
             0,
             f"**The export only goes back to {history_start}**, so these "
