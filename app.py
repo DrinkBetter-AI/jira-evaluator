@@ -4786,7 +4786,7 @@ def _cloud_costs_cached(days: int) -> CloudRead:
     config = cost_client.load_billing_env()
     if config is None:  # pragma: no cover - the caller checks first
         raise cost_client.CostConfigError("No billing export is configured.")
-    client = cost_client.build_billing_client(config)
+    client = _billing_bigquery_client(config.project, config.dataset)
     tables = cost_client.billing_tables(client, config)
     if not tables:
         return CloudRead(pd.DataFrame(), None, None)
@@ -4799,6 +4799,22 @@ def _cloud_costs_cached(days: int) -> CloudRead:
         last,
         tuple(tables),
     )
+
+
+@st.cache_resource(show_spinner=False)
+def _billing_bigquery_client(project: str, dataset: str):
+    """The billing export's BigQuery client, built once per process.
+
+    Keyed on where it reads so a changed variable builds a new one, as the ads
+    client is: a credential loaded and a session opened to Google are not work
+    that has anything to do with how stale the figures are.
+    """
+    config = cost_client.load_billing_env()
+    if config is None or (config.project, config.dataset) != (project, dataset):
+        raise cost_client.CostConfigError(
+            "The billing export configuration changed while it was being read."
+        )
+    return cost_client.build_billing_client(config)
 
 
 def _render_cloud(days: int) -> None:
