@@ -3992,9 +3992,16 @@ def _charged_commission(
     try:
         if not cost_client.load_stripe_env():
             return None
-        # One day either side of the two windows the fold needs, because the
-        # ledger is fetched from today back while the window ends yesterday.
-        entries, _truncated, _disputes = _stripe_cached(span + 1)
+        # One day more than the two windows the fold needs, because the ledger
+        # is fetched from today back while the window ends yesterday. Disputes
+        # are not read here: they are a Burn figure and cost another call.
+        entries, _truncated = _stripe_ledger_cached(span + 1)
+        # The fold bounds the window's start but not its end, and today's sales
+        # are not in yesterday's spend: without this the return climbs through
+        # the day and reads high by a day in every window.
+        if not entries.empty:
+            day = pd.to_datetime(entries["day"]).dt.date
+            entries = entries[day <= spend.window_end]
         ledger = cost_client.ledger_window(entries, span, now=spend.window_end)
     except Exception:  # noqa: BLE001 - the ads panel is not the place to report it
         return None
@@ -4312,13 +4319,31 @@ def _openai_costs_cached(days: int) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
-def _stripe_cached(days: int) -> tuple[pd.DataFrame, bool, int]:
-    """Stripe's ledger for the window and the window before, and its disputes."""
+def _stripe_ledger_cached(days: int) -> tuple[pd.DataFrame, bool]:
+    """Stripe's ledger for the window and the window before.
+
+    Separate from the disputes beside it because two panels want the ledger and
+    only one wants the disputes: a busy platform's ledger runs to a hundred
+    pages, and the ads panel has no use for a chargeback count.
+    """
     key = cost_client.load_stripe_env()
     if not key:  # pragma: no cover - the caller checks first
         raise cost_client.CostConfigError("No Stripe key is configured.")
-    entries, truncated = cost_client.stripe_ledger(key, days)
-    return entries, truncated, cost_client.stripe_disputes(key, days)
+    return cost_client.stripe_ledger(key, days)
+
+
+@st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
+def _stripe_disputes_cached(days: int) -> int:
+    key = cost_client.load_stripe_env()
+    if not key:  # pragma: no cover - the caller checks first
+        raise cost_client.CostConfigError("No Stripe key is configured.")
+    return cost_client.stripe_disputes(key, days)
+
+
+def _stripe_cached(days: int) -> tuple[pd.DataFrame, bool, int]:
+    """Stripe's ledger for the window and the window before, and its disputes."""
+    entries, truncated = _stripe_ledger_cached(days)
+    return entries, truncated, _stripe_disputes_cached(days)
 
 
 def _render_burn() -> None:
