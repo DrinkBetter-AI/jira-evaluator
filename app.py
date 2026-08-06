@@ -1159,7 +1159,9 @@ def _render_team_overview(df: pd.DataFrame) -> None:
     current = active[active["sprint_name"].fillna("").astype(str).eq(sprint_label)]
     owners = current["assignee"].fillna("").astype(str).str.strip().str.lower()
     unowned = owners.isin(_NO_OWNER_NAMES)
-    kpi_strip(
+    _kpis(
+        TAB_ENGINEERING,
+        "Sprint",
         [
             ("Sprint", sprint_label, chosen, "info"),
             ("Tickets", f"{len(current)}", "in this sprint", "neutral"),
@@ -1211,9 +1213,22 @@ def _render_epics(df: pd.DataFrame, organization_source: pd.DataFrame | None = N
         orphans = int(rollup.loc[rollup["epic"] == "No epic", "open_children"].sum())
         drifting = int((rollup["issue_count"] > 0).sum() - (1 if orphans else 0))
         e1, e2, e3 = st.columns(3)
-        e1.metric("Epics with open work", int((rollup["epic"] != "No epic").sum()))
-        e2.metric("Epics needing attention", max(drifting, 0))
-        e3.metric("Tickets with no epic", orphans)
+        epics_section = "Epics"
+        _tile(
+            e1,
+            TAB_ENGINEERING,
+            epics_section,
+            "Epics with open work",
+            f"{int((rollup['epic'] != 'No epic').sum())}",
+        )
+        _tile(
+            e2,
+            TAB_ENGINEERING,
+            epics_section,
+            "Epics needing attention",
+            f"{max(drifting, 0)}",
+        )
+        _tile(e3, TAB_ENGINEERING, epics_section, "Tickets with no epic", f"{orphans}")
 
         # "No epic" is a bucket rather than an issue, so it gets no link to follow.
         display = rollup.copy()
@@ -1268,9 +1283,10 @@ def _render_epic_organization(df: pd.DataFrame) -> None:
 
     matched = suggestions[suggestions["suggested_epic_key"].ne("")]
     o1, o2, o3 = st.columns(3)
-    o1.metric("Tickets with no epic", int(len(suggestions)))
-    o2.metric("With a suggested parent", int(len(matched)))
-    o3.metric("Epics with nothing open", int(len(empty)))
+    orphan_section = "Epic organization"
+    _tile(o1, TAB_ENGINEERING, orphan_section, "Tickets with no epic", f"{len(suggestions)}")
+    _tile(o2, TAB_ENGINEERING, orphan_section, "With a suggested parent", f"{len(matched)}")
+    _tile(o3, TAB_ENGINEERING, orphan_section, "Epics with nothing open", f"{len(empty)}")
     st.caption(
         "Suggestions come from the words a ticket shares with an epic and with the "
         "tickets already in it, scored so that a word common to every epic counts "
@@ -1691,9 +1707,16 @@ def _render_estimate_policy(df: pd.DataFrame) -> None:
     compliance_pct = (1 - len(violations) / len(in_scope)) * 100.0
 
     c1, c2, c3 = st.columns(3)
-    c1.metric("Policy Compliance", f"{compliance_pct:.0f}%")
-    c2.metric("Missing Estimate", len(violations))
-    c3.metric("Estimated Work", f"{in_scope['estimate_hours'].sum():.0f}h")
+    policy = "Estimate policy"
+    _tile(c1, TAB_ENGINEERING, policy, "Policy Compliance", f"{compliance_pct:.0f}%")
+    _tile(c2, TAB_ENGINEERING, policy, "Missing Estimate", f"{len(violations)}")
+    _tile(
+        c3,
+        TAB_ENGINEERING,
+        policy,
+        "Estimated Work",
+        f"{in_scope['estimate_hours'].sum():.0f}h",
+    )
 
     rollup = policy_compliance_by_owner(scored)
     if not rollup.empty:
@@ -1772,9 +1795,10 @@ def _render_stale_cleanup(df: pd.DataFrame) -> None:
     unassigned = candidates["stale_reasons"].str.contains("unassigned").sum()
     never_started = candidates["stale_reasons"].str.contains("never started").sum()
     c1, c2, c3 = st.columns(3)
-    c1.metric(f"Idle {threshold}d+", len(candidates))
-    c2.metric("Unassigned", int(unassigned))
-    c3.metric("Never Started", int(never_started))
+    abandoned = "Stale & abandoned"
+    _tile(c1, TAB_ENGINEERING, abandoned, f"Idle {threshold}d+", f"{len(candidates)}")
+    _tile(c2, TAB_ENGINEERING, abandoned, "Unassigned", f"{unassigned}")
+    _tile(c3, TAB_ENGINEERING, abandoned, "Never Started", f"{never_started}")
 
     display = candidates.copy()
     display["key_url"] = display["key"].map(_jira_ticket_url)
@@ -4584,8 +4608,15 @@ def _render_product_funnel() -> None:
             "it are still being sent, or name your own with AMPLITUDE_FUNNEL."
         )
         if active:
-            st.metric(
-                f"{amplitude_client.ACTIVE_STEP.label} ({days}d)", f"{active:,}"
+            # The one figure this panel still has when the funnel is empty, and
+            # the reason the report must carry it: a Business pack with no
+            # product line at all reads as nobody having visited.
+            _tile(
+                st,
+                TAB_BUSINESS,
+                "Product funnel",
+                f"{amplitude_client.ACTIVE_STEP.label} ({days}d)",
+                f"{active:,}",
             )
             _render_friction_tabs(credentials, days, active, "used the site")
         return
