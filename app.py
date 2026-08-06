@@ -3963,9 +3963,9 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     tiles[3].metric(
         f"Commission per {unit} spent",
         f"{earned:.2f}" if earned else "\u2014",
-        # A ratio, not money: hundredths are the whole movement here, so a
-        # rise of 0.05 is said in words the arrow helper reads as a change
-        # rather than as the standing still that "+0.0..." means to it.
+        # A ratio, not money: hundredths are the whole movement here, so an
+        # unchanged window says so in the word the tiles use rather than
+        # printing a zero that reads as a measurement.
         **_delta_arrow(
             (f"{earned - before:+.2f}" if round(earned - before, 2) else "flat")
             if earned and before
@@ -4650,8 +4650,24 @@ def _delta_arrow(change: str | None) -> dict:
     """
     if change is None:
         return {}
-    unmoved = change == "flat" or change.startswith(("+0 ", "+0.0"))
-    return {"delta": change, "delta_color": "off" if unmoved else "normal"}
+    return {"delta": change, "delta_color": "off" if _unmoved(change) else "normal"}
+
+
+def _unmoved(change: str) -> bool:
+    """Whether a delta amounts to no movement, read as a number not a prefix.
+
+    "+0.05" is nothing next to a spend figure and everything next to a return
+    of 0.84 per unit spent, and a test on the leading characters cannot tell
+    them apart: it greys out the rise while colouring the identical fall red.
+    Callers that mean no movement say so in the word the tiles already use.
+    """
+    if change == "flat":
+        return True
+    figure = re.sub(r"[^0-9.]", "", change)
+    try:
+        return float(figure) == 0
+    except ValueError:
+        return False
 
 
 def _people_delta(
