@@ -63,6 +63,10 @@ profile when they are not all set.
 | `AMPLITUDE_SECRET_KEY`        | no                               | —                                                | The same project's secret key; Amplitude's Dashboard API authenticates on the pair, and the API key alone is refused                                                   |
 | `AMPLITUDE_API_URL`           | no                               | `https://amplitude.com`                          | Set to `https://analytics.eu.amplitude.com` for an EU-region project, whose keys the US host refuses                                                                   |
 | `AMPLITUDE_FUNNEL`            | no                               | product page → cart → checkout → payment → order | The funnel's steps as `Label=event_name` pairs, in order, e.g. `Visited=_active,Bought=checkout_order_completed`                                                       |
+| `GOOGLE_ADS_BQ_PROJECT` | no | the project the credentials resolve to | GCP project holding the Google Ads data transfer; on Cloud Run the service's own project is right, so this is only for reading another project's dataset |
+| `GOOGLE_ADS_BQ_DATASET` | no | `google_ads` | Dataset the Ads transfer writes to; without a readable one the *Ads Spend & Return* section says so and everything else works |
+| `GOOGLE_ADS_CUSTOMER_ID` | no | every account in the dataset | Restrict the ads figures to one account, e.g. `887-686-4797`; by default every account the transfer writes is added up |
+| `GCP_BIGQUERY_READONLY_KEY` | no | — | A BigQuery service-account key as JSON, for reading the Ads dataset from outside GCP; unset on Cloud Run, which authenticates as its own service account |
 | `DASHBOARD_PASSWORD`          | no locally, **yes on Cloud Run** | —                                                | Shared password visitors must enter; remembered per browser for 30 days in a signed cookie; leave it unset locally (a copy in `.env` prompts on every run), unset on Cloud Run (`K_SERVICE` present) refuses to serve at all                                     |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
@@ -179,7 +183,8 @@ and filters do not apply to them. Pages rather than tabs because Streamlit runs
 the body of every tab on every rerun whichever one the browser is showing, so a
 reader watching the shop's figures was paying to rebuild twenty engineering
 sections; a page that is not open does not run at all. The Business page is
-listed only when the order database or Amplitude is configured. It holds:
+listed only when the order database, Google Ads or Amplitude is configured. It
+holds:
 
 - *Orders, Revenue & AOV* for the last 7 and 30 days, each against the window
   before it.
@@ -299,7 +304,41 @@ fully paid with nothing pending.
    per merchant, over 30, 90, 180 or 360 days. Bottles count what customers chose,
    so an order awaiting payment counts there while revenue still waits for
    capture; ice packs are add-ons and are kept out of the wine ranking.
-12. **Product Funnel & Friction** (*Business* tab) — how far visitors get towards
+12. **Ads Spend & Return** (*Business* tab) — what the orders cost to win, read from
+   Google's own Ads-to-BigQuery transfer rather than the Ads API, which issues
+   developer tokens to manager accounts only and this account has none above it.
+   Spend, the CRM's orders over exactly the same days, ad spend per order, revenue
+   per currency unit spent, and Google's own conversion count, over 7 or 30 days.
+   Two figures deliberately sit side by side rather than being reconciled into one:
+   *Google's own conversions* credits the day of the *click*, counts view-throughs
+   and splits one sale across several ads, while the CRM counts money captured on
+   the day it arrived — so the CRM is the figure to quote and a gap over a quarter
+   between them is called out as tracking worth checking. Revenue per unit spent
+   counts *every* order in the window, including the ones no ad won, so it is a
+   ceiling rather than a return; below roughly 3x, wine's margin does not cover the
+   ad that sold it. The campaign table is ordered dearest first and drops campaigns
+   that spent nothing — an account holding twelve campaigns of which two run would
+   otherwise bury the two that cost money — while a campaign that spent money and
+   has no snapshot row is still listed, by id. Spend ends *yesterday* and is counted
+   in the ad account's own timezone; a window that starts before the transfer's
+   history does says how much of it has been loaded, because Google's transfer loads
+   one day per run and backfills only when asked, so a new transfer would otherwise
+   report one day of spend as a month of it. Where that history begins is asked of
+   the whole table rather than inferred from the window's rows: the stats table has
+   no row for a day on which nothing ran, so an account that paused would otherwise
+   be reported as a broken feed instead of a quiet one. Money in two currencies is
+   never added — the CRM side is taken in the shop's main currency, only the ad
+   accounts billing in the commonest currency are summed (any others are named in a
+   caption), and if the shop and the ad account disagree, return per unit spent is
+   left blank rather than dividing one currency by another. Every figure, tiles and
+   sentences alike, is quoted in the ad account's own currency. Costs arrive as
+   micros and are divided out; campaign names come from the newest daily snapshot
+   rather than joined per day, or a campaign renamed mid-window would appear twice
+   with its spend split between the two names. Needs a readable dataset
+   (`GOOGLE_ADS_BQ_DATASET`, default `google_ads`); read-only, every statement is a
+   `SELECT` under a credential holding `bigquery.dataViewer` and
+   `bigquery.jobUser` and no access to Google Ads itself.
+13. **Product Funnel & Friction** (*Business* tab) — how far visitors get towards
    being one of those orders, read from Amplitude. The default funnel runs product
    page → cart → checkout → payment → order, deliberately *not* home page → search
    → product: on this shop the overwhelming majority of visitors arrive on a product
@@ -346,7 +385,7 @@ fully paid with nothing pending.
    only comes in days, weeks or months: no interval spans an arbitrary window, so a
    count from it is a sum of buckets, and adding buckets counts somebody who came
    back next week as two people.
-13. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
+14. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
    or unowned: no Jira key anywhere in the title, branch name or description
    (matched against every project key Jira exposes, plus `JIRA_EXTRA_PROJECT_KEYS`,
    so a string like `UTF-8` does not read as a ticket); open past
@@ -357,7 +396,7 @@ fully paid with nothing pending.
    first, because that is work one review away from shipping. Tickets merely In
    Progress are excluded: the code is still being written. Includes a per-author
    table and a CSV of everything flagged. Needs `DASHBOARD_GITHUB_TOKEN`.
-14. **Ticket Quality & Ready for Devin** — every ticket graded out of 5 on whether
+15. **Ticket Quality & Ready for Devin** — every ticket graded out of 5 on whether
    someone outside the original conversation could pick it up: a summary of at
    least four words, a description of at least 120 characters, explicit acceptance
    criteria (the words, or a checklist of three or more items), an estimate, and an
@@ -370,7 +409,7 @@ fully paid with nothing pending.
    Backlog tickets are always included regardless of *Include Backlogs* — an unowned
    backlog ticket is the best kind to hand off, and the worst-written ones collect
    there unseen.
-15. **Sprint Planner** — a first draft of one team's next sprint, built from goals
+16. **Sprint Planner** — a first draft of one team's next sprint, built from goals
    rather than from the top of a priority list. Name two or three goals for the
    sprint ("Onboarding, Quiz, Checkout", most important first) and every ticket
    that shares a word with one — in its summary, its epic's name or its labels —
@@ -390,9 +429,9 @@ fully paid with nothing pending.
    armed, and it only adds tickets to an active or future sprint. Jira moves an
    issue between sprints rather than copying it, so a ticket already on another
    open sprint leaves it; the section names those tickets before the button.
-16. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
+17. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
    age-vs-idle chart, sprint planning tables, and bulk Jira write-back actions.
-17. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
+18. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
    per person against what they are actually available for, which matters when most
    contributors are part-time: `JIRA_WEEKLY_HOURS` is spread over the weekdays
    between the sprint's start and end dates, so 20h/week across a 10-working-day

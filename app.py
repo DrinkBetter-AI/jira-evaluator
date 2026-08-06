@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import datetime as _dt
 import hashlib
@@ -9,7 +10,7 @@ import os
 import re
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 from urllib.parse import quote, unquote
 
 import numpy as np
@@ -73,6 +74,7 @@ from hygiene import (
     policy_compliance_by_owner,
     stale_candidates,
 )
+import ads_client
 import amplitude_client
 import orders
 import orders_client
@@ -3710,17 +3712,30 @@ def _money(amount: float, currency: str = "usd") -> str:
 
 
 def _business_readable() -> bool:
-    """Whether either the order database or Amplitude can be read at all.
+    """Whether any of the order database, Amplitude or Google Ads can be read.
 
-    Reading the environment costs nothing, so a deployment with no keys keeps
-    the Business page out of the navigation entirely rather than offering a link
-    to a page that goes on to admit it cannot read anything.
+    Reading the environment is close enough to free that a deployment with no
+    keys keeps the Business page out of the navigation entirely, rather than
+    offering a link to a page that goes on to admit it cannot read anything.
+    Close enough rather than free: with no project variable set, the Ads loader
+    asks the ambient credentials which project they belong to, which is a
+    metadata call - answered once per process, and swallowed when there is
+    nothing to answer.
     """
-    for load in (orders_client.load_medusa_env, amplitude_client.load_amplitude_env):
+    loaders = (
+        orders_client.load_medusa_env,
+        amplitude_client.load_amplitude_env,
+        ads_client.load_ads_env,
+    )
+    for load in loaders:
         try:
             if load() is not None:
                 return True
-        except (orders_client.MedusaConfigError, amplitude_client.AmplitudeConfigError):
+        except (
+            orders_client.MedusaConfigError,
+            amplitude_client.AmplitudeConfigError,
+            ads_client.AdsConfigError,
+        ):
             # Configured but wrongly - which is still worth rendering, because
             # the section is where the error message belongs.
             return True
@@ -3736,18 +3751,23 @@ def _render_business() -> None:
     for it. The year of orders costs about a sixth of a second anyway - the
     button was guarding the cheapest read on the dashboard.
     """
-    _render_business_sections()
+    order_book = _render_business_sections()
+    st.divider()
+    # After the shop's own figures and before the funnel: what the orders cost to
+    # win only means anything beside the orders themselves.
+    _render_ads(order_book)
     st.divider()
     _render_product_funnel()
 
 
-def _render_business_sections() -> None:
+def _render_business_sections() -> orders_client.OrderBook | None:
+    """The order book's own sections, and the book itself for other panels."""
     try:
         config = orders_client.load_medusa_env()
     except orders_client.MedusaConfigError as exc:
         st.subheader("Orders, Revenue & AOV")
         st.caption(f"Order figures are misconfigured: {exc}")
-        return
+        return None
     if config is None:
         st.subheader("Orders, Revenue & AOV")
         st.caption(
@@ -3755,7 +3775,7 @@ def _render_business_sections() -> None:
             "POSTGRES_PASSWORD (or MEDUSA_DB_PASSWORD) to the credential for "
             f"{orders_client.DEFAULT_USER} on {orders_client.DEFAULT_HOST}."
         )
-        return
+        return None
 
     try:
         with st.spinner("Reading the order book..."):
@@ -3763,11 +3783,12 @@ def _render_business_sections() -> None:
     except Exception as exc:  # noqa: BLE001
         st.subheader("Orders, Revenue & AOV")
         st.warning(f"Could not read the order book: {str(exc)[:400]}")
-        return
+        return None
 
     _render_orders(order_book, config.label)
     st.divider()
     _render_wines_and_merchants(order_book, config.label)
+    return order_book
 
 
 def _render_orders(order_book: orders_client.OrderBook, source: str) -> None:
@@ -3908,6 +3929,304 @@ def _render_wines_and_merchants(
                 f"{', '.join(code.upper() for code in other_currencies)} is left "
                 "out rather than added to a total in another currency."
             )
+
+
+ADS_TTL_SECONDS = 900
+
+
+class AdsRead(NamedTuple):
+    """Everything one pass over the Ads dataset yields."""
+
+    stats: pd.DataFrame
+    names: pd.DataFrame
+    account: str
+    currency: str
+    # The earliest day the transfer has loaded, from the table itself rather than
+    # from these rows: a paused account has no rows for days that are loaded.
+    history_start: _dt.date | None
+    # Accounts left out because they bill in some other currency, named so the
+    # reader knows the total is not the whole dataset.
+    other_currencies: list[str]
+
+
+@st.cache_data(ttl=ADS_TTL_SECONDS, show_spinner=False, refresh_mode="background")
+def _ads_cached(project: str, dataset: str, days: int) -> AdsRead:
+    """Campaign stats by day, campaign names, the account's name and currency.
+
+    Keyed on the dataset rather than the credential: the credential is read from
+    the environment and does not change while the process lives, and a service
+    account key has no business in a cache key.
+
+    A dataset can hold several ad accounts, and their spend can only be added if
+    they bill in the same currency, so the most common currency wins and the rest
+    are set aside - the same rule the order book follows for takings.
+    """
+    config = ads_client.load_ads_env()
+    if config is None:  # pragma: no cover - the caller checks first
+        raise ads_client.AdsConfigError("Google Ads figures are not configured.")
+    client = ads_client.build_client(config)
+    customers = ads_client.customer_ids(client, config)
+    empty = pd.DataFrame()
+    if not customers:
+        return AdsRead(empty, empty, "", "USD", None, [])
+
+    accounts = [
+        (customer_id,) + ads_client.account(client, config, customer_id)
+        for customer_id in customers
+    ]
+    counted = collections.Counter(currency for _, _, currency in accounts)
+    main = counted.most_common(1)[0][0]
+    others = sorted({c for c in counted if c != main})
+
+    stats: list[pd.DataFrame] = []
+    names: list[pd.DataFrame] = []
+    labels: list[str] = []
+    starts: list[_dt.date] = []
+    for customer_id, name, currency in accounts:
+        if currency != main:
+            continue
+        stats.append(ads_client.daily_stats(client, config, customer_id, days))
+        names.append(ads_client.campaign_names(client, config, customer_id))
+        loaded = ads_client.loaded_from(client, config, customer_id)
+        if loaded is not None:
+            starts.append(loaded)
+        labels.append(name or customer_id)
+    return AdsRead(
+        stats=pd.concat(stats, ignore_index=True) if stats else empty,
+        names=pd.concat(names, ignore_index=True) if names else empty,
+        account=", ".join(labels),
+        currency=main,
+        # The latest of the accounts' first days: the window is only wholly
+        # loaded once every account it sums has reached it.
+        history_start=max(starts) if starts else None,
+        other_currencies=others,
+    )
+
+
+def _ads_sales(
+    order_book: orders_client.OrderBook | None, spend: ads_client.Spend
+) -> ads_client.Sales | None:
+    """The CRM's orders over exactly the days the spend covers, or ``None``.
+
+    The same days matter more than they look. Ads figures end yesterday and are
+    counted in the account's own timezone, so comparing them against a CRM window
+    ending now would divide a full month of spend by a month plus today's orders.
+    The window is the one the spend was summed over, not the days within it that
+    happened to have activity: an account that paused for the first week of the
+    month would otherwise have its orders counted over fewer days than its spend.
+    """
+    if order_book is None or spend.window_end is None:
+        return None
+    span = spend.days_loaded
+    end = _dt.datetime.combine(
+        spend.window_end + _dt.timedelta(days=1),
+        _dt.time.min,
+        tzinfo=_dt.timezone.utc,
+    )
+    # The shop's main currency only. Every other money section does the same,
+    # and adding takings in two currencies would inflate the return on spend
+    # quoted in one of them.
+    book, currency, _others = orders.single_currency(order_book.orders)
+    metrics = orders.window_metrics(book, span, now=end)
+    return ads_client.Sales(
+        orders=metrics.paid_orders, revenue=metrics.revenue, currency=currency
+    )
+
+
+def _one(currency: str) -> str:
+    """``$1``, or ``1 CAD`` where the currency has no symbol here."""
+    return _money(1, currency).replace("1.00", "1")
+
+
+def _money_delta(change: float, currency: str) -> str:
+    """``+$412.90``, signed where Streamlit looks for the sign.
+
+    ``st.metric`` colours a delta by whether the string starts with a minus, and
+    a currency symbol in front of it would draw every fall in spend as a rise.
+    """
+    if not round(change, 2):
+        return "flat"
+    sign = "+" if change > 0 else "-"
+    return f"{sign}{_money(abs(change), currency)}"
+
+
+def _render_ads(order_book: orders_client.OrderBook | None) -> None:
+    """What the orders cost to win: spend, cost per order and return.
+
+    The order book says what the shop earned and the funnel says how people got
+    there; neither says what was paid to bring them. This is the number a
+    leadership meeting asks for first and the dashboard could not answer.
+    """
+    st.subheader("Ads Spend & Return")
+    try:
+        config = ads_client.load_ads_env()
+    except ads_client.AdsConfigError as exc:
+        st.caption(f"Google Ads figures are misconfigured: {exc}")
+        return
+    if config is None:
+        st.caption(
+            "Ad figures come from Google's own Ads-to-BigQuery transfer, which "
+            "needs no Ads API token. Point the dashboard at the dataset with "
+            "GOOGLE_ADS_BQ_PROJECT and GOOGLE_ADS_BQ_DATASET."
+        )
+        return
+
+    days = st.radio(
+        "Window",
+        options=list(ads_client.LOOKBACK_WINDOWS),
+        format_func=lambda value: f"{value} days",
+        index=len(ads_client.LOOKBACK_WINDOWS) - 1,
+        horizontal=True,
+        key="ads_window_days",
+    )
+    try:
+        with st.spinner("Reading ad spend..."):
+            read = _ads_cached(config.project, config.dataset, days)
+    except ads_client.AdsConfigError as exc:
+        st.warning(str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001
+        st.warning(
+            f"Could not read `{config.project}.{config.dataset}`: {str(exc)[:200]}"
+        )
+        return
+
+    spend = ads_client.window(read.stats, days, history_start=read.history_start)
+
+    if read.stats.empty:
+        # No rows in the window means three different things, and only the
+        # transfer's own history tells them apart: nothing has loaded, some of
+        # the window has, or all of it has and the account simply stopped.
+        if read.history_start is None:
+            st.info(
+                "The Ads dataset is readable but holds no spend yet. Google's "
+                "transfer loads one day per run and backfills only when asked, "
+                "so a new transfer has nothing in it until its first run "
+                "completes."
+            )
+        elif spend.partial:
+            st.warning(
+                f"Only {spend.days_loaded} of these {days} days have been "
+                f"loaded: the transfer's history starts on {spend.history_start}"
+                ", and no spend was recorded in the part that has arrived."
+            )
+        else:
+            st.info(
+                f"No spend recorded in the last {days} days. The transfer has "
+                f"loaded from {read.history_start} onwards, so this is an "
+                "account that stopped advertising rather than missing figures."
+            )
+        return
+
+    campaigns = ads_client.by_campaign(read.stats, read.names, days)
+    sales = _ads_sales(order_book, spend)
+    currency = read.currency
+    money = currency.lower()
+    unit = _one(money)
+
+    tiles = st.columns(5)
+    tiles[0].metric(
+        f"Spend ({days}d)",
+        _money(spend.cost, money),
+        **_delta_arrow(
+            _money_delta(spend.cost_change, money) if spend.prev_cost else None
+        ),
+    )
+    tiles[1].metric(
+        "Orders (CRM)",
+        f"{sales.orders:,}" if sales else "\u2014",
+    )
+    tiles[2].metric(
+        "Ad spend per order",
+        _money(spend.cost / sales.orders, money) if sales and sales.orders else "\u2014",
+    )
+    # Comparable only if the shop takes money in the currency the ads are billed
+    # in; otherwise the ratio is one currency divided by another.
+    comparable = bool(sales and (not sales.currency or sales.currency == money))
+    tiles[3].metric(
+        f"Revenue per {unit} spent",
+        f"{sales.revenue / spend.cost:.1f}x"
+        if sales and comparable and spend.cost
+        else "\u2014",
+    )
+    tiles[4].metric("Google's own conversions", f"{spend.conversions:,.0f}")
+
+    if spend.partial:
+        st.warning(
+            f"Only {spend.days_loaded} of these {days} days have been loaded: "
+            f"the transfer's history starts on {spend.history_start}, so the "
+            "spend figure is that much of the window rather than all of it."
+        )
+    elif not spend.cost:
+        st.info(
+            f"No spend recorded in the last {days} days. The dataset is loaded "
+            "up to date, so this is a quiet account rather than missing figures."
+        )
+    if sales and not comparable:
+        st.caption(
+            f"The shop's takings are in {sales.currency.upper()} and the ad "
+            f"account bills in {currency.upper()}, so return per unit spent is "
+            "left blank rather than dividing one currency by another."
+        )
+
+    st.dataframe(
+        campaigns.assign(
+            cost=campaigns["cost"].map(lambda value: _money(value, money)),
+            conversion_value=campaigns["conversion_value"].map(
+                lambda value: _money(value, money)
+            ),
+            cost_per_conversion=campaigns["cost_per_conversion"].map(
+                lambda value: _money(value, money) if value else "\u2014"
+            ),
+            roas=campaigns["roas"].map(lambda value: f"{value:.1f}x" if value else "\u2014"),
+            budget=campaigns["budget"].map(lambda value: _money(value, money)),
+            conversions=campaigns["conversions"].map(lambda value: f"{value:,.1f}"),
+        ).rename(
+            columns={
+                "campaign": "Campaign",
+                "status": "Status",
+                "channel": "Type",
+                "cost": "Spend",
+                "clicks": "Clicks",
+                "conversions": "Conversions",
+                "conversion_value": "Value",
+                "cost_per_conversion": "Cost per conversion",
+                "roas": f"Value per {unit}",
+                "budget": "Daily budget",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+    # Orders can still be compared against spend when the currencies differ -
+    # a count is a count - but revenue cannot, so it is withheld rather than
+    # divided by a figure in another currency.
+    if sales and not comparable:
+        sales = ads_client.Sales(
+            orders=sales.orders, revenue=0.0, currency=sales.currency
+        )
+    lines = ads_client.verdicts(spend, campaigns, sales, currency)
+    if lines:
+        with st.expander("What this means", expanded=True):
+            st.markdown("\n".join(f"- {line}" for line in lines))
+
+    if read.other_currencies:
+        st.caption(
+            f"Only the accounts billing in {currency.upper()} are counted here. "
+            f"The dataset also holds {', '.join(read.other_currencies)} accounts, "
+            "whose spend cannot be added to this total."
+        )
+
+    st.caption(
+        f"{read.account or 'Google Ads'}, read from Google's daily transfer into "
+        f"`{config.dataset}` rather than the Ads API, which needs a manager "
+        "account. Spend ends yesterday and is counted in the ad account's own "
+        "timezone. 'Conversions' is Google's own count against the day of the "
+        "click and is not the same thing as an order: the CRM's orders are the "
+        "figure to quote, and every order in the window counts towards them, "
+        "including the ones no ad won."
+    )
 
 
 # How far back the funnel looks. A week is what a sprint changes; a month is
