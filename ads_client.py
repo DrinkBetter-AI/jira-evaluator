@@ -556,12 +556,63 @@ class Sales:
     # so the caller takes the shop's main one - and if it is not the currency the
     # ad account bills in, dividing one by the other means nothing.
     currency: str = ""
+    # The same window immediately before this one, so the return on a dollar can
+    # be read as moving towards break-even rather than as a figure on its own.
+    prev_orders: int = 0
+    prev_revenue: float = 0.0
 
 
 # Below this, wine's margin does not cover the ad that sold it. A rough floor
 # rather than a law: it assumes roughly a third of the bottle price is gross
 # margin, so three dollars back per dollar spent is about break-even.
 BREAK_EVEN_ROAS = 3.0
+
+# What the marketplace actually keeps of a sale. The revenue an ad wins is the
+# merchant's; only the commission on it is income here, so gross ROAS flatters
+# the account by roughly eight times and this is the figure to steer by.
+DEFAULT_COMMISSION_RATE = 0.12
+_COMMISSION_ENV_VAR = "MARKETPLACE_COMMISSION_RATE"
+
+# A dollar of commission for a dollar of spend. Not a profit: it is where the ad
+# pays for itself before anybody's time, packaging or card fees.
+BREAK_EVEN_RETURN = 1.0
+
+
+def commission_rate() -> float:
+    """The share of revenue the marketplace keeps, as a fraction.
+
+    Set ``MARKETPLACE_COMMISSION_RATE`` to ``12``, ``12%`` or ``0.12`` when the
+    rate changes; a rate the dashboard cannot parse is an error rather than a
+    silent fallback, because every return figure on the page is built on it.
+    """
+    raw = os.getenv(_COMMISSION_ENV_VAR, "").strip().rstrip("%").strip()
+    if not raw:
+        return DEFAULT_COMMISSION_RATE
+    try:
+        rate = float(raw)
+    except ValueError as exc:
+        raise AdsConfigError(
+            f"{_COMMISSION_ENV_VAR}={raw!r} is not a number. Use 12, 12% or 0.12."
+        ) from exc
+    if rate > 1:
+        rate /= 100
+    if not 0 < rate <= 1:
+        raise AdsConfigError(
+            f"{_COMMISSION_ENV_VAR}={raw!r} is not a commission share between "
+            "0 and 100%."
+        )
+    return rate
+
+
+def commission_return(revenue: float, cost: float, rate: float) -> float:
+    """Commission earned per unit of ad spend: ``revenue * rate / cost``.
+
+    1,226 of revenue at 12% against 176 of spend is 0.83 - eighty-three cents
+    back for every dollar out, which is a loss on the ad before anything else
+    is counted.
+    """
+    return round(revenue * rate / cost, 2) if cost else 0.0
+
 
 # How far Google's conversion count may sit from the CRM's order count before it
 # is worth saying out loud. Some gap is normal - different days, different
@@ -574,6 +625,7 @@ def verdicts(
     campaigns: pd.DataFrame,
     sales: Sales | None,
     currency: str = "USD",
+    rate: float | None = None,
 ) -> list[str]:
     """The tables again, in sentences somebody can act on.
 
@@ -586,6 +638,32 @@ def verdicts(
 
     def money(amount: float) -> str:
         return _money(amount, currency)
+
+    keep = commission_rate() if rate is None else rate
+    unit = _money(1, currency).replace("1.00", "1")
+    if sales is not None and sales.revenue:
+        # First, because it is the only line here that is income rather than
+        # turnover: the revenue belongs to the merchants and this is our share.
+        now = commission_return(sales.revenue, spend.cost, keep)
+        before = commission_return(sales.prev_revenue, spend.prev_cost, keep)
+        lines.append(
+            f"**{money(now)} of commission back for every {unit} of ad "
+            f"spend** - {money(sales.revenue)} of revenue at {keep:.0%} "
+            f"against {money(spend.cost)} spent. Break even is "
+            f"{BREAK_EVEN_RETURN:.2f}, so the ads "
+            + (
+                "pay for themselves."
+                if now >= BREAK_EVEN_RETURN
+                else f"are short by {money(BREAK_EVEN_RETURN - now)} on every "
+                f"{unit} spent, before anybody's time, packaging or card fees."
+            )
+        )
+        if before:
+            word = "up" if now > before else "down" if now < before else "flat"
+            lines.append(
+                f"**That return is {word}** on the previous {spend.days} days, "
+                f"which returned {money(before)} per {unit}."
+            )
 
     if sales is not None and sales.orders:
         per_order = spend.cost / sales.orders
@@ -701,7 +779,9 @@ __all__ = [
     "ATTRIBUTION_TOLERANCE",
     "AdsConfig",
     "AdsConfigError",
+    "BREAK_EVEN_RETURN",
     "BREAK_EVEN_ROAS",
+    "DEFAULT_COMMISSION_RATE",
     "DEFAULT_DATASET",
     "LOOKBACK_WINDOWS",
     "MICROS",
@@ -711,6 +791,8 @@ __all__ = [
     "build_client",
     "by_campaign",
     "campaign_names",
+    "commission_rate",
+    "commission_return",
     "customer_ids",
     "daily_stats",
     "load_ads_env",

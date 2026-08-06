@@ -3824,7 +3824,11 @@ def _ads_sales(
     book, currency, _others = orders.single_currency(order_book.orders)
     metrics = orders.window_metrics(book, span, now=end)
     return ads_client.Sales(
-        orders=metrics.paid_orders, revenue=metrics.revenue, currency=currency
+        orders=metrics.paid_orders,
+        revenue=metrics.revenue,
+        currency=currency,
+        prev_orders=metrics.prev_orders,
+        prev_revenue=metrics.prev_revenue,
     )
 
 
@@ -3919,7 +3923,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     money = currency.lower()
     unit = _one(money)
 
-    tiles = st.columns(5)
+    tiles = st.columns(6)
     tiles[0].metric(
         f"Spend ({days}d)",
         _money(spend.cost, money),
@@ -3938,13 +3942,62 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     # Comparable only if the shop takes money in the currency the ads are billed
     # in; otherwise the ratio is one currency divided by another.
     comparable = bool(sales and (not sales.currency or sales.currency == money))
+    # The one figure on this panel that is income rather than turnover, so it is
+    # the one to steer by: the revenue an ad wins belongs to the merchant and
+    # only the commission on it is ours. Break-even is 1.00, not 3x.
+    try:
+        keep = ads_client.commission_rate()
+    except ads_client.AdsConfigError as exc:
+        st.caption(str(exc))
+        keep = ads_client.DEFAULT_COMMISSION_RATE
+    earned = (
+        ads_client.commission_return(sales.revenue, spend.cost, keep)
+        if sales and comparable
+        else 0.0
+    )
+    before = (
+        ads_client.commission_return(sales.prev_revenue, spend.prev_cost, keep)
+        if sales and comparable
+        else 0.0
+    )
     tiles[3].metric(
+        f"Commission per {unit} spent",
+        f"{earned:.2f}" if earned else "\u2014",
+        **_delta_arrow(f"{earned - before:+.2f}" if earned and before else None),
+        help=(
+            f"Revenue in the window at {keep:.0%} commission, divided by spend. "
+            f"{ads_client.BREAK_EVEN_RETURN:.2f} is where the ads pay for "
+            "themselves."
+        ),
+    )
+    tiles[4].metric(
         f"Revenue per {unit} spent",
         f"{sales.revenue / spend.cost:.1f}x"
         if sales and comparable and spend.cost
         else "\u2014",
+        help="Gross, and mostly the merchants': the tile to its left is ours.",
     )
-    tiles[4].metric("Google's own conversions", f"{spend.conversions:,.0f}")
+    tiles[5].metric("Google's own conversions", f"{spend.conversions:,.0f}")
+
+    if earned:
+        goal = ads_client.BREAK_EVEN_RETURN
+        gap = goal - earned
+        standing = (
+            "The ads pay for themselves at this rate."
+            if gap <= 0
+            else f"{_money(gap, money)} short on every {unit}, which is "
+            f"{_money(spend.cost * gap, money)} over these {days} days."
+        )
+        trend = (
+            ""
+            if not before or earned == before
+            else f" {'Up' if earned > before else 'Down'} from "
+            f"{_money(before, money)} in the previous {days} days."
+        )
+        st.markdown(
+            f"### {_money(earned, money)} back for every {unit} of ad spend\n\n"
+            f"**Goal {goal:.2f}.** {standing}{trend}"
+        )
 
     if spend.partial:
         st.warning(
@@ -4001,7 +4054,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         sales = ads_client.Sales(
             orders=sales.orders, revenue=0.0, currency=sales.currency
         )
-    lines = ads_client.verdicts(spend, campaigns, sales, currency)
+    lines = ads_client.verdicts(spend, campaigns, sales, currency, rate=keep)
     if lines:
         with st.expander("What this means", expanded=True):
             st.markdown("\n".join(f"- {line}" for line in lines))
