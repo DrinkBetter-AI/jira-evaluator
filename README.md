@@ -69,7 +69,9 @@ profile when they are not all set.
 | `GOOGLE_ADS_CUSTOMER_ID` | no | every account in the dataset | Restrict the ads figures to one account, e.g. `887-686-4797`; by default every account the transfer writes is added up |
 | `OPENAI_ADMIN_KEY` | no | — | OpenAI **organization admin** key (Organization settings → API keys → Admin keys); needed for the AI line of *Burn*. An ordinary `sk-proj-…` project key is refused by the cost endpoint and is named as such rather than shown as a 401 |
 | `STRIPE_READONLY_API_KEY` | no | — | Stripe **restricted** key (`rk_…`) with read access to balance transactions, charges, disputes and payouts; needed for the payments line of *Burn*. A full `sk_…` secret key can move money and is refused |
-| `GCP_BIGQUERY_READONLY_KEY` | no | — | A BigQuery service-account key as JSON, for reading the Ads dataset from outside GCP; unset on Cloud Run, which authenticates as its own service account |
+| `GCP_BILLING_BQ_PROJECT` | no | the Ads project | GCP project holding the Cloud billing export; only needed when the billing export lives somewhere other than the Ads dataset |
+| `GCP_BILLING_BQ_DATASET` | no | `billing_export` | Dataset the *standard usage cost* billing export writes to; the table inside it is found by name, and until Google writes one the *Cloud costs* section says so |
+| `GCP_BIGQUERY_READONLY_KEY` | no | — | A BigQuery service-account key as JSON, for reading the Ads and billing datasets from outside GCP; unset on Cloud Run, which authenticates as its own service account |
 | `DASHBOARD_PASSWORD`          | no locally, **yes on Cloud Run** | —                                                | Shared password visitors must enter; remembered per browser for 30 days in a signed cookie; leave it unset locally (a copy in `.env` prompts on every run), unset on Cloud Run (`K_SERVICE` present) refuses to serve at all                                     |
 | `DASHBOARD_COOKIE_KEY` | no, but set it when hosted | derived from `DASHBOARD_PASSWORD` with scrypt | Independent secret signing the access cookie, so the cookie is not a verifier for guesses at the password; rotating it signs every browser out without changing the password anyone types |
 
@@ -448,8 +450,12 @@ fully paid with nothing pending.
    "what do the card fees cost us" deserves an answer. It is deliberately not
    reconciled with the CRM's captured revenue above: one is the platform's cut, the
    other the merchants' takings. Disputes are counted, never subtracted — a dispute
-   is money at risk with an outcome still to come. Google Cloud is not here yet and
-   the panel says so instead of presenting the AI bill as the whole of the spend.
+   is money at risk with an outcome still to come. **Cloud costs** is Google's own
+   billing export, by service and net of credits, because a committed-use discount
+   is money never charged: it is usually the largest of the three bills and the one
+   nobody sees until the month ends. The export is not retroactive and backfills over
+   hours, so a window reaching further back than it does is labelled as the shorter
+   period it really is.
    Needs `OPENAI_ADMIN_KEY` and `STRIPE_READONLY_API_KEY`; each line appears on its
    own as the key arrives, and every call is a `GET` under a credential that cannot
    write.

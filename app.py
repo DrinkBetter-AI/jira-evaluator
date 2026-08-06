@@ -4369,7 +4369,7 @@ def _charged_commission(
             return None
         # The same read Burn makes, so the tab pages Stripe once. Disputes are
         # not read here: they are a Burn figure and cost another call.
-        entries, _truncated = _stripe_ledger_cached(STRIPE_LEDGER_DAYS)
+        entries, truncated = _stripe_ledger_cached(STRIPE_LEDGER_DAYS)
         # The fold bounds the window's start but not its end, and today's sales
         # are not in yesterday's spend: without this the return climbs through
         # the day and reads high by a day in every window.
@@ -4383,9 +4383,12 @@ def _charged_commission(
         return None
     if not ledger.earnings and not ledger.prev_earnings:
         return None
-    return ads_client.Commission(
-        now=ledger.net, before=ledger.prev_net, measured=True
-    )
+    # Stripe returns newest first, so a read that hit its ceiling is missing its
+    # oldest days - which are the previous window, and only that. The window's
+    # own commission is whole, so it stands; the comparison is dropped rather
+    # than reported as a rise against a period that was cut short.
+    before = 0.0 if truncated else ledger.prev_net
+    return ads_client.Commission(now=ledger.net, before=before, measured=True)
 
 
 def _render_ads(order_book: orders_client.OrderBook | None) -> None:
@@ -4754,7 +4757,149 @@ def _render_burn() -> None:
         key="burn_window_days",
     )
     _render_ai_costs(days)
+    _render_cloud(days)
     _render_stripe(days)
+
+
+@st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
+def _cloud_costs_cached(
+    days: int,
+) -> tuple[pd.DataFrame, _dt.date | None, _dt.date | None]:
+    """Google Cloud's billing export, and the first and last days it covers.
+
+    Read to the export's own last day rather than to today: it is written in
+    arrears, so the days it has not reached are days it has no charges for, and
+    a window ending now would average real spend over imaginary free days.
+    """
+    config = cost_client.load_billing_env()
+    if config is None:  # pragma: no cover - the caller checks first
+        raise cost_client.CostConfigError("No billing export is configured.")
+    client = cost_client.build_billing_client(config)
+    table = cost_client.billing_table(client, config)
+    if table is None:
+        return pd.DataFrame(), None, None
+    first, last = cost_client.billing_coverage(client, table)
+    if last is None:
+        return pd.DataFrame(), None, None
+    return cost_client.cloud_costs(client, table, days, now=last), first, last
+
+
+def _render_cloud(days: int) -> None:
+    """What Google Cloud charged, service by service.
+
+    The largest bill of the three and the one nobody sees: it arrives monthly,
+    by which time a service left running has been running for a month. Read
+    from the billing export, which is the only place the figure exists per day.
+    """
+    try:
+        config = cost_client.load_billing_env()
+    except cost_client.CostConfigError as exc:
+        st.caption(f"Google Cloud costs are misconfigured: {exc}")
+        return
+    if config is None:
+        st.caption(
+            "Google Cloud spend comes from the billing export. Point the "
+            "dashboard at the project holding it with GCP_BILLING_BQ_PROJECT."
+        )
+        return
+
+    try:
+        with st.spinner("Reading what Google Cloud charged..."):
+            costs, history_start, covered_to = _cloud_costs_cached(days)
+    except cost_client.CostConfigError as exc:
+        st.warning(str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Could not read the billing export: {str(exc)[:200]}")
+        return
+
+    if history_start is None or covered_to is None:
+        st.caption(
+            "The billing export dataset is readable but Google has not written "
+            "to it yet. It writes the first table within a few hours of being "
+            "switched on, and covers nothing from before that."
+        )
+        return
+
+    burn = cost_client.window(costs, days, provider="Google Cloud", now=covered_to)
+    cloud = "Cloud costs"
+    money = burn.currency
+    tiles = st.columns(3)
+    _tile(
+        tiles[0],
+        TAB_BUSINESS,
+        cloud,
+        f"Google Cloud ({days}d)",
+        _money(burn.cost, money),
+        **_delta_arrow(
+            _money_delta(burn.cost_change, money) if burn.prev_cost else None
+        ),
+    )
+    # A day rather than a month, unlike the AI tile beside it: Cloud is billed
+    # by the hour for things left running, and a daily figure is what a service
+    # nobody needed costs while nobody is looking at it.
+    _tile(
+        tiles[1],
+        TAB_BUSINESS,
+        cloud,
+        "A day of Cloud",
+        _money(burn.per_day, money),
+    )
+    _tile(
+        tiles[2],
+        TAB_BUSINESS,
+        cloud,
+        "Dearest service",
+        f"{burn.lines.iloc[0]['line_item']}" if not burn.lines.empty else "\u2014",
+    )
+
+    if not burn.lines.empty:
+        st.dataframe(
+            burn.lines.head(12)
+            .assign(
+                cost=lambda frame: frame["cost"].map(
+                    lambda value: _money(value, money)
+                ),
+                share=lambda frame: frame["share"].map(lambda value: f"{value:.0%}"),
+            )
+            .rename(
+                columns={"line_item": "Service", "cost": "Cost", "share": "Share"}
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+    lines = cost_client.verdicts(burn)
+    # Both ends of the export are said before the verdicts, since either one
+    # changes how every figure above reads.
+    lag = (_dt.date.today() - covered_to).days
+    if lag > 1:
+        lines.insert(
+            0,
+            f"**The export has only reached {covered_to}**, {lag} days behind "
+            "today, so this window ends there rather than now. Google writes it "
+            "in arrears and backfills over hours after it is switched on.",
+        )
+    # It is not retroactive either, so a window starting before it was switched
+    # on is a shorter period wearing a longer label.
+    covered = (covered_to - history_start).days + 1
+    if covered < days:
+        lines.insert(
+            0,
+            f"**The export only goes back to {history_start}**, so these "
+            f"{days} days are {covered} days of charges, and there is no "
+            "earlier period to compare them with.",
+        )
+    elif covered < 2 * days:
+        lines.insert(
+            0,
+            f"**The export only goes back to {history_start}**, so the "
+            f"comparison with the {days} days before this window is built on "
+            f"the {covered - days} of them it holds.",
+        )
+    if lines:
+        with st.expander("What Google Cloud costs", expanded=True):
+            _said(TAB_BUSINESS, cloud, lines)
 
 
 def _render_ai_costs(days: int) -> None:
@@ -4872,9 +5017,8 @@ def _render_ai_costs(days: int) -> None:
     st.caption(
         "OpenAI's own organization cost report, read with an admin key that can "
         "do nothing but read it. Today counts: a provider bills as it goes, so "
-        "the day's charges so far are real money. Google Cloud is not here yet - "
-        "its billing export is what that waits on - so this is the AI line of "
-        "the bill rather than all of it."
+        "the day's charges so far are real money. This is the AI line of the "
+        "bill; Google Cloud is the section below it."
     )
 
 
@@ -4910,7 +5054,10 @@ def _render_stripe(days: int) -> None:
         return
 
     ledger = cost_client.ledger_window(entries, days, disputes=disputes)
-    if not ledger.earnings and entries.empty:
+    # The window's own rows, not the download's: one read now covers two months
+    # for every panel, so a quiet week inside a busy quarter has to still be
+    # able to say that nothing moved.
+    if not ledger.earnings and ledger.first_day is None:
         st.info(
             f"Stripe recorded no money moving in the last {days} days."
             + (
@@ -4972,8 +5119,8 @@ def _render_stripe(days: int) -> None:
         st.warning(
             "Stripe had more ledger entries than one read carries, and it "
             "returns the newest first, so the oldest days of the comparison "
-            "period are missing. Read a shorter window for a figure that "
-            "compares like with like."
+            "period are missing. The window's own figures are whole; the "
+            "change against the period before it understates."
         )
 
     lines = cost_client.stripe_verdicts(ledger)

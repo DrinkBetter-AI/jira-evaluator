@@ -213,8 +213,12 @@ def window(
     return Burn(
         days=days,
         provider=provider,
-        cost=float(current["cost"].sum()),
-        prev_cost=float(previous["cost"].sum()),
+        # To the cent, and adding zero, because neither is a no-op here: a
+        # credit of a hundredth of a cent against nothing else leaves a
+        # fraction below zero, and both it and -0.0 format as "$-0.00" - a
+        # refund of nothing, on a bill that had nothing on it.
+        cost=round(float(current["cost"].sum()), 2) + 0.0,
+        prev_cost=round(float(previous["cost"].sum()), 2) + 0.0,
         currency=money,
         days_with_data=int(current["day"].nunique()),
         first_day=min(current["day"]) if not current.empty else None,
@@ -662,12 +666,163 @@ def _dispute_line(ledger: Ledger) -> str:
     )
 
 
+# Google's own name for the standard usage cost export, suffixed with the
+# billing account's id. Found by prefix rather than configured: the suffix is
+# not something anybody should have to look up, and a project has one of these.
+BILLING_TABLE_PREFIX = "gcp_billing_export_v1_"
+DEFAULT_BILLING_DATASET = "billing_export"
+_BILLING_DATASET_ENV_VAR = "GCP_BILLING_BQ_DATASET"
+_BILLING_PROJECT_ENV_VAR = "GCP_BILLING_BQ_PROJECT"
+# The same credential the Ads dataset is read with: one service account reads
+# both, and on Cloud Run neither is set because the service is the credential.
+_BQ_KEY_ENV_VAR = "GCP_BIGQUERY_READONLY_KEY"
+
+
+@dataclass(frozen=True)
+class Billing:
+    """Where the Cloud billing export lives, and what reads it."""
+
+    project: str
+    dataset: str
+    key_json: str | None = None
+
+
+def load_billing_env() -> Billing | None:
+    """Where to read Google Cloud costs from, or ``None`` when unconfigured.
+
+    Shares the Ads panel's project and credential, since both read BigQuery in
+    the same project under the same service account; only the dataset differs,
+    and it has a default because the export's own console names it.
+    """
+    import ads_client  # noqa: PLC0415 - avoids a cycle at import time
+
+    try:
+        ads = ads_client.load_ads_env()
+    except ads_client.AdsConfigError as exc:
+        raise CostConfigError(str(exc)) from exc
+    project = os.getenv(_BILLING_PROJECT_ENV_VAR, "").strip() or (
+        ads.project if ads else ""
+    )
+    if not project:
+        return None
+    dataset = (
+        os.getenv(_BILLING_DATASET_ENV_VAR, "").strip() or DEFAULT_BILLING_DATASET
+    )
+    return Billing(project, dataset, os.getenv(_BQ_KEY_ENV_VAR, "").strip() or None)
+
+
+def build_billing_client(config: Billing):
+    """A BigQuery client for the billing export, read-only by its credential."""
+    import ads_client  # noqa: PLC0415
+
+    try:
+        return ads_client.build_client(config)
+    except ads_client.AdsConfigError as exc:
+        raise CostConfigError(str(exc)) from exc
+
+
+def billing_table(client, config: Billing) -> str | None:
+    """The export table in the dataset, or ``None`` while none has been written.
+
+    A dataset created for the export but not yet written to is the normal state
+    for hours after it is switched on, and is worth saying rather than reading
+    as an error - as is a billing account whose export was never enabled.
+    """
+    try:
+        tables = list(client.list_tables(f"{config.project}.{config.dataset}"))
+    except Exception as exc:  # noqa: BLE001 - the caller words this for a reader
+        raise CostConfigError(
+            f"Could not read `{config.project}.{config.dataset}`: {str(exc)[:200]}"
+        ) from exc
+    named = sorted(
+        table.table_id
+        for table in tables
+        if table.table_id.startswith(BILLING_TABLE_PREFIX)
+    )
+    if not named:
+        return None
+    return f"{config.project}.{config.dataset}.{named[0]}"
+
+
+def cloud_costs(
+    client, table: str, days: int, now: _dt.date | None = None
+) -> pd.DataFrame:
+    """Daily Google Cloud cost by project and service, over ``2 * days``.
+
+    Net of credits, because that is what the invoice says: a committed-use
+    discount or a free tier is applied against the line it belongs to, and the
+    gross figure would report money that was never charged. Twice the window in
+    one pass, as everywhere else here, since every figure is a comparison.
+    """
+    today = now or _dt.date.today()
+    first = today - _dt.timedelta(days=2 * days - 1)
+    sql = f"""
+        SELECT
+          DATE(usage_start_time) AS day,
+          COALESCE(project.id, 'unattributed') AS project,
+          service.description AS line_item,
+          LOWER(currency) AS currency,
+          SUM(cost + IFNULL(
+            (SELECT SUM(credit.amount) FROM UNNEST(credits) AS credit), 0
+          )) AS cost
+        FROM `{table}`
+        WHERE DATE(usage_start_time) BETWEEN @first AND @last
+        GROUP BY day, project, line_item, currency
+    """
+    from google.cloud import bigquery  # noqa: PLC0415 - optional dependency
+
+    job = client.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("first", "DATE", first),
+                bigquery.ScalarQueryParameter("last", "DATE", today),
+            ]
+        ),
+    )
+    frame = job.result().to_dataframe()
+    if frame.empty:
+        return pd.DataFrame(
+            columns=["day", "project", "line_item", "cost", "currency"]
+        )
+    frame["day"] = pd.to_datetime(frame["day"]).dt.date
+    # A refund or a credit larger than the day's usage nets to zero or below;
+    # neither is a charge, and both would read as a line item on the bill.
+    return frame[frame["cost"] != 0.0].reset_index(drop=True)
+
+
+def billing_coverage(client, table: str) -> tuple[_dt.date | None, _dt.date | None]:
+    """The first and last days the export covers.
+
+    Both ends matter and neither is today. The export is not retroactive, so it
+    holds nothing from before it was switched on: a 30-day figure over a
+    week-old export is a week's spend wearing a month's label. And it is
+    written in arrears and backfills over hours, so its last day trails the
+    calendar - a window ending today would read the missing days as free.
+    """
+    job = client.query(
+        "SELECT MIN(DATE(usage_start_time)) AS first, "
+        f"MAX(DATE(usage_start_time)) AS last FROM `{table}`"
+    )
+    rows = list(job.result())
+    if not rows:
+        return None, None
+    return rows[0]["first"], rows[0]["last"]
+
+
 __all__ = [
+    "Billing",
     "Burn",
     "Ledger",
     "CostConfigError",
+    "DEFAULT_BILLING_DATASET",
     "LOOKBACK_WINDOWS",
+    "billing_coverage",
+    "billing_table",
+    "build_billing_client",
     "by_line",
+    "cloud_costs",
+    "load_billing_env",
     "by_project",
     "cached_share",
     "ledger_window",
