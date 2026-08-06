@@ -124,7 +124,12 @@ def openai_costs(key: str, days: int, now: _dt.date | None = None) -> pd.DataFra
                 rows.append(
                     {
                         "day": day,
-                        "project": result.get("project_name") or "",
+                        # The name where the endpoint returns one, the id where it
+                        # does not: the grouping is by id, and an unnamed project
+                        # is still worth telling apart from the rest of the bill.
+                        "project": result.get("project_name")
+                        or result.get("project_id")
+                        or "",
                         "line_item": result.get("line_item") or "",
                         "cost": float(amount.get("value") or 0.0),
                         "currency": str(amount.get("currency") or "usd").lower(),
@@ -347,6 +352,12 @@ def load_stripe_env() -> str | None:
 # platform runs to hundreds a month, so the reads page.
 _STRIPE_PAGE = 100
 
+# Ten thousand entries, which is a couple of years of this platform's ledger at
+# its current rate. Stripe returns newest first, so a cap that bites drops the
+# *oldest* rows - the period being compared against - and the read says so
+# rather than letting the gap be reported as a rise.
+_STRIPE_MAX_PAGES = 100
+
 # The ledger entries this panel understands. A Connect platform's own income
 # arrives as an application fee taken from the merchant's charge, and Stripe's
 # processing fees are charged on that merchant's account rather than here.
@@ -373,6 +384,8 @@ class Ledger:
     disputes: int
     currency: str
     prev_earnings: float
+    prev_refunds: float
+    prev_fees: float
     first_day: _dt.date | None
     last_day: _dt.date | None
 
@@ -382,12 +395,27 @@ class Ledger:
         return self.earnings - abs(self.refunds) - abs(self.fees)
 
     @property
+    def prev_net(self) -> float:
+        return self.prev_earnings - abs(self.prev_refunds) - abs(self.prev_fees)
+
+    @property
     def earnings_change(self) -> float:
         return self.earnings - self.prev_earnings
 
+    @property
+    def net_change(self) -> float:
+        """Like for like with :attr:`net`, which is what the tile prints.
 
-def stripe_ledger(key: str, days: int, now: _dt.date | None = None) -> pd.DataFrame:
-    """Balance-transaction lines over ``2 * days``, one row per entry.
+        Comparing gross takings under a figure that is net of refunds shows a
+        rise beneath a number that fell, in the month it matters most.
+        """
+        return self.net - self.prev_net
+
+
+def stripe_ledger(
+    key: str, days: int, now: _dt.date | None = None
+) -> tuple[pd.DataFrame, bool]:
+    """Balance-transaction lines over ``2 * days``, and whether any were missed.
 
     The balance transaction is the only object that covers every kind of money
     movement at once - commission, refunds, Stripe's own fees, payouts - so the
@@ -397,7 +425,8 @@ def stripe_ledger(key: str, days: int, now: _dt.date | None = None) -> pd.DataFr
     start = today - _dt.timedelta(days=2 * days - 1)
     rows: list[dict] = []
     after: str | None = None
-    for _ in range(_MAX_PAGES):
+    truncated = False
+    for page in range(_STRIPE_MAX_PAGES):
         payload = _get_balance(key, start, after)
         data = payload.get("data") or []
         for entry in data:
@@ -417,8 +446,12 @@ def stripe_ledger(key: str, days: int, now: _dt.date | None = None) -> pd.DataFr
         after = data[-1].get("id")
         if not after:  # pragma: no cover - defensive: no cursor, no next page
             break
-    return pd.DataFrame(
-        rows, columns=["day", "type", "category", "amount", "fee", "currency"]
+        truncated = page == _STRIPE_MAX_PAGES - 1
+    return (
+        pd.DataFrame(
+            rows, columns=["day", "type", "category", "amount", "fee", "currency"]
+        ),
+        truncated,
     )
 
 
@@ -456,23 +489,41 @@ def stripe_disputes(key: str, days: int, now: _dt.date | None = None) -> int:
 
     Counted rather than summed: a dispute is money at risk with an outcome still
     to come, so adding it to a cost total would report a loss that may not happen.
+    Pages like the ledger: a hundred disputes is a bad month rather than an
+    impossible one, and a single page would report it as exactly a hundred.
     """
     today = now or _dt.date.today()
     start = today - _dt.timedelta(days=days - 1)
-    response = requests.get(
-        f"{STRIPE_BASE_URL}/v1/disputes",
-        params=[("limit", str(_STRIPE_PAGE)), ("created[gte]", str(_midnight(start)))],
-        headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
-        timeout=_TIMEOUT_SECONDS,
-    )
-    if response.status_code in (401, 403):
-        raise CostConfigError(
-            "Stripe refused the restricted key for disputes; give it read access "
-            "to disputes or the panel cannot report them."
+    counted = 0
+    after: str | None = None
+    for _ in range(_STRIPE_MAX_PAGES):
+        params: list[tuple[str, str]] = [
+            ("limit", str(_STRIPE_PAGE)),
+            ("created[gte]", str(_midnight(start))),
+        ]
+        if after:
+            params.append(("starting_after", after))
+        response = requests.get(
+            f"{STRIPE_BASE_URL}/v1/disputes",
+            params=params,
+            headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+            timeout=_TIMEOUT_SECONDS,
         )
-    response.raise_for_status()
-    payload = response.json()
-    return len((payload or {}).get("data") or [])
+        if response.status_code in (401, 403):
+            raise CostConfigError(
+                "Stripe refused the restricted key for disputes; give it read "
+                "access to disputes or the panel cannot report them."
+            )
+        response.raise_for_status()
+        payload = response.json() or {}
+        data = payload.get("data") or []
+        counted += len(data)
+        if not payload.get("has_more") or not data:
+            break
+        after = data[-1].get("id")
+        if not after:  # pragma: no cover - defensive: no cursor, no next page
+            break
+    return counted
 
 
 def ledger_window(
@@ -484,7 +535,9 @@ def ledger_window(
     """Fold Stripe's ledger into this window and the takings of the one before."""
     today = now or _dt.date.today()
     if entries.empty:
-        return Ledger(days, 0.0, 0.0, 0.0, 0.0, disputes, "usd", 0.0, None, None)
+        return Ledger(
+            days, 0.0, 0.0, 0.0, 0.0, disputes, "usd", 0.0, 0.0, 0.0, None, None
+        )
     frame = entries.copy()
     frame["day"] = pd.to_datetime(frame["day"]).dt.date
     start = today - _dt.timedelta(days=days - 1)
@@ -496,12 +549,13 @@ def ledger_window(
     def takings(rows: pd.DataFrame) -> float:
         return float(rows.loc[rows["type"] == _PLATFORM_EARNING, "amount"].sum())
 
+    def refunded(rows: pd.DataFrame) -> float:
+        return float(rows.loc[rows["type"] == _PLATFORM_REFUND, "amount"].sum())
+
     return Ledger(
         days=days,
         earnings=takings(current),
-        refunds=float(
-            current.loc[current["type"] == _PLATFORM_REFUND, "amount"].sum()
-        ),
+        refunds=refunded(current),
         # What Stripe charged this account, which is nil while every charge sits
         # on a connected merchant's books.
         fees=float(current["fee"].sum()),
@@ -509,6 +563,8 @@ def ledger_window(
         disputes=disputes,
         currency=_one_currency(current if not current.empty else frame),
         prev_earnings=takings(previous),
+        prev_refunds=refunded(previous),
+        prev_fees=float(previous["fee"].sum()),
         first_day=min(current["day"]) if not current.empty else None,
         last_day=max(current["day"]) if not current.empty else None,
     )
@@ -526,12 +582,12 @@ def stripe_verdicts(ledger: Ledger) -> list[str]:
         + (f", {_money(abs(ledger.refunds))} refunded" if ledger.refunds else "")
         + ")."
     ]
-    if ledger.prev_earnings:
-        share = ledger.earnings_change / ledger.prev_earnings
+    if ledger.prev_net:
+        share = ledger.net_change / ledger.prev_net
         if abs(share) >= 0.1:
             word = "up" if share > 0 else "down"
             lines.append(
-                f"**Commission is {word} {_money(abs(ledger.earnings_change))} "
+                f"**Commission is {word} {_money(abs(ledger.net_change))} "
                 f"({share:+.0%}) on the {ledger.days} days before.**"
             )
     if not ledger.fees:

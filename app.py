@@ -3495,6 +3495,7 @@ def _business_readable() -> bool:
         amplitude_client.load_amplitude_env,
         ads_client.load_ads_env,
         cost_client.load_openai_env,
+        cost_client.load_stripe_env,
     )
     for load in loaders:
         try:
@@ -4040,12 +4041,13 @@ def _openai_costs_cached(days: int) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
-def _stripe_cached(days: int) -> tuple[pd.DataFrame, int]:
+def _stripe_cached(days: int) -> tuple[pd.DataFrame, bool, int]:
     """Stripe's ledger for the window and the window before, and its disputes."""
     key = cost_client.load_stripe_env()
     if not key:  # pragma: no cover - the caller checks first
         raise cost_client.CostConfigError("No Stripe key is configured.")
-    return cost_client.stripe_ledger(key, days), cost_client.stripe_disputes(key, days)
+    entries, truncated = cost_client.stripe_ledger(key, days)
+    return entries, truncated, cost_client.stripe_disputes(key, days)
 
 
 def _render_burn() -> None:
@@ -4191,7 +4193,7 @@ def _render_stripe(days: int) -> None:
 
     try:
         with st.spinner("Reading Stripe's ledger..."):
-            entries, disputes = _stripe_cached(days)
+            entries, truncated, disputes = _stripe_cached(days)
     except cost_client.CostConfigError as exc:
         st.warning(str(exc))
         return
@@ -4209,10 +4211,10 @@ def _render_stripe(days: int) -> None:
     tiles[0].metric(
         f"Commission kept ({days}d)",
         _money(ledger.net, money),
+        # Compared with the same quantity the tile shows - commission after
+        # refunds - so a heavily refunded period cannot read as a rise.
         **_delta_arrow(
-            _money_delta(ledger.earnings_change, money)
-            if ledger.prev_earnings
-            else None
+            _money_delta(ledger.net_change, money) if ledger.prev_net else None
         ),
     )
     tiles[1].metric("Refunded", _money(abs(ledger.refunds), money))
@@ -4220,6 +4222,14 @@ def _render_stripe(days: int) -> None:
     # the question "what do the card fees cost us" deserves an answer.
     tiles[2].metric("Stripe's own fees", _money(abs(ledger.fees), money))
     tiles[3].metric("Paid out to the bank", _money(abs(ledger.paid_out), money))
+
+    if truncated:
+        st.warning(
+            "Stripe had more ledger entries than one read carries, and it "
+            "returns the newest first, so the oldest days of the comparison "
+            "period are missing. Read a shorter window for a figure that "
+            "compares like with like."
+        )
 
     lines = cost_client.stripe_verdicts(ledger)
     if lines:
