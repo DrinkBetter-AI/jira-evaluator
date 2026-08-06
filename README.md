@@ -261,16 +261,20 @@ engineering numbers would still wait for the shop's.
    in the ad account's own timezone; a window that starts before the transfer's
    history does says how much of it has been loaded, because Google's transfer loads
    one day per run and backfills only when asked, so a new transfer would otherwise
-   report one day of spend as a month of it. Missing *history* is the test rather
-   than missing rows: the stats table has no row for a day on which nothing ran, so
-   an account that stopped spending reads as quiet rather than as a broken feed. The
-   CRM side is taken in the shop's main currency only, and if that is not the
-   currency the ad account bills in, return per unit spent is left blank rather than
-   dividing one currency by another. Costs arrive as micros and are divided out;
-   campaign names come from the newest daily snapshot rather than joined per day,
-   or a campaign renamed mid-window would appear twice with its spend split
-   between the two names. Needs a readable dataset (`GOOGLE_ADS_BQ_DATASET`, default `google_ads`); read-only, every
-   statement is a `SELECT` under a credential holding `bigquery.dataViewer` and
+   report one day of spend as a month of it. Where that history begins is asked of
+   the whole table rather than inferred from the window's rows: the stats table has
+   no row for a day on which nothing ran, so an account that paused would otherwise
+   be reported as a broken feed instead of a quiet one. Money in two currencies is
+   never added — the CRM side is taken in the shop's main currency, only the ad
+   accounts billing in the commonest currency are summed (any others are named in a
+   caption), and if the shop and the ad account disagree, return per unit spent is
+   left blank rather than dividing one currency by another. Every figure, tiles and
+   sentences alike, is quoted in the ad account's own currency. Costs arrive as
+   micros and are divided out; campaign names come from the newest daily snapshot
+   rather than joined per day, or a campaign renamed mid-window would appear twice
+   with its spend split between the two names. Needs a readable dataset
+   (`GOOGLE_ADS_BQ_DATASET`, default `google_ads`); read-only, every statement is a
+   `SELECT` under a credential holding `bigquery.dataViewer` and
    `bigquery.jobUser` and no access to Google Ads itself.
 13. **Product Funnel & Friction** (*Business* tab) — how far visitors get towards
    being one of those orders, read from Amplitude. The default funnel runs product

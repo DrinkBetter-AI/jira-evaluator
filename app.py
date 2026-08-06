@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import collections
 import datetime as _dt
 import hashlib
 import html
 import os
 import re
 import threading
+from typing import NamedTuple
 from urllib.parse import quote, unquote
 
 import numpy as np
@@ -3478,11 +3480,14 @@ BUSINESS_OPENED_KEY = "business_opened"
 
 
 def _business_readable() -> bool:
-    """Whether either the CRM or Amplitude can be read at all.
+    """Whether any of the CRM, Amplitude or Google Ads can be read at all.
 
-    Reading the environment costs nothing, so a deployment with no keys is told
-    so plainly rather than offered a button that goes on to admit it cannot read
-    anything.
+    Reading the environment is close enough to free that a deployment with no
+    keys can be told so plainly rather than offered a button that goes on to
+    admit it cannot read anything. Close enough rather than free: with no project
+    variable set, the Ads loader asks the ambient credentials which project they
+    belong to, which is a metadata call - answered once per process, and swallowed
+    when there is nothing to answer.
     """
     loaders = (
         orders_client.load_medusa_env,
@@ -3716,39 +3721,72 @@ def _render_wines_and_merchants(
 ADS_TTL_SECONDS = 900
 
 
+class AdsRead(NamedTuple):
+    """Everything one pass over the Ads dataset yields."""
+
+    stats: pd.DataFrame
+    names: pd.DataFrame
+    account: str
+    currency: str
+    # The earliest day the transfer has loaded, from the table itself rather than
+    # from these rows: a paused account has no rows for days that are loaded.
+    history_start: _dt.date | None
+    # Accounts left out because they bill in some other currency, named so the
+    # reader knows the total is not the whole dataset.
+    other_currencies: list[str]
+
+
 @st.cache_data(ttl=ADS_TTL_SECONDS, show_spinner=False)
-def _ads_cached(
-    project: str, dataset: str, days: int
-) -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
+def _ads_cached(project: str, dataset: str, days: int) -> AdsRead:
     """Campaign stats by day, campaign names, the account's name and currency.
 
     Keyed on the dataset rather than the credential: the credential is read from
     the environment and does not change while the process lives, and a service
     account key has no business in a cache key.
+
+    A dataset can hold several ad accounts, and their spend can only be added if
+    they bill in the same currency, so the most common currency wins and the rest
+    are set aside - the same rule the order book follows for takings.
     """
     config = ads_client.load_ads_env()
     if config is None:  # pragma: no cover - the caller checks first
         raise ads_client.AdsConfigError("Google Ads figures are not configured.")
     client = ads_client.build_client(config)
     customers = ads_client.customer_ids(client, config)
+    empty = pd.DataFrame()
     if not customers:
-        empty = pd.DataFrame()
-        return empty, empty, "", "USD"
+        return AdsRead(empty, empty, "", "USD", None, [])
+
+    accounts = [
+        (customer_id,) + ads_client.account(client, config, customer_id)
+        for customer_id in customers
+    ]
+    counted = collections.Counter(currency for _, _, currency in accounts)
+    main = counted.most_common(1)[0][0]
+    others = sorted({c for c in counted if c != main})
 
     stats: list[pd.DataFrame] = []
     names: list[pd.DataFrame] = []
     labels: list[str] = []
-    currency = "USD"
-    for customer_id in customers:
+    starts: list[_dt.date] = []
+    for customer_id, name, currency in accounts:
+        if currency != main:
+            continue
         stats.append(ads_client.daily_stats(client, config, customer_id, days))
         names.append(ads_client.campaign_names(client, config, customer_id))
-        name, currency = ads_client.account(client, config, customer_id)
+        loaded = ads_client.loaded_from(client, config, customer_id)
+        if loaded is not None:
+            starts.append(loaded)
         labels.append(name or customer_id)
-    return (
-        pd.concat(stats, ignore_index=True),
-        pd.concat(names, ignore_index=True),
-        ", ".join(labels),
-        currency,
+    return AdsRead(
+        stats=pd.concat(stats, ignore_index=True) if stats else empty,
+        names=pd.concat(names, ignore_index=True) if names else empty,
+        account=", ".join(labels),
+        currency=main,
+        # The latest of the accounts' first days: the window is only wholly
+        # loaded once every account it sums has reached it.
+        history_start=max(starts) if starts else None,
+        other_currencies=others,
     )
 
 
@@ -3760,12 +3798,15 @@ def _ads_sales(
     The same days matter more than they look. Ads figures end yesterday and are
     counted in the account's own timezone, so comparing them against a CRM window
     ending now would divide a full month of spend by a month plus today's orders.
+    The window is the one the spend was summed over, not the days within it that
+    happened to have activity: an account that paused for the first week of the
+    month would otherwise have its orders counted over fewer days than its spend.
     """
-    if order_book is None or spend.last_day is None or spend.first_day is None:
+    if order_book is None or spend.window_end is None:
         return None
-    span = (spend.last_day - spend.first_day).days + 1
+    span = spend.days_loaded
     end = _dt.datetime.combine(
-        spend.last_day + _dt.timedelta(days=1),
+        spend.window_end + _dt.timedelta(days=1),
         _dt.time.min,
         tzinfo=_dt.timezone.utc,
     )
@@ -3777,6 +3818,11 @@ def _ads_sales(
     return ads_client.Sales(
         orders=metrics.paid_orders, revenue=metrics.revenue, currency=currency
     )
+
+
+def _one(currency: str) -> str:
+    """``$1``, or ``1 CAD`` where the currency has no symbol here."""
+    return _money(1, currency).replace("1.00", "1")
 
 
 def _money_delta(change: float, currency: str) -> str:
@@ -3822,9 +3868,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     )
     try:
         with st.spinner("Reading ad spend..."):
-            stats, names, account, currency = _ads_cached(
-                config.project, config.dataset, days
-            )
+            read = _ads_cached(config.project, config.dataset, days)
     except ads_client.AdsConfigError as exc:
         st.warning(str(exc))
         return
@@ -3834,7 +3878,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         )
         return
 
-    if stats.empty:
+    if read.stats.empty:
         st.info(
             "The Ads dataset is readable but holds no spend yet. Google's "
             "transfer loads one day per run and backfills only when asked, so a "
@@ -3842,10 +3886,12 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         )
         return
 
-    spend = ads_client.window(stats, days)
-    campaigns = ads_client.by_campaign(stats, names, days)
+    spend = ads_client.window(read.stats, days, history_start=read.history_start)
+    campaigns = ads_client.by_campaign(read.stats, read.names, days)
     sales = _ads_sales(order_book, spend)
+    currency = read.currency
     money = currency.lower()
+    unit = _one(money)
 
     tiles = st.columns(5)
     tiles[0].metric(
@@ -3867,7 +3913,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     # in; otherwise the ratio is one currency divided by another.
     comparable = bool(sales and (not sales.currency or sales.currency == money))
     tiles[3].metric(
-        "Revenue per $1 spent",
+        f"Revenue per {unit} spent",
         f"{sales.revenue / spend.cost:.1f}x"
         if sales and comparable and spend.cost
         else "\u2014",
@@ -3914,7 +3960,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
                 "conversions": "Conversions",
                 "conversion_value": "Value",
                 "cost_per_conversion": "Cost per conversion",
-                "roas": "Value per $1",
+                "roas": f"Value per {unit}",
                 "budget": "Daily budget",
             }
         ),
@@ -3929,13 +3975,20 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         sales = ads_client.Sales(
             orders=sales.orders, revenue=0.0, currency=sales.currency
         )
-    lines = ads_client.verdicts(spend, campaigns, sales)
+    lines = ads_client.verdicts(spend, campaigns, sales, currency)
     if lines:
         with st.expander("What this means", expanded=True):
             st.markdown("\n".join(f"- {line}" for line in lines))
 
+    if read.other_currencies:
+        st.caption(
+            f"Only the accounts billing in {currency.upper()} are counted here. "
+            f"The dataset also holds {', '.join(read.other_currencies)} accounts, "
+            "whose spend cannot be added to this total."
+        )
+
     st.caption(
-        f"{account or 'Google Ads'}, read from Google's daily transfer into "
+        f"{read.account or 'Google Ads'}, read from Google's daily transfer into "
         f"`{config.dataset}` rather than the Ads API, which needs a manager "
         "account. Spend ends yesterday and is counted in the ad account's own "
         "timezone. 'Conversions' is Google's own count against the day of the "
