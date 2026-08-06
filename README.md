@@ -249,17 +249,34 @@ engineering numbers would still wait for the shop's.
    one-day window would report the shop as worse than it is), and the window ends
    *yesterday*, because today is still being recorded and always reads as a slump.
    *From previous step* is the column to act on — it names the single screen costing
-   the most — while *from the start* is what people mean by "conversion rate".
+   the most — while *from the start* is what people mean by "conversion rate". Each
+   rate is shown against the same window immediately before it, in percentage points
+   rather than percent (2% to 3% is a rise of one point, and calling it fifty percent
+   is how a modest week gets reported as a triumph); a move under a tenth of a point
+   reads as *flat*, and a project with no previous period simply has no column. Under
+   the table, **what each step means** says the same thing in sentences — *2 of every
+   100 people who got as far as the product page went on; 98 did not* — because the
+   person this is for reads it between meetings and should not have to do the
+   arithmetic to find the screen that is losing the shop its customers.
    Beside it, **What went wrong** counts the people who hit an app error, a failed
    add-to-cart, a blocked checkout, a failed payment or an empty search, as a share
    of everyone who visited; one person meeting the same error ten times is one
-   person to apologise to, not ten. **Voss AI** is reach rather than engagement: how
-   many people opened it, asked it something, and got nothing back. Needs
-   `AMPLITUDE_API_KEY` and `AMPLITUDE_SECRET_KEY`; read-only, every call is a
-   `GET /api/2/funnels`. Those two counts are asked as two-step funnels rather than
-   of the segmentation endpoint, whose interval only comes in days, weeks or months:
-   no interval spans an arbitrary window, so a count from it is a sum of buckets, and
-   adding buckets counts somebody who came back next week as two people.
+   person to apologise to, not ten. Below that, **where the errors are** breaks the
+   app errors down by the page they happened on and the message they carried, so
+   "4% of visitors saw an error" becomes something a ticket can be written about.
+   That breakdown alone is counted in *times* rather than people — the one figure
+   here that can honestly be added up across days — and message values are collapsed
+   into families first (`Loading chunk 36187 failed` and the same line with another
+   build hash are one problem), or a single broken deploy fills the table with
+   near-identical rows and pushes the real second-biggest problem off the bottom.
+   **Voss AI** is reach rather than engagement: how many people opened it, asked it
+   something, and got nothing back. Needs `AMPLITUDE_API_KEY` and
+   `AMPLITUDE_SECRET_KEY`; read-only, every call is a `GET /api/2/funnels` bar the
+   breakdowns, which are `GET /api/2/events/segmentation`. The people counts are
+   asked as two-step funnels rather than of the segmentation endpoint, whose interval
+   only comes in days, weeks or months: no interval spans an arbitrary window, so a
+   count from it is a sum of buckets, and adding buckets counts somebody who came
+   back next week as two people.
 13. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
    or unowned: no Jira key anywhere in the title, branch name or description
    (matched against every project key Jira exposes, plus `JIRA_EXTRA_PROJECT_KEYS`,

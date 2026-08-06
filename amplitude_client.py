@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -71,6 +72,15 @@ FRICTION_EVENTS = (
     Step("Checkout blocked", "cart_checkout_blocked"),
     Step("Payment failed", "checkout_payment_failed"),
     Step("Searched, found nothing", "search_zero_results"),
+)
+
+# Where an error happened, and what it said. Grouped by event property because
+# "4% of visitors saw an error" is not a ticket anybody can pick up, whereas
+# "1,557 of them on the product page, all chunk-load failures" is one.
+ERROR_EVENT = "app_error_occurred"
+ERROR_BREAKDOWNS = (
+    ("Where it happened", "page_type"),
+    ("What it said", "message"),
 )
 
 # Whether the thing the company is built on is being used at all.
@@ -171,6 +181,7 @@ def funnel(
     credentials: tuple[str, str, str],
     steps: Sequence[Step],
     days: int,
+    offset_days: int = 0,
 ) -> pd.DataFrame:
     """People reaching each step, with the drop-off between them.
 
@@ -178,10 +189,14 @@ def funnel(
     ``lost``. ``from_previous`` is the number leadership should look at - it
     names the one screen that is costing the most - and ``from_start`` is the
     figure people mean by "conversion rate".
+
+    ``offset_days`` shifts the whole window back, so passing ``days`` again as
+    the offset reads the period immediately before this one: a rate is only
+    news next to the rate before it.
     """
     if len(steps) < 2:
         raise ValueError("A funnel needs at least two steps.")
-    start, end = _window(days)
+    start, end = _window(days, offset_days)
     params: list[tuple[str, str]] = [("e", _event_param(s.event)) for s in steps]
     params += [
         ("start", start),
@@ -242,6 +257,12 @@ def _funnel_counts(payload: dict, expected: int) -> list[int]:
 def _as_ints(values: list) -> list[int]:
     out: list[int] = []
     for value in values:
+        # Some of Amplitude's series carry an object per interval rather than a
+        # bare number, and pd.to_numeric raises on a dict rather than coercing it.
+        if isinstance(value, dict):
+            value = value.get("value", value.get("count"))
+        if isinstance(value, (list, tuple, set)):
+            value = None
         number = pd.to_numeric(value, errors="coerce")
         out.append(0 if pd.isna(number) else int(number))
     return out
@@ -258,6 +279,7 @@ def event_users(
     credentials: tuple[str, str, str],
     events: Sequence[Step],
     days: int,
+    offset_days: int = 0,
 ) -> pd.DataFrame:
     """How many distinct people fired each event in the window.
 
@@ -270,13 +292,20 @@ def event_users(
             {
                 "label": step.label,
                 "event": step.event,
-                "users": _unique_users(credentials, step.event, days),
+                "users": _unique_users(
+                    credentials, step.event, days, offset_days
+                ),
             }
         )
     return pd.DataFrame(rows, columns=["label", "event", "users"])
 
 
-def _unique_users(credentials: tuple[str, str, str], event: str, days: int) -> int:
+def _unique_users(
+    credentials: tuple[str, str, str],
+    event: str,
+    days: int,
+    offset_days: int = 0,
+) -> int:
     """Distinct people firing ``event`` over the whole window, not per day.
 
     Asked as a two-step funnel rather than of the segmentation endpoint, whose
@@ -291,7 +320,7 @@ def _unique_users(credentials: tuple[str, str, str], event: str, days: int) -> i
     The second step is ``_active`` (any event at all) purely because Amplitude
     will not accept a one-step funnel; nothing reads it.
     """
-    start, end = _window(days)
+    start, end = _window(days, offset_days)
     payload = _get(
         credentials,
         "/api/2/funnels",
@@ -313,13 +342,178 @@ def _unique_users(credentials: tuple[str, str, str], event: str, days: int) -> i
         return 0
 
 
+# How many rows of a breakdown are worth reading out. Past this the tail is
+# noise, and the caption says what was left off rather than the table implying
+# these are all of them.
+BREAKDOWN_ROWS = 8
+
+# Amplitude will return every distinct value of a property, and a message field
+# carrying a build hash has thousands of them. This ceiling is on what it sends,
+# not on what is shown: the values are collapsed into families first, so the
+# families are only right if the whole tail arrived.
+_BREAKDOWN_LIMIT = 1000
+
+
+def event_breakdown(
+    credentials: tuple[str, str, str],
+    event: str,
+    prop: str,
+    days: int,
+) -> pd.DataFrame:
+    """Occurrences of ``event`` split by one of its event properties.
+
+    Counted in events rather than people, deliberately: this is the only figure
+    here that can be added up across days without counting somebody twice, and
+    the question a breakdown answers - which of these is the big one - is about
+    volume. The people count next to it stays the deduplicated one.
+
+    Columns: ``value``, ``events``, ordered by ``events``, with values collapsed
+    into families first (see ``collapse_value``) so a hundred build hashes read
+    as one problem.
+    """
+    start, end = _window(days)
+    payload = _get(
+        credentials,
+        "/api/2/events/segmentation",
+        [
+            (
+                "e",
+                json.dumps(
+                    {
+                        "event_type": event,
+                        "group_by": [{"type": "event", "value": prop}],
+                    }
+                ),
+            ),
+            ("m", "totals"),
+            ("start", start),
+            ("end", end),
+            ("i", "1"),
+            ("limit", str(_BREAKDOWN_LIMIT)),
+        ],
+    )
+    rows = _segmentation_totals(payload, event)
+    if not rows:
+        return pd.DataFrame(columns=["value", "events"])
+    frame = pd.DataFrame(rows, columns=["value", "events"])
+    frame["value"] = frame["value"].map(collapse_value)
+    frame = frame.groupby("value", as_index=False)["events"].sum()
+    return frame.sort_values("events", ascending=False).reset_index(drop=True)
+
+
+def _segmentation_totals(payload: dict, event: str) -> list[tuple[str, int]]:
+    """``(label, total)`` per group in an event segmentation response.
+
+    Amplitude returns one series of per-interval numbers per group. Summing them
+    is only valid because the metric asked for is ``totals``; the same sum over
+    unique users would count a person who came back on Tuesday twice.
+
+    A grouping Amplitude did not apply - an event that never carries the
+    property - comes back as the ungrouped shape: one series labelled with the
+    event itself. That is dropped, because a table whose only row is
+    ``app_error_occurred`` claims to be a breakdown and is not one.
+
+    A shape with no series in it at all raises rather than returning nothing: an
+    empty table reads as "this never happened", which is a claim, and it should
+    not be made on the strength of a response nobody recognised.
+    """
+    data = payload.get("data")
+    # The funnels endpoint wraps its one block in a list, so tolerate the same
+    # here rather than reporting a working project as silent.
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        data = data[0]
+    if not isinstance(data, dict):
+        raise AmplitudeConfigError(
+            "Amplitude returned a breakdown this dashboard does not recognise, "
+            "so it has no numbers to show rather than none to report."
+        )
+    series = data.get("series")
+    labels = data.get("seriesLabels")
+    if not isinstance(series, list) or not isinstance(labels, list):
+        raise AmplitudeConfigError(
+            "Amplitude's breakdown carried no series and no labels, so there is "
+            "nothing here to read - which is not the same as nothing happening."
+        )
+    if not series:
+        return []
+    rows: list[tuple[str, int]] = []
+    for index, values in enumerate(series):
+        if index >= len(labels) or not isinstance(values, list):
+            continue
+        label = _series_label(labels[index])
+        if len(series) == 1 and _names_the_event(label, event):
+            return []
+        rows.append((label, sum(_as_ints(values))))
+    return rows
+
+
+def _names_the_event(label: str, event: str) -> bool:
+    """Whether a lone series is the event itself rather than a group of it.
+
+    Compared loosely because the label may be the event type or the display name
+    Amplitude shows for it (``Checkout Started`` for ``checkout_started``), and a
+    row called after the event would be a breakdown that breaks nothing down.
+    """
+    def loosely(text: str) -> str:
+        return text.strip().casefold().replace("_", " ")
+
+    return loosely(label) == loosely(event)
+
+
+def _series_label(label) -> str:
+    """A group's name, however Amplitude wrapped it.
+
+    Grouped responses label a series either with the property value itself or
+    with an ``[event index, value]`` pair, depending on the endpoint.
+    """
+    if isinstance(label, list):
+        parts = [str(part) for part in label if isinstance(part, str)]
+        return parts[-1] if parts else str(label)
+    return str(label)
+
+
+# A hashed build asset, an id, or a number, anywhere in a property value. The
+# hex alternative is deliberately long: a four-character word should stay a word.
+# No boundary at the end, so a unit stuck to a number (30000ms) collapses too.
+_VARIABLE_PART = re.compile(r"\b(?:[0-9a-f]{8,}|\d+)", re.IGNORECASE)
+
+# An address, and the bracketed aside built around one: "(error: https://...)"
+# left behind as "(error:" is worse than not having said it.
+_BRACKETED_URL = re.compile(r"[([{][^()\[\]{}]*https?://[^()\[\]{}]*[)\]}]")
+_URL = re.compile(r"https?://\S+")
+
+
+def collapse_value(value: str) -> str:
+    """One error, however many builds it happened on.
+
+    ``Loading chunk 36187 failed. (error: /_next/static/chunks/36187-2d6f...js)``
+    is the same bug as the same line with a different hash in it, and there are
+    hundreds of those hashes. Grouped raw, the top of the table is ten rows of
+    one problem and the real second-biggest problem is off the bottom.
+    """
+    text = str(value).strip()
+    if not text:
+        return "(not set)"
+    text = text.replace("\n", " ")
+    text = _BRACKETED_URL.sub("", text)
+    text = _URL.sub("", text)
+    text = _VARIABLE_PART.sub("#", text)
+    text = " ".join(text.split()).strip(" .:-()")
+    return text or "(not set)"
+
+
 __all__ = [
     "AI_EVENTS",
     "AmplitudeConfigError",
+    "BREAKDOWN_ROWS",
     "DEFAULT_CONVERSION_DAYS",
     "DEFAULT_FUNNEL",
+    "ERROR_BREAKDOWNS",
+    "ERROR_EVENT",
     "FRICTION_EVENTS",
     "Step",
+    "collapse_value",
+    "event_breakdown",
     "event_users",
     "funnel",
     "load_amplitude_env",
