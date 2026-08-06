@@ -447,6 +447,9 @@ class Ledger:
     # account's own sales. The two are not the same money, and only one of them
     # has Stripe's processing fee charged against it here.
     platform: bool = True
+    # Whether the period before this one is whole. Stripe returns newest first,
+    # so a read that hit its ceiling is missing precisely those older days.
+    comparable: bool = True
 
     @property
     def net(self) -> float:
@@ -590,6 +593,7 @@ def ledger_window(
     days: int,
     disputes: int = 0,
     now: _dt.date | None = None,
+    comparable: bool = True,
 ) -> Ledger:
     """Fold Stripe's ledger into this window and the takings of the one before."""
     today = now or _dt.date.today()
@@ -637,6 +641,7 @@ def ledger_window(
         last_day=max(current["day"]) if not current.empty else None,
         other_currencies=others,
         platform=platform,
+        comparable=comparable,
     )
 
 
@@ -662,7 +667,7 @@ def stripe_verdicts(ledger: Ledger) -> list[str]:
         )
         + ")."
     ]
-    if ledger.prev_net:
+    if ledger.prev_net and ledger.comparable:
         share = ledger.net_change / ledger.prev_net
         if abs(share) >= 0.1:
             word = "up" if share > 0 else "down"
@@ -848,8 +853,18 @@ def cloud_costs(
         )
     frame["day"] = pd.to_datetime(frame["day"]).dt.date
     # A refund or a credit larger than the day's usage nets to zero or below;
-    # neither is a charge, and both would read as a line item on the bill.
+    # neither is a charge, and both would read as a line item on the bill. To
+    # the cent, since a credit that cancels usage leaves a fraction behind that
+    # survives an exact test and prints as "$-0.00" against a service name.
+    frame["cost"] = frame["cost"].astype(float).round(2) + 0.0
     return frame[frame["cost"] != 0.0].reset_index(drop=True)
+
+
+# Below this a day holds no charges worth the name. The export dates rounding
+# corrections at the start of the billing period rather than at the usage they
+# correct, so a table five days old carries June 1st rows worth a billionth of
+# a cent - and a MIN over every row would call that a month of history.
+_BILLING_DAY_FLOOR = 0.01
 
 
 def billing_coverage(client, table: str) -> tuple[_dt.date | None, _dt.date | None]:
@@ -862,8 +877,10 @@ def billing_coverage(client, table: str) -> tuple[_dt.date | None, _dt.date | No
     calendar - a window ending today would read the missing days as free.
     """
     job = client.query(
-        "SELECT MIN(DATE(usage_start_time)) AS first, "
-        f"MAX(DATE(usage_start_time)) AS last FROM `{table}`"
+        "SELECT MIN(day) AS first, MAX(day) AS last FROM ("
+        "SELECT DATE(usage_start_time) AS day, SUM(cost) AS total "
+        f"FROM `{table}` GROUP BY day "
+        f"HAVING ABS(SUM(cost)) >= {_BILLING_DAY_FLOOR})"
     )
     rows = list(job.result())
     if not rows:

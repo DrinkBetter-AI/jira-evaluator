@@ -5103,7 +5103,9 @@ def _render_stripe(days: int) -> None:
         st.warning(f"Could not read Stripe: {str(exc)[:200]}")
         return
 
-    ledger = cost_client.ledger_window(entries, days, disputes=disputes)
+    ledger = cost_client.ledger_window(
+        entries, days, disputes=disputes, comparable=not truncated
+    )
     # The window's own rows, not the download's: one read now covers two months
     # for every panel, so a quiet week inside a busy quarter has to still be
     # able to say that nothing moved.
@@ -5134,7 +5136,9 @@ def _render_stripe(days: int) -> None:
         # Compared with the same quantity the tile shows - commission after
         # refunds - so a heavily refunded period cannot read as a rise.
         **_delta_arrow(
-            _money_delta(ledger.net_change, money) if ledger.prev_net else None
+            _money_delta(ledger.net_change, money)
+            if ledger.prev_net and ledger.comparable
+            else None
         ),
     )
     _tile(
@@ -5169,8 +5173,8 @@ def _render_stripe(days: int) -> None:
         st.warning(
             "Stripe had more ledger entries than one read carries, and it "
             "returns the newest first, so the oldest days of the comparison "
-            "period are missing. The window's own figures are whole; the "
-            "change against the period before it understates."
+            "period are missing. The window's own figures are whole; no change "
+            "against the period before it is drawn, since part of it is unread."
         )
 
     lines = cost_client.stripe_verdicts(ledger)
