@@ -826,7 +826,10 @@ def cloud_costs(
         SELECT
           DATE(usage_start_time) AS day,
           COALESCE(project.id, 'unattributed') AS project,
-          service.description AS line_item,
+          -- Nullable, unlike a service's own name: rounding rows and invoice
+          -- adjustments carry no service, and pandas would drop the group and
+          -- leave the breakdown adding up to less than the total above it.
+          COALESCE(service.description, 'unattributed') AS line_item,
           LOWER(currency) AS currency,
           SUM(cost + IFNULL(
             (SELECT SUM(credit.amount) FROM UNNEST(credits) AS credit), 0
