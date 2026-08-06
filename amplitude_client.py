@@ -257,6 +257,12 @@ def _funnel_counts(payload: dict, expected: int) -> list[int]:
 def _as_ints(values: list) -> list[int]:
     out: list[int] = []
     for value in values:
+        # Some of Amplitude's series carry an object per interval rather than a
+        # bare number, and pd.to_numeric raises on a dict rather than coercing it.
+        if isinstance(value, dict):
+            value = value.get("value", value.get("count"))
+        if isinstance(value, (list, tuple, set)):
+            value = None
         number = pd.to_numeric(value, errors="coerce")
         out.append(0 if pd.isna(number) else int(number))
     return out

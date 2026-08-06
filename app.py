@@ -3925,6 +3925,21 @@ def _render_product_funnel() -> None:
         )
 
 
+def _per_hundred(rate: float) -> str:
+    """``2 of every 100``, without rounding a real few away to none.
+
+    A step that keeps 0.4% of its people keeps somebody; ``round`` would report
+    that as nobody, and the sentence would then contradict the percentage printed
+    two words earlier. Only an exact none is called none.
+    """
+    people = round(rate * 100)
+    if people == 0 and rate > 0:
+        return "fewer than 1 of every 100"
+    if people == 100 and rate < 1:
+        return "more than 99 of every 100"
+    return f"{people} of every 100"
+
+
 def _delta_arrow(change: str | None) -> dict:
     """``st.metric`` arguments that do not call standing still an improvement.
 
@@ -3999,11 +4014,10 @@ def _render_funnel_verdicts(
             )
             continue
         rate = float(row["from_previous"])
-        kept = round(rate * 100)
         sentence = (
             f"**{before} \u2192 {row['step']}** \u2014 {_percent(rate)}: "
-            f"{kept} of every 100 people who got as far as {before} went on; "
-            f"{100 - kept} did not."
+            f"{_per_hundred(rate)} people who got as far as {before} went on; "
+            f"{_per_hundred(1 - rate)} did not."
         )
         trend = _rate_delta(steps, previous, index, "from_previous")
         if trend == "flat":
