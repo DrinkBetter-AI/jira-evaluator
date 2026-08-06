@@ -3970,21 +3970,32 @@ def _money_delta(change: float, currency: str) -> str:
     return f"{sign}{_money(abs(change), currency)}"
 
 
-def _charged_commission(days: int, currency: str) -> ads_client.Commission | None:
-    """What the marketplace actually charged over this window, per Stripe.
+def _charged_commission(
+    spend: ads_client.Spend, currency: str
+) -> ads_client.Commission | None:
+    """What the marketplace actually charged over the days the spend covers.
 
     Commission is the only part of a sale that is income here, and every
     merchant is on their own rate, so the assumed rate is a guess at a figure
-    the payments ledger already holds exactly. ``None`` when Stripe cannot be
-    read, when the account takes no commission at all, or when it bills in a
-    currency the ads are not billed in - in each case a rate is the honest
-    fallback, and the tile says which it used.
+    the payments ledger already holds exactly. Read over exactly the spend's own
+    days for the same reason the CRM is: ad spend ends yesterday and a partial
+    transfer covers fewer days still, so a commission window ending now would
+    divide a month of takings by a fraction of a month of spend.
+
+    ``None`` when Stripe cannot be read, when the account takes no commission at
+    all, or when it bills in a currency the ads are not billed in - in each case
+    a rate is the honest fallback, and the caption says which it used.
     """
-    if not cost_client.load_stripe_env():
+    if spend.window_end is None:
         return None
+    span = spend.days_loaded
     try:
-        entries, _truncated, _disputes = _stripe_cached(days)
-        ledger = cost_client.ledger_window(entries, days)
+        if not cost_client.load_stripe_env():
+            return None
+        # One day either side of the two windows the fold needs, because the
+        # ledger is fetched from today back while the window ends yesterday.
+        entries, _truncated, _disputes = _stripe_cached(span + 1)
+        ledger = cost_client.ledger_window(entries, span, now=spend.window_end)
     except Exception:  # noqa: BLE001 - the ads panel is not the place to report it
         return None
     if not ledger.platform or ledger.currency != currency:
@@ -4110,7 +4121,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     # Merchants sit on different agreements, so a single rate is a guess at a
     # number Stripe already holds: what it actually charged each sale. Read that
     # when it is readable, and fall back to the rate when it is not.
-    commission = _charged_commission(days, money)
+    commission = _charged_commission(spend, money)
     if commission is not None:
         earned = ads_client.earned_return(commission.now, spend.cost)
         before = ads_client.earned_return(commission.before, spend.prev_cost)
