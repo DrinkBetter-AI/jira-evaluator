@@ -53,7 +53,7 @@ profile when they are not all set.
 | `AMPLITUDE_FUNNEL` | no | product page → cart → checkout → payment → order | The funnel's steps as `Label=event_name` pairs, in order, e.g. `Visited=_active,Bought=checkout_order_completed` |
 | `GOOGLE_ADS_BQ_PROJECT` | no | the project the credentials resolve to | GCP project holding the Google Ads data transfer; on Cloud Run the service's own project is right, so this is only for reading another project's dataset |
 | `GOOGLE_ADS_BQ_DATASET` | no | `google_ads` | Dataset the Ads transfer writes to; without a readable one the *Ads Spend & Return* section says so and everything else works |
-| `MARKETPLACE_COMMISSION_RATE` | no | `12%` | The share of a sale the marketplace keeps, as `12`, `12%` or `0.12`; it drives *commission per unit spent*, the one figure on *Ads Spend & Return* that is income rather than turnover |
+| `MARKETPLACE_COMMISSION_RATE` | no | `12%` | The share of a sale the marketplace keeps, as `12`, `12%` or `0.12`. Only a fallback: with `STRIPE_READONLY_API_KEY` set, *commission per unit spent* uses the commission Stripe actually charged, which already reflects each merchant's own rate |
 | `GOOGLE_ADS_CUSTOMER_ID` | no | every account in the dataset | Restrict the ads figures to one account, e.g. `887-686-4797`; by default every account the transfer writes is added up |
 | `OPENAI_ADMIN_KEY` | no | — | OpenAI **organization admin** key (Organization settings → API keys → Admin keys); needed for the AI line of *Burn*. An ordinary `sk-proj-…` project key is refused by the cost endpoint and is named as such rather than shown as a 401 |
 | `STRIPE_READONLY_API_KEY` | no | — | Stripe **restricted** key (`rk_…`) with read access to balance transactions, charges, disputes and payouts; needed for the payments line of *Burn*. A full `sk_…` secret key can move money and is refused |
@@ -284,11 +284,16 @@ engineering numbers would still wait for the shop's.
    micros and are divided out; campaign names come from the newest daily snapshot
    rather than joined per day, or a campaign renamed mid-window would appear twice
    with its spend split between the two names. The headline is **commission per
-   unit spent** — revenue in the window at `MARKETPLACE_COMMISSION_RATE`, divided
-   by spend — because the revenue an ad wins is the merchant's and only the
-   commission on it is income here: 1,226 of revenue at 12% against 176 of spend
-   is 0.84, and 1.00 is where an ad pays for itself. Gross return per unit spent
-   is kept beside it as the ceiling it is. Needs a readable dataset
+   unit spent** — the marketplace's commission over the window, divided by spend —
+   because the revenue an ad wins is the merchant's and only the commission on it
+   is income here; 1.00 is where an ad pays for itself. Merchants are on their own
+   agreements (10%, 12%, 12.5%), so a single rate estimates a figure Stripe holds
+   exactly: where a Stripe key is set and the account takes application fees in
+   the ads' own currency, the numerator is the commission Stripe charged, net of
+   refunds. Without one it falls back to revenue at
+   `MARKETPLACE_COMMISSION_RATE` — 1,226 at 12% against 176 of spend is 0.84 — and
+   the caption under the headline says which of the two is on screen. Gross
+   return per unit spent is kept beside it as the ceiling it is. Needs a readable dataset
    (`GOOGLE_ADS_BQ_DATASET`, default `google_ads`); read-only, every statement is a
    `SELECT` under a credential holding `bigquery.dataViewer` and
    `bigquery.jobUser` and no access to Google Ads itself.

@@ -3970,6 +3970,49 @@ def _money_delta(change: float, currency: str) -> str:
     return f"{sign}{_money(abs(change), currency)}"
 
 
+def _charged_commission(
+    spend: ads_client.Spend, currency: str
+) -> ads_client.Commission | None:
+    """What the marketplace actually charged over the days the spend covers.
+
+    Commission is the only part of a sale that is income here, and every
+    merchant is on their own rate, so the assumed rate is a guess at a figure
+    the payments ledger already holds exactly. Read over exactly the spend's own
+    days for the same reason the CRM is: ad spend ends yesterday and a partial
+    transfer covers fewer days still, so a commission window ending now would
+    divide a month of takings by a fraction of a month of spend.
+
+    ``None`` when Stripe cannot be read, when the account takes no commission at
+    all, or when it bills in a currency the ads are not billed in - in each case
+    a rate is the honest fallback, and the caption says which it used.
+    """
+    if spend.window_end is None:
+        return None
+    span = spend.days_loaded
+    try:
+        if not cost_client.load_stripe_env():
+            return None
+        # The same read Burn makes, so the tab pages Stripe once. Disputes are
+        # not read here: they are a Burn figure and cost another call.
+        entries, _truncated = _stripe_ledger_cached(STRIPE_LEDGER_DAYS)
+        # The fold bounds the window's start but not its end, and today's sales
+        # are not in yesterday's spend: without this the return climbs through
+        # the day and reads high by a day in every window.
+        if not entries.empty:
+            day = pd.to_datetime(entries["day"]).dt.date
+            entries = entries[day <= spend.window_end]
+        ledger = cost_client.ledger_window(entries, span, now=spend.window_end)
+    except Exception:  # noqa: BLE001 - the ads panel is not the place to report it
+        return None
+    if not ledger.platform or ledger.currency != currency:
+        return None
+    if not ledger.earnings and not ledger.prev_earnings:
+        return None
+    return ads_client.Commission(
+        now=ledger.net, before=ledger.prev_net, measured=True
+    )
+
+
 def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     """What the orders cost to win: spend, cost per order and return.
 
@@ -4081,16 +4124,34 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     except ads_client.AdsConfigError as exc:
         st.caption(str(exc))
         keep = ads_client.DEFAULT_COMMISSION_RATE
-    earned = (
-        ads_client.commission_return(sales.revenue, spend.cost, keep)
-        if sales and comparable
-        else 0.0
-    )
-    before = (
-        ads_client.commission_return(sales.prev_revenue, spend.prev_cost, keep)
-        if sales and comparable
-        else 0.0
-    )
+    # Merchants sit on different agreements, so a single rate is a guess at a
+    # number Stripe already holds: what it actually charged each sale. Read that
+    # when it is readable, and fall back to the rate when it is not.
+    commission = _charged_commission(spend, money)
+    if commission is not None:
+        earned = ads_client.earned_return(commission.now, spend.cost)
+        before = ads_client.earned_return(commission.before, spend.prev_cost)
+        basis = (
+            f"Commission Stripe charged in the window, divided by spend. "
+            f"{ads_client.BREAK_EVEN_RETURN:.2f} is where the ads pay for "
+            "themselves."
+        )
+    else:
+        earned = (
+            ads_client.commission_return(sales.revenue, spend.cost, keep)
+            if sales and comparable
+            else 0.0
+        )
+        before = (
+            ads_client.commission_return(sales.prev_revenue, spend.prev_cost, keep)
+            if sales and comparable
+            else 0.0
+        )
+        basis = (
+            f"Revenue in the window at {keep:.0%} commission, divided by spend. "
+            f"{ads_client.BREAK_EVEN_RETURN:.2f} is where the ads pay for "
+            "themselves."
+        )
     _tile(
         tiles[3],
         TAB_BUSINESS,
@@ -4105,11 +4166,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
             if earned and before
             else None
         ),
-        help=(
-            f"Revenue in the window at {keep:.0%} commission, divided by spend. "
-            f"{ads_client.BREAK_EVEN_RETURN:.2f} is where the ads pay for "
-            "themselves."
-        ),
+        help=basis,
     )
     _tile(
         tiles[4],
@@ -4154,6 +4211,15 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
             f"Goal {goal:.2f}. {standing}{trend}",
         )
         st.markdown(headline)
+        st.caption(
+            "Commission here is what Stripe charged across every merchant in "
+            "the window, so the different rates they are on are already in it, "
+            f"rather than {keep:.0%} assumed on captured revenue."
+            if commission is not None
+            else f"Commission is assumed at {keep:.0%} of captured revenue. "
+            "Connect a Stripe key with Application Fees read access and this "
+            "becomes what was actually charged, per merchant agreement."
+        )
 
     if spend.partial:
         st.warning(
@@ -4210,7 +4276,9 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         sales = ads_client.Sales(
             orders=sales.orders, revenue=0.0, currency=sales.currency
         )
-    lines = ads_client.verdicts(spend, campaigns, sales, currency, rate=keep)
+    lines = ads_client.verdicts(
+        spend, campaigns, sales, currency, rate=keep, commission=commission
+    )
     if lines:
         with st.expander("What this means", expanded=True):
             _said(TAB_BUSINESS, ads, lines)
@@ -4249,14 +4317,42 @@ def _openai_costs_cached(days: int) -> pd.DataFrame:
     return cost_client.openai_costs(key, days)
 
 
+# Every panel that wants the ledger asks for the same days of it, so that all of
+# them read one download: the longest window any of them offers, its preceding
+# window, and a day of slack for the ads panel, whose window ends yesterday.
+# Folding a window narrower than this out of the frame costs nothing; paging a
+# busy platform's balance transactions a second time costs a hundred requests.
+STRIPE_LEDGER_DAYS = (
+    max(cost_client.LOOKBACK_WINDOWS + ads_client.LOOKBACK_WINDOWS) + 1
+)
+
+
 @st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
-def _stripe_cached(days: int) -> tuple[pd.DataFrame, bool, int]:
-    """Stripe's ledger for the window and the window before, and its disputes."""
+def _stripe_ledger_cached(days: int) -> tuple[pd.DataFrame, bool]:
+    """Stripe's ledger for the window and the window before.
+
+    Separate from the disputes beside it because two panels want the ledger and
+    only one wants the disputes: a busy platform's ledger runs to a hundred
+    pages, and the ads panel has no use for a chargeback count.
+    """
     key = cost_client.load_stripe_env()
     if not key:  # pragma: no cover - the caller checks first
         raise cost_client.CostConfigError("No Stripe key is configured.")
-    entries, truncated = cost_client.stripe_ledger(key, days)
-    return entries, truncated, cost_client.stripe_disputes(key, days)
+    return cost_client.stripe_ledger(key, days)
+
+
+@st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
+def _stripe_disputes_cached(days: int) -> int:
+    key = cost_client.load_stripe_env()
+    if not key:  # pragma: no cover - the caller checks first
+        raise cost_client.CostConfigError("No Stripe key is configured.")
+    return cost_client.stripe_disputes(key, days)
+
+
+def _stripe_cached(days: int) -> tuple[pd.DataFrame, bool, int]:
+    """Stripe's ledger for the window and the window before, and its disputes."""
+    entries, truncated = _stripe_ledger_cached(STRIPE_LEDGER_DAYS)
+    return entries, truncated, _stripe_disputes_cached(days)
 
 
 def _render_burn() -> None:
