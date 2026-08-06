@@ -4,12 +4,13 @@
 # `gcloud run deploy`.
 #
 # IMPORTANT: this pipeline updates an ALREADY-EXISTING service. The dashboard's
-# secrets/env (DASHBOARD_PASSWORD, JIRA_* / DASHBOARD_GITHUB_TOKEN) must be set
-# when the service is first created (see README "Deploying to Cloud Run") — a
-# `--image` deploy preserves them but does not create them, so a from-scratch
-# service would come up unconfigured and refuse to serve. The scaling flags the
-# app needs for Streamlit's websocket state (--session-affinity, --max-instances 1)
-# ARE reasserted on every deploy below, so those can't drift.
+# secrets/env (DASHBOARD_PASSWORD, JIRA_* / DASHBOARD_GITHUB_TOKEN,
+# POSTGRES_PASSWORD) must be set when the service is first created (see README
+# "Deploying to Cloud Run") — a `--image` deploy preserves them but does not
+# create them, so a from-scratch service would come up unconfigured and refuse to
+# serve. The scaling flags the app needs for Streamlit's websocket state
+# (--session-affinity, --max-instances 1) and the VPC egress the order database
+# needs ARE reasserted on every deploy below, so those can't drift.
 substitutions:
   _SERVICE: jira-dashboard
   _REGION: us-central1
@@ -62,6 +63,15 @@ steps:
       - --session-affinity
       - --max-instances
       - "1"
+      # The order book lives on a private VPC address; without direct VPC egress
+      # the Business tab times out while everything else keeps working.
+      # private-ranges-only leaves Jira/GitHub/Amplitude going straight out.
+      - --network
+      - default
+      - --subnet
+      - default
+      - --vpc-egress
+      - private-ranges-only
       - --quiet
 
 images:

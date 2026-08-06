@@ -27,6 +27,21 @@ Run it with `streamlit run jira_demo_app.py --server.port <port>`. Keep the harn
 never commit it. Cache the generated frame (e.g. a pickle in `/tmp`) so the UI and your expectation
 script read *identical* data.
 
+`main()` now builds an `st.navigation` over two callable pages (Engineering, Business) and runs
+the selected one, so a harness that patches `app.fetch_tickets` and calls `dashboard.main()` still
+works — but only the Engineering page renders unless you click through, and the Business page is
+listed only when the order database or Amplitude is configured. To exercise one page directly,
+call `app._render_engineering_page()` or `app._render_business()` from your own script instead.
+
+**Faster than a browser: `streamlit.testing.v1.AppTest`.** `AppTest.from_file("app.py")` runs the
+whole page headlessly against whatever credentials are in the environment, and `at.exception`,
+`at.error`, `at.subheader` and `at.metric` give you assertions without clicking anything. Widgets
+can be driven directly — `find(at.toggle, "Allow Jira edits").set_value(True).run()`,
+`find(at.radio, "View").set_value("Team").run()`, `find(at.button, "Apply filters").click().run()`
+— which is the cheapest regression net for the scope, filter and write-arming paths, and timing
+`at.run()` measures cold load and rerun cost directly. Note form submit buttons appear in
+`at.button`, not under a `form_submit_button` type.
+
 Requirements: streamlit must be `>=1.49` (older versions crash on `width="stretch"`).
 
 ## Make the synthetic data adversarial
@@ -84,7 +99,13 @@ The scope resolver distinguishes "no filter" from "explicit empty selection". Re
 
 ## Recipes for the write-path / lookup behaviours
 
-**Transition-status sampling.** Make the `fetch_available_transition_statuses` stub log the exact
+**Transition-status sampling.** This lookup only runs when the sidebar's **Allow Jira edits**
+toggle is armed — it costs one Jira request per key and read-only visitors cannot act on the
+answer, so it is not on the default load path. Arm the toggle first or the log file below stays
+empty and every case reads as a pass. When it does run, the keys go out concurrently through
+`JiraClient.get_issue_transitions_bulk`, so the log's *order* means nothing; assert on the set.
+
+Make the `fetch_available_transition_statuses` stub log the exact
 key tuple it receives to `/tmp/transition_keys_<dataset>.json` and return a couple of values that
 exist *only* in the transition response (e.g. `Blocked`, `Done`). Then the log file gives you an
 exact assertion on which keys were sampled, and seeing those transition-only values in a Sprint

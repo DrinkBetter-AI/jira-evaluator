@@ -20,38 +20,50 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+Leave `DASHBOARD_PASSWORD` unset for local runs, and keep it out of `.env` in
+particular: `app.py` loads that file at import, so a copy pasted there to mirror
+the deployment turns the gate on locally and every `streamlit run` opens with a
+password prompt. Local runs are visible only to the person who started them, so
+there is nothing for the gate to protect. If the prompt does appear, entering the
+password once is enough — the browser keeps the signed cookie described under
+[Deploying to Cloud Run](#deploying-to-cloud-run) for thirty days, so restarting
+the server does not ask again. **Sign out** in the sidebar clears it.
+
 ### Configuration
 
 Credentials resolve from environment variables first, and fall back to the YAML
 profile when they are not all set.
 
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `JIRA_BASE_URL` | yes (env mode) | — | Jira site, e.g. `https://vinovoss.atlassian.net` |
-| `JIRA_EMAIL` | yes (env mode) | — | Atlassian account email used for API auth |
-| `JIRA_API_TOKEN` | yes (env mode) | — | Atlassian API token ([create one](https://id.atlassian.com/manage-profile/security/api-tokens)) |
-| `JIRA_CREDS_PATH` | no | `~/.creds/vinovoss.yml` | YAML fallback credentials file |
-| `JIRA_PROFILE` | no | `ML-TEAM-MANAGEMENT` | Profile name inside the YAML file |
-| `JIRA_DASHBOARD_JQL` | no | `statusCategory != Done ORDER BY updated ASC` | Ticket scope the dashboard loads |
-| `JIRA_TEAM_MEMBERS` | no | `Tam,Mehdi Ordikhani` | Comma-separated defaults for the Team scope |
-| `JIRA_MAX_RESULTS` | no | `1000` | Ceiling on tickets fetched per run; the dashboard warns when the result set is truncated |
-| `JIRA_BACKLOG_STATUSES` | no | `Backlog` | Comma-separated statuses hidden when *Include Backlogs* is off |
-| `JIRA_WEEKLY_HOURS` | no | — | Hours per week each person is available, e.g. `Tam=10,Jal=20,Mehdi Ordikhani=40`; drives *Availability vs Commitment* |
-| `JIRA_AUDIT_LOG_PATH` | no | `logs/jira_ticket_changes.jsonl` | Where write-back history is recorded; point at durable storage when containerized |
-| `JIRA_BROWSE_BASE` | no | `<resolved Jira site>/browse` | Base URL for ticket hyperlinks; defaults to the site the credentials resolve to |
-| `JIRA_TEAM_PROJECTS` | no | — | Which Jira projects form each team, e.g. `Marketplace=MB;App=AS,OA;Design=MAR`; used only where the assignee roster has no answer |
-| `JIRA_TEAM_PEOPLE` | no | the VinoVoss roster in `teams.py` | Who sits on each team, e.g. `Design=Robert,Alesya;App=Ali,Farid`; first names match Jira display names, and a `Former staff` team surfaces work still owned by leavers |
-| `JIRA_EXTRA_PROJECT_KEYS` | no | — | Extra project keys a PR may reference, e.g. `MDP,WT2`, for projects the account cannot see; used by *PR Hygiene* |
-| `PR_STALE_AGE_DAYS` | no | `14` | A PR open longer than this counts as stale |
-| `PR_STALE_IDLE_DAYS` | no | `7` | A PR untouched for longer than this counts as stale |
-| `MEDUSA_ADMIN_API_KEY` | no | — | Medusa secret API key (Settings → Secret API Keys in the CRM); without it the *Orders, Revenue & AOV* section says so and everything else works |
-| `MEDUSA_ADMIN_URL` | no | `https://merchants.vinovoss.com` | CRM admin API the order figures are read from |
-| `MEDUSA_STORE_PREFIX_ALIASES` | no | — | Retired product-handle prefixes mapped to a merchant, e.g. `oldprefix=Store Name`; without it that merchant's older sales show as *Unattributed* |
-| `AMPLITUDE_API_KEY` | no | — | Amplitude project API key (Settings → Projects → your project); needed with the secret key for *Product Funnel & Friction* |
-| `AMPLITUDE_SECRET_KEY` | no | — | The same project's secret key; Amplitude's Dashboard API authenticates on the pair, and the API key alone is refused |
-| `AMPLITUDE_API_URL` | no | `https://amplitude.com` | Set to `https://analytics.eu.amplitude.com` for an EU-region project, whose keys the US host refuses |
-| `AMPLITUDE_FUNNEL` | no | product page → cart → checkout → payment → order | The funnel's steps as `Label=event_name` pairs, in order, e.g. `Visited=_active,Bought=checkout_order_completed` |
-| `DASHBOARD_PASSWORD` | no locally, **yes on Cloud Run** | — | Shared password visitors must enter; unset locally means no gate, unset on Cloud Run (`K_SERVICE` present) refuses to serve at all |
+| Variable                      | Required                         | Default                                          | Purpose                                                                                                                                                                |
+| -------------------------------| ----------------------------------| --------------------------------------------------| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `JIRA_BASE_URL`               | yes (env mode)                   | —                                                | Jira site, e.g. `https://vinovoss.atlassian.net`                                                                                                                       |
+| `JIRA_EMAIL`                  | yes (env mode)                   | —                                                | Atlassian account email used for API auth                                                                                                                              |
+| `JIRA_API_TOKEN`              | yes (env mode)                   | —                                                | Atlassian API token ([create one](https://id.atlassian.com/manage-profile/security/api-tokens))                                                                        |
+| `JIRA_CREDS_PATH`             | no                               | `~/.creds/vinovoss.yml`                          | YAML fallback credentials file                                                                                                                                         |
+| `JIRA_PROFILE`                | no                               | `ML-TEAM-MANAGEMENT`                             | Profile name inside the YAML file                                                                                                                                      |
+| `JIRA_DASHBOARD_JQL`          | no                               | `statusCategory != Done ORDER BY updated ASC`    | Ticket scope the dashboard loads                                                                                                                                       |
+| `JIRA_TEAM_MEMBERS`           | no                               | `Tam,Mehdi Ordikhani`                            | Comma-separated defaults for the Team scope                                                                                                                            |
+| `JIRA_MAX_RESULTS`            | no                               | `1000`                                           | Ceiling on tickets fetched per run; the dashboard warns when the result set is truncated                                                                               |
+| `JIRA_PAGE_SIZE`              | no                               | `250`                                            | Tickets per Jira page; every page is a round trip, so lower it only if a tenant rejects the larger page                                                                |
+| `JIRA_BACKLOG_STATUSES`       | no                               | `Backlog`                                        | Comma-separated statuses hidden when *Include Backlogs* is off                                                                                                         |
+| `JIRA_WEEKLY_HOURS`           | no                               | —                                                | Hours per week each person is available, e.g. `Tam=10,Jal=20,Mehdi Ordikhani=40`; drives *Availability vs Commitment*                                                  |
+| `JIRA_AUDIT_LOG_PATH`         | no                               | `logs/jira_ticket_changes.jsonl`                 | Where write-back history is recorded; point at durable storage when containerized                                                                                      |
+| `JIRA_BROWSE_BASE`            | no                               | `<resolved Jira site>/browse`                    | Base URL for ticket hyperlinks; defaults to the site the credentials resolve to                                                                                        |
+| `JIRA_TEAM_PROJECTS`          | no                               | —                                                | Which Jira projects form each team, e.g. `Marketplace=MB;App=AS,OA;Design=MAR`; used only where the assignee roster has no answer                                      |
+| `JIRA_TEAM_PEOPLE`            | no                               | the VinoVoss roster in `teams.py`                | Who sits on each team, e.g. `Design=Robert,Alesya;App=Ali,Farid`; first names match Jira display names, and a `Former staff` team surfaces work still owned by leavers |
+| `JIRA_EXTRA_PROJECT_KEYS`     | no                               | —                                                | Extra project keys a PR may reference, e.g. `MDP,WT2`, for projects the account cannot see; used by *PR Hygiene*                                                       |
+| `PR_STALE_AGE_DAYS`           | no                               | `14`                                             | A PR open longer than this counts as stale                                                                                                                             |
+| `PR_STALE_IDLE_DAYS`          | no                               | `7`                                              | A PR untouched for longer than this counts as stale                                                                                                                    |
+| `POSTGRES_PASSWORD`           | no                               | —                                                | Password for the order database (`MEDUSA_DB_PASSWORD` also accepted); without it the *Orders, Revenue & AOV* section says so and everything else works                 |
+| `POSTGRES_HOST`               | no                               | `db.prod.vinovoss.private`                       | Host holding the `medusa` schema (`MEDUSA_DB_HOST` also accepted). **The dev CRM uses the same schema on `db.dev.vinovoss.private`, so a wrong host reports a different shop rather than failing** |
+| `POSTGRES_DATABASE`           | no                               | `private_dataset`                                | Database the `medusa` schema lives in (`MEDUSA_DB_NAME` also accepted)                                                                                                  |
+| `POSTGRES_USER`               | no                               | `app__vinovoss_backend`                          | Role the order book is read as (`MEDUSA_DB_USER` also accepted); needs only SELECT on the `medusa` schema                                                               |
+| `MEDUSA_STORE_PREFIX_ALIASES` | no                               | —                                                | Retired product-handle prefixes mapped to a merchant, e.g. `oldprefix=Store Name`; without it that merchant's older sales show as *Unattributed*                       |
+| `AMPLITUDE_API_KEY`           | no                               | —                                                | Amplitude project API key (Settings → Projects → your project); needed with the secret key for *Product Funnel & Friction*                                             |
+| `AMPLITUDE_SECRET_KEY`        | no                               | —                                                | The same project's secret key; Amplitude's Dashboard API authenticates on the pair, and the API key alone is refused                                                   |
+| `AMPLITUDE_API_URL`           | no                               | `https://amplitude.com`                          | Set to `https://analytics.eu.amplitude.com` for an EU-region project, whose keys the US host refuses                                                                   |
+| `AMPLITUDE_FUNNEL`            | no                               | product page → cart → checkout → payment → order | The funnel's steps as `Label=event_name` pairs, in order, e.g. `Visited=_active,Bought=checkout_order_completed`                                                       |
+| `DASHBOARD_PASSWORD`          | no locally, **yes on Cloud Run** | —                                                | Shared password visitors must enter; remembered per browser for 30 days in a signed cookie; leave it unset locally (a copy in `.env` prompts on every run), unset on Cloud Run (`K_SERVICE` present) refuses to serve at all                                     |
 
 All three of `JIRA_BASE_URL`, `JIRA_EMAIL` and `JIRA_API_TOKEN` must be present for
 env mode; otherwise the YAML profile is used:
@@ -89,13 +101,18 @@ REGION=us-central1
 printf '%s' '<atlassian-api-token>' | \
   gcloud secrets create jira-api-token --data-file=- --project "$PROJECT"
 
+# And the order database's password, for the Business tab.
+printf '%s' '<order-db-password>' | \
+  gcloud secrets create orders-db-password --data-file=- --project "$PROJECT"
+
 gcloud run deploy jira-dashboard \
   --source . \
   --project "$PROJECT" --region "$REGION" \
   --no-allow-unauthenticated \
   --session-affinity --max-instances 1 \
+  --network default --subnet default --vpc-egress private-ranges-only \
   --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>" \
-  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest"
+  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest,POSTGRES_PASSWORD=orders-db-password:latest"
 
 # Let the whole Workspace domain in (requires IAP or domain-restricted sharing).
 gcloud run services add-iam-policy-binding jira-dashboard \
@@ -112,13 +129,30 @@ gcloud run deploy jira-dashboard \
   --project "$PROJECT" --region "$REGION" \
   --allow-unauthenticated \
   --session-affinity --max-instances 1 \
+  --network default --subnet default --vpc-egress private-ranges-only \
   --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>,DASHBOARD_PASSWORD=<shared-password>" \
-  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest"
+  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest,POSTGRES_PASSWORD=orders-db-password:latest"
 ```
+
+The order database answers on a private VPC address, so without
+`--network default --subnet default` the *Business* tab reports a connection
+timeout while every Jira section keeps working. `--vpc-egress private-ranges-only`
+keeps Jira, GitHub and Amplitude going straight out to the internet rather than
+through the VPC.
 
 A shared password is weaker than Google sign-in: it does not identify who is
 looking, cannot be revoked per person, and only throttles guessing. Treat it as a
 stopgap until the service can live in an Organization behind IAP.
+
+Entering it once is enough for thirty days per browser. The gate sets a
+`jira_dashboard_access` cookie holding an expiry signed with a key derived from
+`DASHBOARD_PASSWORD` — the password itself never reaches the browser, and a
+tampered, expired or stale-password cookie simply fails its check and brings the
+prompt back. This is what stops a refresh, a second tab or a Cloud Run cold start
+from asking again, none of which survive Streamlit's per-websocket session state.
+Two consequences worth knowing: changing `DASHBOARD_PASSWORD` signs everyone out,
+and **Sign out** in the sidebar is the way to end a session early, since closing
+the tab leaves the cookie in place.
 
 The command prints the service URL. Streamlit holds per-user state on a websocket,
 hence `--session-affinity` and the single instance: they keep a viewer's reconnects
@@ -138,27 +172,53 @@ past changes matters:
 
 ## Dashboard layout
 
-The page splits in two at the top: an **Engineering** tab holding everything below,
-and a **Business** tab holding the shop's numbers on their own. They answer a
-different question from ticket and PR health, and the sidebar scope and filters do
-not apply to them. The Business tab holds:
+The dashboard is two pages, chosen from the navigation at the top: **Engineering**
+holds everything below, and **Business** holds the shop's numbers on their own.
+They answer a different question from ticket and PR health, and the sidebar scope
+and filters do not apply to them. Pages rather than tabs because Streamlit runs
+the body of every tab on every rerun whichever one the browser is showing, so a
+reader watching the shop's figures was paying to rebuild twenty engineering
+sections; a page that is not open does not run at all. The Business page is
+listed only when the order database or Amplitude is configured. It holds:
 
 - *Orders, Revenue & AOV* for the last 7 and 30 days, each against the window
   before it.
 - *Best Sellers & Merchants* over a window of 30, 90, 180 or 360 days: the wines
   selling most bottles, and revenue, orders and cancellations per merchant. A
   merchant is read from the handle prefix on each order line (`store_prefix` in
-  the CRM), since the admin API exposes no order-to-store link to an API-key
-  caller; a line whose prefix matches no current merchant is listed as
+  the CRM), since an order carries at most one store link while its lines may come
+  from several; a line whose prefix matches no current merchant is listed as
   *Unattributed* rather than credited to a guess, and
   `MEDUSA_STORE_PREFIX_ALIASES` maps prefixes a merchant has since retired.
 
-The order book is read once for the whole year and then topped up: each refresh
-asks the CRM only for orders placed or changed since the last read, so a year of
-trading does not cost a year of rows every time the page loads. That first read
-waits for a button, because Streamlit runs the body of every tab on every rerun
-whichever one the browser is showing — otherwise a visitor who only wanted the
-engineering numbers would still wait for the shop's.
+The order book is read from the `medusa` schema of the CRM's own Postgres
+database rather than its admin API. The API is not wrong, it is slow: a year of
+orders is ~16 sequential pages and about ten seconds, paid again on every cold
+start, where the same year is one query and about a third of a second. So the
+whole year is re-read outright every 15 minutes and there is no incremental
+top-up to go stale. It no longer waits behind a button: the button existed only
+because tabs run whether or not they are being looked at, and now that this is
+its own page the read happens when somebody asks for it.
+
+Two figures Medusa computes at read time are derived here instead, and are worth
+knowing when a number is queried:
+
+- `status` is *canceled* once `canceled_at` is set, and the stored value otherwise.
+- `payment_status` comes from the order's payment collections and its summary,
+  taking whichever reports more money moved. Neither alone is enough: a capture
+  does not always reconcile into `order_summary`, and a refund does not always
+  land on the payment collection.
+
+Against a live year of prod orders this matches the admin API exactly on order
+count, cancellations, currency, paid-order count and every line item's quantity
+and price. It deliberately differs in two places. Revenue is now **lower**,
+because the API does not return `refunded_total` at all — it silently drops the
+field — so the refund netting the tiles have always described was never actually
+happening; roughly 27 orders a year carry a refund. And ~1.5% of orders that the
+API calls *partially_captured* are counted here as fully paid: those orders have a
+dead `canceled` payment collection alongside a `completed` one, and the API sums
+the dead one into its denominator even though its own summary reports the order
+fully paid with nothing pending.
 
 1. **Scope** (sidebar) — `Organization` (every assignee returned by the JQL), `Team`
    (multi-select pre-filled from `JIRA_TEAM_MEMBERS`), or `Individual` (one assignee).
@@ -230,9 +290,10 @@ engineering numbers would still wait for the shop's.
    not divide into each other - the fourth tile names the gap (cancelled / placed
    but not yet paid). AOV is captured revenue over the paid orders that produced it,
    not over every order placed, which would understate the basket whenever payment
-   capture lags. Read-only: every call is a `GET /admin/orders`, refreshed at most
-   every fifteen minutes and incrementally after the first read. Needs
-   `MEDUSA_ADMIN_API_KEY`. Below it, **Best Sellers & Merchants** ranks wines by
+   capture lags. Anything refunded is netted off. Read-only: every statement is a
+   `SELECT` against the CRM's `medusa` schema on a connection opened read-only,
+   refreshed at most every fifteen minutes. Needs
+   `POSTGRES_PASSWORD`. Below it, **Best Sellers & Merchants** ranks wines by
    bottles sold - not by revenue, which would answer which bottle is dearest
    rather than which is wanted - and breaks revenue, orders and cancellations out
    per merchant, over 30, 90, 180 or 360 days. Bottles count what customers chose,
@@ -344,6 +405,82 @@ engineering numbers would still wait for the shop's.
    disables the table rather than guessing. A declaration written as a bare first
    name that matches two people in Jira is withheld from both rather than granted
    twice, which shows as *Ambiguous roster name*; spell it as the full display name.
+
+## How the page loads
+
+The dashboard is a live view over three remote systems, so almost all of what a
+reader waits for is network latency rather than computation — deriving every
+health field for a thousand tickets takes about a tenth of a second. A cold load
+went from ~30s to ~12s by removing waiting, not work:
+
+- **The opening reads go out together.** Nine Jira queries and five GitHub ones
+  depend on none of each other, so `_gather` runs them on a thread pool and the
+  wait is the slowest of them rather than their sum. Each worker is handed the
+  script's run context so the `st.cache_data` wrappers still see the session's
+  cache. A read that fails returns `None` and costs its own section, not the page.
+- **One pooled, retrying HTTP session per credential set.** Every call used to
+  open its own `requests.Session`, and so paid a fresh TLS handshake; the pool is
+  shared across threads, and retries cover 429 and 5xx on idempotent methods only,
+  so a write can never be replayed.
+- **The Sprint Capacity status dropdown is asked for only when edits are armed.**
+  Jira answers about legal transitions one issue at a time, and fifty of those in
+  series was ~16s — the single most expensive thing on the page, spent widening a
+  dropdown a read-only visitor cannot use. Armed, the same lookups run
+  concurrently and take about two seconds.
+- **Each query asks for the fields it renders.** The snapshot lists need five
+  fields, and the resolved list feeds one pie and needs one, rather than all
+  seventeen defaults including every ticket's full description.
+- **Caches refresh in the background.** When a TTL lapses the reader gets the
+  slightly stale answer immediately while the replacement is fetched behind them,
+  instead of one unlucky visitor every five minutes paying the cold start for
+  everybody. *Refresh data* clears the caches for the page being looked at — not
+  every cache in the process, which used to throw away the year of orders to
+  refresh a ticket count.
+
+While the reads are outstanding the page shows a progress bar. It is paced by the
+clock rather than by how many queries have answered: a dozen of the fourteen come
+back inside the first second and the open-ticket query holds the page for several
+more, so a bar driven by the count rushes to nine tenths and then looks broken for
+most of the wait. The label alongside it carries the true count, the bar stops at
+95% until the last answer lands, and no duration is promised — a slow Jira makes
+the bar wait rather than lie. A warm page answers in milliseconds and shows no bar
+at all.
+
+## How fresh the numbers are
+
+Everything is read live and cached briefly; nothing is precomputed or exported.
+*Refresh data* forces the page being looked at to re-read now.
+
+| Section | Read from | Behind by |
+| --- | --- | --- |
+| Tickets, resolved/created/triage counts, PRs | Jira and GitHub APIs | up to 5 minutes |
+| Sprint statuses, priorities, user directory | Jira API | 10 minutes; the project list, an hour |
+| *Orders, Revenue & AOV*, *Best Sellers & Merchants* | the CRM's own Postgres tables | up to 15 minutes |
+| *Product Funnel & Friction* | Amplitude Dashboard API | **a day**, by design |
+
+The order book is the freshest thing here in kind, not just in minutes: it is a
+direct read of the CRM's tables, so an order is visible the moment the shop
+commits it, and the only delay is the 15-minute cache. The funnel is different —
+its window deliberately ends *yesterday*, because today is still being written and
+a half-finished day reads as a slump. So the funnel is never a report on today,
+whatever the cache does, and Amplitude's own ingestion lag sits on top of that.
+
+Caches refresh in the background, which trades a little more staleness for never
+making a reader wait: once a TTL lapses the next visitor is served the old answer
+straight away while the replacement is fetched behind them, so a figure can be
+slightly older than the interval above until that refresh lands.
+
+Interaction cost is handled separately, because Streamlit reruns the whole script
+on every widget change:
+
+- Sections that own their widgets (*Ticket Composition*, *Teams*, *Epics*,
+  *Backlog Cleanup*, *Assignee Breakdown*, *Pull Requests*, *PR Hygiene*, *Ticket
+  Quality*, *Prioritized Queue*, *Estimate Policy*, *Stale & Abandoned*) are
+  `st.fragment`s, so clicking inside one rebuilds that section instead of all
+  twenty.
+- The sidebar filters sit behind *Apply filters*: narrowing by status, priority
+  and two sliders is one rerun rather than four. Scope stays outside the form
+  because it decides which widget appears beneath it.
 
 ## Metric definitions
 

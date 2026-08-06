@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 import re
-from typing import Any, Iterable
+import threading
+from typing import Any, Iterable, Iterator
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import yaml
 
 from write_access import require_writes_enabled
+
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_FIELDS = [
@@ -262,6 +271,54 @@ def load_jira_profile(
     }
 
 
+# How many Jira requests may be in flight at once. Jira rate-limits per account,
+# so this is deliberately modest: it is enough to hide latency on the fan-out
+# reads without turning a page load into a burst Jira answers with 429s.
+MAX_PARALLEL_REQUESTS = 8
+
+# One pooled session per credential set, shared by every JiraClient instance and
+# every thread. Each call used to build its own Session, which meant a fresh TLS
+# handshake per request - measurably a third of the cost of a per-key lookup, and
+# the dashboard makes dozens of those on a cold load.
+_SESSION_CACHE: dict[tuple[str, str, str], requests.Session] = {}
+_SESSION_LOCK = threading.Lock()
+
+
+def _build_session(email: str, api_token: str) -> requests.Session:
+    """A keep-alive session that retries the failures worth retrying.
+
+    Retries cover the transient side of Jira (429 and the 5xx family) on
+    idempotent methods only, so a write that POSTs cannot be replayed into a
+    duplicate. ``respect_retry_after_header`` means a rate-limited burst waits
+    as long as Jira asks rather than hammering it again immediately.
+    """
+    session = requests.Session()
+    session.auth = (email, api_token)
+    session.headers.update({"Accept": "application/json"})
+    retry = Retry(
+        total=2,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(
+        pool_connections=MAX_PARALLEL_REQUESTS,
+        pool_maxsize=MAX_PARALLEL_REQUESTS,
+        max_retries=retry,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def close_pooled_sessions() -> None:
+    """Drop every pooled session. Only useful to tests and to a clean shutdown."""
+    with _SESSION_LOCK:
+        for session in _SESSION_CACHE.values():
+            session.close()
+        _SESSION_CACHE.clear()
+
+
 @dataclass
 class JiraClient:
     base_url: str
@@ -294,11 +351,23 @@ class JiraClient:
             cfg = load_jira_profile(creds_path=creds_path, profile_name=profile_name)
         return cls(**cfg)
 
-    def _session(self) -> requests.Session:
-        session = requests.Session()
-        session.auth = (self.email, self.api_token)
-        session.headers.update({"Accept": "application/json"})
-        return session
+    @contextmanager
+    def _session(self) -> Iterator[requests.Session]:
+        """Lend out the pooled session for this credential set.
+
+        A context manager rather than a plain getter so that every existing
+        ``with self._session() as session:`` call site keeps working - but the
+        session is lent, not owned, so leaving the block must not close it and
+        throw away the connection pool the next call wants to reuse.
+        """
+        key = (self.base_url, self.email, self.api_token)
+        with _SESSION_LOCK:
+            session = _SESSION_CACHE.get(key)
+            if session is None:
+                session = _build_session(self.email, self.api_token)
+                _SESSION_CACHE[key] = session
+                logger.debug("Opened pooled Jira session for %s", self.base_url)
+        yield session
 
     def approximate_count(self, jql: str) -> int:
         """Jira's fast issue count for a JQL, independent of paging.
@@ -433,7 +502,9 @@ class JiraClient:
         require_writes_enabled()
         url = f"{self.base_url}/rest/api/3/issue/{key}"
         with self._session() as session:
-            session.headers["Content-Type"] = "application/json"
+            # No explicit Content-Type: ``json=`` sets it per request, and the
+            # session is shared between threads, so mutating its headers here
+            # would reach into requests it has nothing to do with.
             response = session.put(url, json={"fields": fields}, timeout=30)
         if response.status_code not in {200, 204}:
             raise RuntimeError(
@@ -450,7 +521,6 @@ class JiraClient:
         url = f"{self.base_url}/rest/agile/1.0/sprint/{normalized_sprint_id}/issue"
         payload = {"issues": issue_keys}
         with self._session() as session:
-            session.headers["Content-Type"] = "application/json"
             response = session.post(url, json=payload, timeout=30)
 
         if response.status_code not in {200, 201, 204}:
@@ -467,7 +537,6 @@ class JiraClient:
         url = f"{self.base_url}/rest/agile/1.0/backlog/issue"
         payload = {"issues": issue_keys}
         with self._session() as session:
-            session.headers["Content-Type"] = "application/json"
             response = session.post(url, json=payload, timeout=30)
 
         if response.status_code not in {200, 201, 204}:
@@ -553,12 +622,40 @@ class JiraClient:
             if t.get("id")
         ]
 
+    def get_issue_transitions_bulk(
+        self, keys: Iterable[str]
+    ) -> dict[str, list[dict[str, str]]]:
+        """Transitions for many keys at once, asked for concurrently.
+
+        Jira has no endpoint that answers for more than one issue, so the only
+        way to make this cheaper is to stop waiting for each answer before
+        asking the next question: fifty keys took about sixteen seconds in
+        series and roughly two over the pooled session.
+
+        A key Jira refuses is dropped rather than raised, because this feeds a
+        dropdown's options: one unreadable ticket should cost its own row's
+        suggestions and not the whole editor.
+        """
+        unique_keys = sorted({str(key).strip() for key in keys if str(key).strip()})
+        if not unique_keys:
+            return {}
+
+        def _one(key: str) -> tuple[str, list[dict[str, str]]]:
+            try:
+                return key, self.get_issue_transitions(key)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not read transitions for %s: %s", key, exc)
+                return key, []
+
+        workers = min(MAX_PARALLEL_REQUESTS, len(unique_keys))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return dict(pool.map(_one, unique_keys))
+
     def transition_issue(self, key: str, transition_id: str) -> None:
         """Transition a Jira issue using a transition id."""
         require_writes_enabled()
         url = f"{self.base_url}/rest/api/3/issue/{key}/transitions"
         with self._session() as session:
-            session.headers["Content-Type"] = "application/json"
             response = session.post(
                 url,
                 json={"transition": {"id": transition_id}},

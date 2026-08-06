@@ -3,3 +3,5 @@ requests>=2.31.0
 streamlit>=1.49.0
 plotly>=5.20.0
 pyyaml>=6.0.0
+python-dotenv>=1.0.0
+psycopg2-binary>=2.9.9
