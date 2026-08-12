@@ -78,6 +78,7 @@ from hygiene import (
 import ads_client
 import cost_client
 import amplitude_client
+import merchant_client
 import orders
 import orders_client
 from prioritization import add_priority_score, assignee_rollup
@@ -3863,6 +3864,7 @@ def _business_readable() -> bool:
         cost_client.load_openai_env,
         cost_client.load_stripe_env,
         cost_client.load_billing_env,
+        merchant_client.load_merchant_env,
     )
     for load in loaders:
         try:
@@ -3873,6 +3875,7 @@ def _business_readable() -> bool:
             amplitude_client.AmplitudeConfigError,
             ads_client.AdsConfigError,
             cost_client.CostConfigError,
+            merchant_client.MerchantConfigError,
         ):
             # Configured but wrongly - which is still worth rendering, because
             # the section is where the error message belongs.
@@ -3892,6 +3895,10 @@ def _render_business() -> None:
     business_slot = st.columns([5, 1])[1]
     _prefetch_ads()
     order_book = _render_business_sections()
+    st.divider()
+    # Straight after what sold: whether the shop is dearer than the rest of the
+    # market is the first thing to ask of a week that sold less than the last.
+    _render_price_benchmark()
     st.divider()
     # After the shop's own figures and before the funnel: what the orders cost to
     # win only means anything beside the orders themselves.
@@ -4088,6 +4095,151 @@ def _render_wines_and_merchants(
                 f"{', '.join(code.upper() for code in other_currencies)} is left "
                 "out rather than added to a total in another currency."
             )
+
+
+# Merchant Center recomputes benchmarks daily, so a read held for six hours is
+# as fresh as the data can be, and the catalogue is tens of thousands of rows
+# fetched over HTTP - not a read to repeat because somebody moved the window on
+# another panel.
+BENCHMARK_TTL_SECONDS = 6 * 3600
+
+# How many of the dearest offers to name. Enough for a pricing conversation to
+# start with, few enough that the panel is not a spreadsheet.
+_WORST_OFFERS = 15
+
+
+class BenchmarkRead(NamedTuple):
+    """The catalogue's prices against the market, and Google's advice on them."""
+
+    prices: merchant_client.Prices
+    insights: merchant_client.Insights
+
+
+@st.cache_data(ttl=BENCHMARK_TTL_SECONDS, show_spinner=False)
+def _price_benchmark_cached(account: str) -> BenchmarkRead:
+    """What Merchant Center says the shop's prices look like against the market.
+
+    Keyed on the account rather than on the config, so that Streamlit hashes a
+    string: the credential is read again inside, as the billing client is, and
+    never becomes part of a cache key.
+    """
+    config = merchant_client.load_merchant_env()
+    if config is None or config.account != account:
+        raise merchant_client.MerchantConfigError(
+            "The Merchant Center configuration changed while it was being read."
+        )
+    token = merchant_client.access_token(config)
+    prices = merchant_client.price_gaps(config, token)
+    # Suggestions are a second report and a nice-to-have: an account with price
+    # competitiveness but no price insights still gets the headline.
+    try:
+        insights = merchant_client.price_insights(config, token)
+    except Exception:  # noqa: BLE001
+        insights = merchant_client.Insights(pd.DataFrame())
+    return BenchmarkRead(prices, insights)
+
+
+def _render_price_benchmark() -> None:
+    """How the shop's prices compare with everyone else selling the same wine.
+
+    The order book cannot answer this: it holds what the shop charged, not what
+    the shop next door charged for the same bottle. Google works that out across
+    every merchant in Shopping and calls it a benchmark, and the gap to it is the
+    difference between a product page that sells and one that is a price check
+    for somebody else's shop.
+    """
+    section = "Price competitiveness"
+    st.subheader(section)
+    try:
+        config = merchant_client.load_merchant_env()
+    except merchant_client.MerchantConfigError as exc:
+        st.caption(f"Price benchmarks are misconfigured: {exc}")
+        return
+    if config is None:
+        st.caption(
+            "Price benchmarks come from Merchant Center. Set GOOGLE_MERCHANT_ID "
+            "to the account id, and add the dashboard's service account under "
+            "Settings, People and access with read access."
+        )
+        return
+
+    try:
+        with st.spinner("Reading Merchant Center's price benchmarks..."):
+            read = _price_benchmark_cached(config.account)
+    except merchant_client.MerchantConfigError as exc:
+        st.warning(str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Could not read the price benchmarks: {str(exc)[:200]}")
+        return
+
+    prices, insights = read.prices, read.insights
+    money = prices.currency
+    tiles = st.columns(3)
+    _tile(
+        tiles[0],
+        TAB_BUSINESS,
+        section,
+        "Dearer than the market",
+        f"{prices.dear_share:.0%}" if prices.counted else "\u2014",
+    )
+    _tile(
+        tiles[1],
+        TAB_BUSINESS,
+        section,
+        "Typical gap",
+        f"{prices.median_gap:+.0%}" if prices.counted else "\u2014",
+    )
+    _tile(
+        tiles[2],
+        TAB_BUSINESS,
+        section,
+        "Priced products compared",
+        f"{prices.counted:,}",
+    )
+
+    if prices.counted:
+        st.dataframe(
+            prices.worst.head(_WORST_OFFERS)
+            .assign(
+                price=lambda frame: frame["price"].map(
+                    lambda value: _money(value, money)
+                ),
+                benchmark=lambda frame: frame["benchmark"].map(
+                    lambda value: _money(value, money)
+                ),
+                gap=lambda frame: frame["gap"].map(lambda value: f"{value:+.0%}"),
+            )[["title", "brand", "price", "benchmark", "gap"]]
+            .rename(
+                columns={
+                    "title": "Wine",
+                    "brand": "Brand",
+                    "price": "Our price",
+                    "benchmark": "Market",
+                    "gap": "Gap",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+    if prices.other_currencies:
+        st.caption(
+            f"These are the {money.upper()} prices only; the feed also quotes "
+            + ", ".join(code.upper() for code in prices.other_currencies)
+            + ", which is compared separately rather than mixed in."
+        )
+    st.caption(
+        "Google's benchmark is the median price other merchants charge for the "
+        f"same product, read from Merchant Center for {merchant_client.as_of()}. "
+        "Products no other merchant sells have no benchmark and are left out "
+        "rather than counted as competitive."
+    )
+
+    lines = merchant_client.verdicts(prices, insights)
+    if lines:
+        with st.expander("What the prices say", expanded=True):
+            _said(TAB_BUSINESS, section, lines)
 
 
 # Ad figures are a day old the moment they exist: the grain is a day, the last
@@ -6823,6 +6975,9 @@ def _clear_page_caches(page_title: str) -> None:
         _cloud_costs_cached,
         _stripe_ledger_cached,
         _stripe_disputes_cached,
+        # Benchmarks move once a day, but a reader who has just changed a price
+        # and pressed Refresh is asking about that price.
+        _price_benchmark_cached,
     )
     for cached in business if page_title == BUSINESS_PAGE_TITLE else engineering:
         cached.clear()
