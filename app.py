@@ -4643,6 +4643,7 @@ def _render_price_benchmark() -> None:
 
     read = read._replace(sales=_offer_sales())
     prices, insights = read.prices, read.insights
+    filtered_to_nothing = False
     # Whose wine each offer is, read once for the whole catalogue so the same
     # names can both filter it and label the rows below.
     named = _offer_merchants(prices.offers)
@@ -4661,7 +4662,8 @@ def _render_price_benchmark() -> None:
         )
         prices = _one_merchant(prices, named, chosen)
         read = read._replace(prices=prices)
-        if chosen != _EVERY_MERCHANT and not prices.counted:
+        filtered_to_nothing = chosen != _EVERY_MERCHANT and not prices.counted
+        if filtered_to_nothing:
             st.caption(
                 f"None of {chosen}'s wines has a benchmark: Google publishes "
                 "one only where enough other merchants sell the same product."
@@ -4759,8 +4761,14 @@ def _render_price_benchmark() -> None:
         "rather than counted as competitive."
     )
 
-    lines = merchant_client.verdicts(prices, insights, read.demand)
-    lines += merchant_client.sales_verdicts(prices, read.demand, read.sales)
+    # A merchant filter that kept nothing is explained above, in terms of that
+    # merchant; the verdicts would say it of the whole feed, which has
+    # thousands of benchmarked wines in it.
+    lines = [] if filtered_to_nothing else merchant_client.verdicts(
+        prices, insights, read.demand
+    )
+    if not filtered_to_nothing:
+        lines += merchant_client.sales_verdicts(prices, read.demand, read.sales)
     if lines:
         with st.expander("What the prices say", expanded=True):
             _said(TAB_BUSINESS, section, lines)
@@ -7517,6 +7525,9 @@ def _clear_page_caches(page_title: str) -> None:
         # And whose listing each of those prices is: a merchant renamed or a
         # product re-slugged would otherwise keep its old name for a day.
         _offer_merchants_cached,
+        # And what those prices sold: the evidence beside them is only worth
+        # refreshing if the bottles move with it.
+        _offer_sales_cached,
     )
     for cached in business if page_title == BUSINESS_PAGE_TITLE else engineering:
         cached.clear()
