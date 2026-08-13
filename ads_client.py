@@ -180,7 +180,7 @@ def load_ads_env() -> AdsConfig | None:
         project = project or str(info.get("project_id", "")).strip()
 
     if not project:
-        project = _default_project()
+        project = default_project()
     if not project:
         return None
     if customer and not _CUSTOMER_ID_PATTERN.match(customer):
@@ -200,7 +200,17 @@ def load_ads_env() -> AdsConfig | None:
     )
 
 
-def _default_project() -> str:
+def valid_project(project: str) -> bool:
+    """Whether this is a project id, and so safe in a table reference."""
+    return bool(_PROJECT_PATTERN.match(project))
+
+
+def valid_name(name: str) -> bool:
+    """Whether this is a dataset or table name, and so safe in a reference."""
+    return bool(_NAME_PATTERN.match(name))
+
+
+def default_project() -> str:
     """The project Google's own libraries would default to, if any.
 
     On Cloud Run this is the project the service runs in, which is where the
@@ -824,6 +834,7 @@ __all__ = [
     "commission_rate",
     "commission_return",
     "customer_ids",
+    "default_project",
     "daily_stats",
     "earned_return",
     "load_ads_env",

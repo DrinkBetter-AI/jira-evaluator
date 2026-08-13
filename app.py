@@ -78,6 +78,7 @@ from hygiene import (
 import ads_client
 import cost_client
 import amplitude_client
+import merchant_client
 import orders
 import orders_client
 from prioritization import add_priority_score, assignee_rollup
@@ -3846,7 +3847,7 @@ def _money(amount: float, currency: str = "usd") -> str:
 
 
 def _business_readable() -> bool:
-    """Whether any of the CRM, Amplitude, Google Ads or the cost APIs can be read.
+    """Whether the CRM, Amplitude, Ads, the cost APIs or the billing export read.
 
     Reading the environment is close enough to free that a deployment with no
     keys keeps the Business page out of the navigation entirely, rather than
@@ -3862,6 +3863,8 @@ def _business_readable() -> bool:
         ads_client.load_ads_env,
         cost_client.load_openai_env,
         cost_client.load_stripe_env,
+        cost_client.load_billing_env,
+        merchant_client.load_merchant_env,
     )
     for load in loaders:
         try:
@@ -3872,6 +3875,7 @@ def _business_readable() -> bool:
             amplitude_client.AmplitudeConfigError,
             ads_client.AdsConfigError,
             cost_client.CostConfigError,
+            merchant_client.MerchantConfigError,
         ):
             # Configured but wrongly - which is still worth rendering, because
             # the section is where the error message belongs.
@@ -3891,6 +3895,10 @@ def _render_business() -> None:
     business_slot = st.columns([5, 1])[1]
     _prefetch_ads()
     order_book = _render_business_sections()
+    st.divider()
+    # Straight after what sold: whether the shop is dearer than the rest of the
+    # market is the first thing to ask of a week that sold less than the last.
+    _render_price_benchmark()
     st.divider()
     # After the shop's own figures and before the funnel: what the orders cost to
     # win only means anything beside the orders themselves.
@@ -4087,6 +4095,159 @@ def _render_wines_and_merchants(
                 f"{', '.join(code.upper() for code in other_currencies)} is left "
                 "out rather than added to a total in another currency."
             )
+
+
+# Merchant Center recomputes benchmarks daily, so a read held for six hours is
+# as fresh as the data can be, and the catalogue is tens of thousands of rows
+# fetched over HTTP - not a read to repeat because somebody moved the window on
+# another panel.
+BENCHMARK_TTL_SECONDS = 6 * 3600
+
+# How many of the dearest offers to name. Enough for a pricing conversation to
+# start with, few enough that the panel is not a spreadsheet.
+_WORST_OFFERS = 15
+
+
+class BenchmarkRead(NamedTuple):
+    """The catalogue's prices against the market, and Google's advice on them."""
+
+    prices: merchant_client.Prices
+    insights: merchant_client.Insights
+
+
+@st.cache_data(ttl=BENCHMARK_TTL_SECONDS, show_spinner=False)
+def _price_benchmark_cached(account: str, country: str) -> BenchmarkRead:
+    """What Merchant Center says the shop's prices look like against the market.
+
+    Keyed on the account rather than on the config, so that Streamlit hashes a
+    string: the credential is read again inside, as the billing client is, and
+    never becomes part of a cache key.
+    """
+    config = merchant_client.load_merchant_env()
+    if config is None or (config.account, config.country) != (account, country):
+        raise merchant_client.MerchantConfigError(
+            "The Merchant Center configuration changed while it was being read."
+        )
+    token = merchant_client.access_token(config)
+    prices = merchant_client.price_gaps(config, token)
+    # Suggestions are a second report and a nice-to-have: an account with price
+    # competitiveness but no price insights still gets the headline.
+    try:
+        insights = merchant_client.price_insights(config, token)
+    except Exception:  # noqa: BLE001
+        insights = merchant_client.Insights(pd.DataFrame())
+    return BenchmarkRead(prices, insights)
+
+
+def _render_price_benchmark() -> None:
+    """How the shop's prices compare with everyone else selling the same wine.
+
+    The order book cannot answer this: it holds what the shop charged, not what
+    the shop next door charged for the same bottle. Google works that out across
+    every merchant in Shopping and calls it a benchmark, and the gap to it is the
+    difference between a product page that sells and one that is a price check
+    for somebody else's shop.
+    """
+    section = "Price competitiveness"
+    st.subheader(section)
+    try:
+        config = merchant_client.load_merchant_env()
+    except merchant_client.MerchantConfigError as exc:
+        st.caption(f"Price benchmarks are misconfigured: {exc}")
+        return
+    if config is None:
+        st.caption(
+            "Price benchmarks come from Merchant Center. Set GOOGLE_MERCHANT_ID "
+            "to the account id, and add the dashboard's service account under "
+            "Settings, People and access with read access."
+        )
+        return
+
+    try:
+        with st.spinner("Reading Merchant Center's price benchmarks..."):
+            read = _price_benchmark_cached(config.account, config.country)
+    except merchant_client.MerchantConfigError as exc:
+        st.warning(str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Could not read the price benchmarks: {str(exc)[:200]}")
+        return
+
+    prices, insights = read.prices, read.insights
+    money = prices.currency
+    tiles = st.columns(3)
+    _tile(
+        tiles[0],
+        TAB_BUSINESS,
+        section,
+        "Dearer than the market",
+        f"{prices.dear_share:.0%}" if prices.counted else "\u2014",
+    )
+    _tile(
+        tiles[1],
+        TAB_BUSINESS,
+        section,
+        "Typical gap",
+        f"{prices.median_gap:+.0%}" if prices.counted else "\u2014",
+    )
+    _tile(
+        tiles[2],
+        TAB_BUSINESS,
+        section,
+        "Priced products compared",
+        f"{prices.counted:,}",
+    )
+
+    if not prices.counted:
+        st.caption(
+            f"Read for {config.country}, the country the feed is taken to "
+            "target. Benchmarks are published per country, so set "
+            "GOOGLE_MERCHANT_COUNTRY if this feed targets another one."
+        )
+
+    if prices.counted:
+        st.dataframe(
+            prices.worst.head(_WORST_OFFERS)
+            .assign(
+                price=lambda frame: frame["price"].map(
+                    lambda value: _money(value, money)
+                ),
+                benchmark=lambda frame: frame["benchmark"].map(
+                    lambda value: _money(value, money)
+                ),
+                gap=lambda frame: frame["gap"].map(lambda value: f"{value:+.0%}"),
+            )[["title", "brand", "price", "benchmark", "gap"]]
+            .rename(
+                columns={
+                    "title": "Wine",
+                    "brand": "Brand",
+                    "price": "Our price",
+                    "benchmark": "Market",
+                    "gap": "Gap",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+    if prices.other_currencies:
+        st.caption(
+            f"These are the {money.upper()} prices only; the feed also quotes "
+            + ", ".join(code.upper() for code in prices.other_currencies)
+            + ", which is set aside rather than compared against a benchmark in "
+            "another currency."
+        )
+    st.caption(
+        "Google's benchmark is the median price other merchants charge for the "
+        f"same product, read from Merchant Center for {merchant_client.as_of()}. "
+        "Products no other merchant sells have no benchmark and are left out "
+        "rather than counted as competitive."
+    )
+
+    lines = merchant_client.verdicts(prices, insights)
+    if lines:
+        with st.expander("What the prices say", expanded=True):
+            _said(TAB_BUSINESS, section, lines)
 
 
 # Ad figures are a day old the moment they exist: the grain is a day, the last
@@ -4369,7 +4530,7 @@ def _charged_commission(
             return None
         # The same read Burn makes, so the tab pages Stripe once. Disputes are
         # not read here: they are a Burn figure and cost another call.
-        entries, _truncated = _stripe_ledger_cached(STRIPE_LEDGER_DAYS)
+        entries, truncated = _stripe_ledger_cached(STRIPE_LEDGER_DAYS)
         # The fold bounds the window's start but not its end, and today's sales
         # are not in yesterday's spend: without this the return climbs through
         # the day and reads high by a day in every window.
@@ -4383,9 +4544,19 @@ def _charged_commission(
         return None
     if not ledger.earnings and not ledger.prev_earnings:
         return None
-    return ads_client.Commission(
-        now=ledger.net, before=ledger.prev_net, measured=True
+    # Stripe returns newest first, so a read that hit its ceiling is missing its
+    # oldest days. Where the cut falls past this window's start the window's own
+    # commission is whole and only the comparison goes; where it falls inside,
+    # the measured figure is short of sales and the rate is the honest fallback.
+    if truncated and not cost_client.reaches_past(entries, span, now=spend.window_end):
+        return None
+    before = (
+        ledger.prev_net
+        if not truncated
+        or cost_client.reaches_past(entries, 2 * span, now=spend.window_end)
+        else 0.0
     )
+    return ads_client.Commission(now=ledger.net, before=before, measured=True)
 
 
 def _render_ads(order_book: orders_client.OrderBook | None) -> None:
@@ -4754,7 +4925,226 @@ def _render_burn() -> None:
         key="burn_window_days",
     )
     _render_ai_costs(days)
+    _render_cloud(days)
     _render_stripe(days)
+
+
+class CloudRead(NamedTuple):
+    """Cloud charges, and what the export they came from covers."""
+
+    costs: pd.DataFrame
+    history_start: _dt.date | None
+    covered_to: _dt.date | None
+    # Fully-qualified, and more than one when several billing accounts export
+    # into the same dataset. The first is the one read.
+    tables: tuple[str, ...] = ()
+
+
+# The bill moves once a day at best and its last day is yesterday, so a quarter
+# of an hour buys no freshness and pays two whole-table scans of the export for
+# it - the coverage probe has no date to filter on, and `DATE(usage_start_time)`
+# does not prune the export's ingestion-time partitions either. Held on the ads
+# panel's cycle instead, keyed on the date so it rolls over when the export does.
+CLOUD_TTL_SECONDS = 6 * 3600
+# The widest window the panel offers, which is the only one read: `window`
+# slices narrower ones out of the frame in pandas, so a click on the radio no
+# longer sends BigQuery after a subset of rows already in hand.
+CLOUD_WINDOW_DAYS = max(cost_client.LOOKBACK_WINDOWS)
+
+
+@st.cache_data(ttl=CLOUD_TTL_SECONDS, show_spinner=False)
+def _cloud_costs_cached(days: int, today: _dt.date) -> CloudRead:
+    """Google Cloud's billing export, and what the export covers.
+
+    Read to the export's own last day rather than to today: it is written in
+    arrears, so the days it has not reached are days it has no charges for, and
+    a window ending now would average real spend over imaginary free days.
+    """
+    config = cost_client.load_billing_env()
+    if config is None:  # pragma: no cover - the caller checks first
+        raise cost_client.CostConfigError("No billing export is configured.")
+    client = _billing_bigquery_client(config.project, config.dataset)
+    tables = cost_client.billing_tables(client, config)
+    if not tables:
+        return CloudRead(pd.DataFrame(), None, None)
+    first, last = cost_client.billing_coverage(client, tables[0])
+    if last is None:
+        return CloudRead(pd.DataFrame(), None, None, tuple(tables))
+    return CloudRead(
+        cost_client.cloud_costs(client, tables[0], days, now=last),
+        first,
+        last,
+        tuple(tables),
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def _billing_bigquery_client(project: str, dataset: str):
+    """The billing export's BigQuery client, built once per process.
+
+    Keyed on where it reads so a changed variable builds a new one, as the ads
+    client is: a credential loaded and a session opened to Google are not work
+    that has anything to do with how stale the figures are.
+    """
+    config = cost_client.load_billing_env()
+    if config is None or (config.project, config.dataset) != (project, dataset):
+        raise cost_client.CostConfigError(
+            "The billing export configuration changed while it was being read."
+        )
+    return cost_client.build_billing_client(config)
+
+
+def _render_cloud(days: int) -> None:
+    """What Google Cloud charged, service by service.
+
+    The largest bill of the three and the one nobody sees: it arrives monthly,
+    by which time a service left running has been running for a month. Read
+    from the billing export, which is the only place the figure exists per day.
+    """
+    try:
+        config = cost_client.load_billing_env()
+    except cost_client.CostConfigError as exc:
+        st.caption(f"Google Cloud costs are misconfigured: {exc}")
+        return
+    if config is None:
+        st.caption(
+            "Google Cloud spend comes from the billing export. Point the "
+            "dashboard at the project holding it with GCP_BILLING_BQ_PROJECT."
+        )
+        return
+
+    try:
+        with st.spinner("Reading what Google Cloud charged..."):
+            read = _cloud_costs_cached(CLOUD_WINDOW_DAYS, _dt.date.today())
+    except cost_client.CostConfigError as exc:
+        st.warning(str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Could not read the billing export: {str(exc)[:200]}")
+        return
+
+    history_start, covered_to = read.history_start, read.covered_to
+    if history_start is None or covered_to is None:
+        st.caption(
+            f"There is no billing export in `{config.project}.{config.dataset}` "
+            "yet. Enable *standard usage cost* export under Billing, Billing "
+            "export; Google writes the first table within a few hours, and it "
+            "covers nothing from before that."
+        )
+        return
+
+    # The days the export actually holds, so a fortnight-old export is not
+    # averaged over a month it was not switched on for.
+    covered = (covered_to - history_start).days + 1
+    burn = cost_client.window(
+        read.costs,
+        days,
+        provider="Google Cloud",
+        now=covered_to,
+        loaded=covered,
+        # The period before this one has to be whole to be compared with. Two
+        # days of the previous month is not a cheaper month, and reads as one.
+        comparable=covered >= 2 * days,
+    )
+    cloud = "Cloud costs"
+    money = burn.currency
+    tiles = st.columns(3)
+    _tile(
+        tiles[0],
+        TAB_BUSINESS,
+        cloud,
+        f"Google Cloud ({days}d)",
+        _money(burn.cost, money),
+        **_delta_arrow(
+            _money_delta(burn.cost_change, money)
+            if burn.prev_cost and burn.comparable
+            else None
+        ),
+    )
+    # A day rather than a month, unlike the AI tile beside it: Cloud is billed
+    # by the hour for things left running, and a daily figure is what a service
+    # nobody needed costs while nobody is looking at it.
+    _tile(
+        tiles[1],
+        TAB_BUSINESS,
+        cloud,
+        "A day of Cloud",
+        _money(burn.per_day, money),
+    )
+    _tile(
+        tiles[2],
+        TAB_BUSINESS,
+        cloud,
+        "Dearest service",
+        f"{burn.lines.iloc[0]['line_item']}" if not burn.lines.empty else "\u2014",
+    )
+
+    if not burn.lines.empty:
+        st.dataframe(
+            burn.lines.head(12)
+            .assign(
+                cost=lambda frame: frame["cost"].map(
+                    lambda value: _money(value, money)
+                ),
+                share=lambda frame: frame["share"].map(lambda value: f"{value:.0%}"),
+            )
+            .rename(
+                columns={"line_item": "Service", "cost": "Cost", "share": "Share"}
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+    if burn.other_currencies:
+        st.caption(
+            "These figures are the "
+            f"{money.upper()} charges only; Google Cloud also billed in "
+            + ", ".join(code.upper() for code in burn.other_currencies)
+            + ", which is never added to them."
+        )
+
+    lines = cost_client.verdicts(burn)
+    # Both ends of the export are said before the verdicts, since either one
+    # changes how every figure above reads.
+    lag = (_dt.date.today() - covered_to).days
+    if lag > 1:
+        lines.insert(
+            0,
+            f"**The export has only reached {covered_to}**, {lag} days behind "
+            "today, so this window ends there rather than now. Google writes it "
+            "in arrears and backfills over hours after it is switched on.",
+        )
+    # More than one export in the dataset is more than one billing account, and
+    # two accounts' bills are no more addable than two currencies.
+    if len(read.tables) > 1:
+        lines.insert(
+            0,
+            f"**The dataset holds {len(read.tables)} billing exports**, one per "
+            f"billing account. These figures are `{read.tables[0].rsplit('.', 1)[1]}` "
+            "alone.",
+        )
+    # It is not retroactive either, so a window starting before it was switched
+    # on is a shorter period wearing a longer label.
+    # Equal is the same case: a window as long as the export's whole history has
+    # nothing behind it, and saying the comparison rests on nought days is worse
+    # than saying there is no comparison.
+    if covered <= days:
+        lines.insert(
+            0,
+            f"**The export only goes back to {history_start}**, so these "
+            f"{days} days are {covered} days of charges, and there is no "
+            "earlier period to compare them with.",
+        )
+    elif covered < 2 * days:
+        lines.insert(
+            0,
+            f"**The export only goes back to {history_start}**, so it holds "
+            f"{covered - days} of the {days} days before this window - too few "
+            "to compare with, and no trend is drawn until it holds them all.",
+        )
+    if lines:
+        with st.expander("What Google Cloud costs", expanded=True):
+            _said(TAB_BUSINESS, cloud, lines)
 
 
 def _render_ai_costs(days: int) -> None:
@@ -4872,9 +5262,8 @@ def _render_ai_costs(days: int) -> None:
     st.caption(
         "OpenAI's own organization cost report, read with an admin key that can "
         "do nothing but read it. Today counts: a provider bills as it goes, so "
-        "the day's charges so far are real money. Google Cloud is not here yet - "
-        "its billing export is what that waits on - so this is the AI line of "
-        "the bill rather than all of it."
+        "the day's charges so far are real money. This is the AI line of the "
+        "bill; Google Cloud is the section below it."
     )
 
 
@@ -4909,8 +5298,22 @@ def _render_stripe(days: int) -> None:
         st.warning(f"Could not read Stripe: {str(exc)[:200]}")
         return
 
-    ledger = cost_client.ledger_window(entries, days, disputes=disputes)
-    if not ledger.earnings and entries.empty:
+    # Where the read's cap fell short of this window's own start, the window is
+    # missing sales too, and neither it nor the comparison can be trusted.
+    whole = not truncated or cost_client.reaches_past(entries, days)
+    ledger = cost_client.ledger_window(
+        entries,
+        days,
+        disputes=disputes,
+        # The previous window starts a further ``days`` back, and the read is of
+        # two months whatever window is chosen: a cap can lose the older window
+        # while leaving a seven-day comparison whole.
+        comparable=not truncated or cost_client.reaches_past(entries, 2 * days),
+    )
+    # The window's own rows, not the download's: one read now covers two months
+    # for every panel, so a quiet week inside a busy quarter has to still be
+    # able to say that nothing moved.
+    if not ledger.earnings and ledger.first_day is None:
         st.info(
             f"Stripe recorded no money moving in the last {days} days."
             + (
@@ -4937,7 +5340,9 @@ def _render_stripe(days: int) -> None:
         # Compared with the same quantity the tile shows - commission after
         # refunds - so a heavily refunded period cannot read as a rise.
         **_delta_arrow(
-            _money_delta(ledger.net_change, money) if ledger.prev_net else None
+            _money_delta(ledger.net_change, money)
+            if ledger.prev_net and ledger.comparable
+            else None
         ),
     )
     _tile(
@@ -4968,12 +5373,19 @@ def _render_stripe(days: int) -> None:
             + ", which is never added to them."
         )
 
-    if truncated:
+    if truncated and not whole:
+        st.warning(
+            f"Stripe had more ledger entries in the last {days} days than one "
+            "read carries, and it returns the newest first, so the oldest of "
+            "those days are missing from these figures as well as from the "
+            "period before them. Read a shorter window to see it whole."
+        )
+    elif truncated and not ledger.comparable:
         st.warning(
             "Stripe had more ledger entries than one read carries, and it "
             "returns the newest first, so the oldest days of the comparison "
-            "period are missing. Read a shorter window for a figure that "
-            "compares like with like."
+            "period are missing. The window's own figures are whole; no change "
+            "against the period before it is drawn, since part of it is unread."
         )
 
     lines = cost_client.stripe_verdicts(ledger)
@@ -6577,6 +6989,15 @@ def _clear_page_caches(page_title: str) -> None:
         # to a day-old list of accounts to read it for.
         _ads_cached,
         _ads_accounts,
+        # Burn holds the three bills, and a quarter of an hour is long enough
+        # that a reader who presses Refresh expects them to move too.
+        _openai_costs_cached,
+        _cloud_costs_cached,
+        _stripe_ledger_cached,
+        _stripe_disputes_cached,
+        # Benchmarks move once a day, but a reader who has just changed a price
+        # and pressed Refresh is asking about that price.
+        _price_benchmark_cached,
     )
     for cached in business if page_title == BUSINESS_PAGE_TITLE else engineering:
         cached.clear()

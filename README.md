@@ -69,7 +69,11 @@ profile when they are not all set.
 | `GOOGLE_ADS_CUSTOMER_ID` | no | every account in the dataset | Restrict the ads figures to one account, e.g. `887-686-4797`; by default every account the transfer writes is added up |
 | `OPENAI_ADMIN_KEY` | no | — | OpenAI **organization admin** key (Organization settings → API keys → Admin keys); needed for the AI line of *Burn*. An ordinary `sk-proj-…` project key is refused by the cost endpoint and is named as such rather than shown as a 401 |
 | `STRIPE_READONLY_API_KEY` | no | — | Stripe **restricted** key (`rk_…`) with read access to balance transactions, charges, disputes and payouts; needed for the payments line of *Burn*. A full `sk_…` secret key can move money and is refused |
-| `GCP_BIGQUERY_READONLY_KEY` | no | — | A BigQuery service-account key as JSON, for reading the Ads dataset from outside GCP; unset on Cloud Run, which authenticates as its own service account |
+| `GCP_BILLING_BQ_PROJECT` | no | the key's own project, else the ambient one | GCP project holding the Cloud billing export. Read independently of the Ads settings, so a bad Ads value cannot take the Cloud bill off the page; unset on Cloud Run, which runs in the project the export is in |
+| `GCP_BILLING_BQ_DATASET` | no | `billing_export` | Dataset the *standard usage cost* billing export writes to; the table inside it is found by name, and until Google writes one the *Cloud costs* section says so |
+| `GCP_BIGQUERY_READONLY_KEY` | no | — | A BigQuery service-account key as JSON, for reading the Ads and billing datasets from outside GCP; unset on Cloud Run, which authenticates as its own service account. Also the credential the Merchant Center read uses |
+| `GOOGLE_MERCHANT_ID` | no | — | Merchant Center account id (top right of merchants.google.com), for the *Price competitiveness* section. The account reading it — the key above, or Cloud Run's own service account — must be a user of that Merchant Center account with read access, and its GCP project must be registered against the account as a Merchant API developer; without either the section says so and everything else works |
+| `GOOGLE_MERCHANT_COUNTRY` | no | `US` | Two-letter country the feed targets. Benchmarks are published per country, so reading a country the feed does not target returns no rows rather than an error; the section names the country it read when it finds nothing |
 | `DASHBOARD_PASSWORD`          | no locally, **yes on Cloud Run** | —                                                | Shared password visitors must enter; remembered per browser for 30 days in a signed cookie; leave it unset locally (a copy in `.env` prompts on every run), unset on Cloud Run (`K_SERVICE` present) refuses to serve at all                                     |
 | `DASHBOARD_COOKIE_KEY` | no, but set it when hosted | derived from `DASHBOARD_PASSWORD` with scrypt | Independent secret signing the access cookie, so the cookie is not a verifier for guesses at the password; rotating it signs every browser out without changing the password anyone types |
 
@@ -336,7 +340,32 @@ fully paid with nothing pending.
    per merchant, over 30, 90, 180 or 360 days. Bottles count what customers chose,
    so an order awaiting payment counts there while revenue still waits for
    capture; ice packs are add-ons and are kept out of the wine ranking.
-12. **Ads Spend & Return** (*Business* tab) — what the orders cost to win, read from
+12. **Price competitiveness** (*Business* tab) — what the shop charges against what
+   everyone else selling the same bottle charges, read live from Merchant Center.
+   Google works the benchmark out across every merchant in Shopping and it is the
+   one number the order book cannot hold: it says what was charged, not what the
+   shop next door charged for the same wine. Three tiles — the share of priced
+   products above the benchmark, the typical (median, not mean: a handful sit near
+   twice the market and would drag an average) gap, and how many products were
+   compared — over a table of the dearest offers, our price beside the market's.
+   Products no other merchant sells have no benchmark and are left out rather
+   than counted as competitive, and a price within two pence of the benchmark is
+   the same price rather than a problem. Prices in a second currency are set
+   aside and named, never compared with the main one. Where Google also publishes
+   a suggested price, the verdicts say how many products it would cut and what it
+   predicts that would do to clicks and conversions — counted over the offers
+   that were compared, since that report carries no benchmark, country or
+   currency filter and would otherwise claim a cut on more products than the
+   panel compared. Not read from BigQuery,
+   though a Merchant Center transfer once wrote these rows there: Google
+   deprecated `export_price_benchmarks`, so benchmarks reach only the Merchant
+   API now — its `v1` endpoints, `v1beta` having been switched off in February
+   2026. Needs `GOOGLE_MERCHANT_ID`, a reader on the Merchant Center account,
+   and the GCP project the credential belongs to registered against that
+   account with a verified `API_DEVELOPER` user (`developerRegistration:registerGcp`);
+   refreshed at most every six hours, which is as fresh as a benchmark
+   recomputed daily can be.
+13. **Ads Spend & Return** (*Business* tab) — what the orders cost to win, read from
    Google's own Ads-to-BigQuery transfer rather than the Ads API, which issues
    developer tokens to manager accounts only and this account has none above it.
    Spend, the CRM's orders over exactly the same days, ad spend per order, revenue
@@ -380,7 +409,7 @@ fully paid with nothing pending.
    (`GOOGLE_ADS_BQ_DATASET`, default `google_ads`); read-only, every statement is a
    `SELECT` under a credential holding `bigquery.dataViewer` and
    `bigquery.jobUser` and no access to Google Ads itself.
-13. **Product Funnel & Friction** (*Business* tab) — how far visitors get towards
+14. **Product Funnel & Friction** (*Business* tab) — how far visitors get towards
    being one of those orders, read from Amplitude. The default funnel runs product
    page → cart → checkout → payment → order, deliberately *not* home page → search
    → product: on this shop the overwhelming majority of visitors arrive on a product
@@ -427,7 +456,7 @@ fully paid with nothing pending.
    only comes in days, weeks or months: no interval spans an arbitrary window, so a
    count from it is a sum of buckets, and adding buckets counts somebody who came
    back next week as two people.
-14. **Burn** (*Business* tab) — what the business spends and what its own payment
+15. **Burn** (*Business* tab) — what the business spends and what its own payment
    ledger says it kept, beside the revenue above it, on one window so a week of one
    bill is never read against a month of another. **AI spend** is OpenAI's own
    organization cost report, broken down by line item and project, because "$763 on
@@ -448,12 +477,16 @@ fully paid with nothing pending.
    "what do the card fees cost us" deserves an answer. It is deliberately not
    reconciled with the CRM's captured revenue above: one is the platform's cut, the
    other the merchants' takings. Disputes are counted, never subtracted — a dispute
-   is money at risk with an outcome still to come. Google Cloud is not here yet and
-   the panel says so instead of presenting the AI bill as the whole of the spend.
+   is money at risk with an outcome still to come. **Cloud costs** is Google's own
+   billing export, by service and net of credits, because a committed-use discount
+   is money never charged: it is usually the largest of the three bills and the one
+   nobody sees until the month ends. The export is not retroactive and backfills over
+   hours, so a window reaching further back than it does is labelled as the shorter
+   period it really is.
    Needs `OPENAI_ADMIN_KEY` and `STRIPE_READONLY_API_KEY`; each line appears on its
    own as the key arrives, and every call is a `GET` under a credential that cannot
    write.
-15. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
+16. **PR Hygiene** — open PRs across the organization that are untraceable, stalled
    or unowned: no Jira key anywhere in the title, branch name or description
    (matched against every project key Jira exposes, plus `JIRA_EXTRA_PROJECT_KEYS`,
    so a string like `UTF-8` does not read as a ticket); open past
@@ -464,7 +497,7 @@ fully paid with nothing pending.
    first, because that is work one review away from shipping. Tickets merely In
    Progress are excluded: the code is still being written. Includes a per-author
    table and a CSV of everything flagged. Needs `DASHBOARD_GITHUB_TOKEN`.
-16. **Ticket Quality & Ready for Devin** — every ticket graded out of 5 on whether
+17. **Ticket Quality & Ready for Devin** — every ticket graded out of 5 on whether
    someone outside the original conversation could pick it up: a summary of at
    least four words, a description of at least 120 characters, explicit acceptance
    criteria (the words, or a checklist of three or more items), an estimate, and an
@@ -477,7 +510,7 @@ fully paid with nothing pending.
    Backlog tickets are always included regardless of *Include Backlogs* — an unowned
    backlog ticket is the best kind to hand off, and the worst-written ones collect
    there unseen.
-17. **Sprint Planner** — a first draft of one team's next sprint, built from goals
+18. **Sprint Planner** — a first draft of one team's next sprint, built from goals
    rather than from the top of a priority list. Name two or three goals for the
    sprint ("Onboarding, Quiz, Checkout", most important first) and every ticket
    that shares a word with one — in its summary, its epic's name or its labels —
@@ -497,9 +530,9 @@ fully paid with nothing pending.
    armed, and it only adds tickets to an active or future sprint. Jira moves an
    issue between sprints rather than copying it, so a ticket already on another
    open sprint leaves it; the section names those tickets before the button.
-18. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
+19. **Bubble chart, Sprint Capacity, Suggested First Action** — the existing
    age-vs-idle chart, sprint planning tables, and bulk Jira write-back actions.
-19. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
+20. **Availability vs Commitment** — inside Sprint Capacity. Committed estimate hours
    per person against what they are actually available for, which matters when most
    contributors are part-time: `JIRA_WEEKLY_HOURS` is spread over the weekdays
    between the sprint's start and end dates, so 20h/week across a 10-working-day
@@ -548,7 +581,12 @@ went from ~30s to ~12s by removing waiting, not work:
   and Google's transfer writes it once a day, so re-reading every fifteen minutes
   bought no freshness and paid a round of BigQuery jobs for it. The spend is held
   six hours and the account list a day, both keyed on the date so they roll over
-  when the transfer does rather than mid-morning.
+  when the transfer does rather than mid-morning. *Cloud costs* is the same case
+  and held the same way: the export is written in arrears, its last day is
+  yesterday, and each read costs two scans of the whole export — the coverage
+  probe has no day to filter on, and `DATE(usage_start_time)` prunes no
+  ingestion-time partition. The widest window is the only one read, so the
+  radio's narrower options are cut from the frame in hand.
 - **The ads panel reads one window, not the one selected.** `daily_stats` already
   fetches twice the days it is asked for so the previous period can be compared,
   so the widest option contains every narrower one and the 7/30 radio slices the
@@ -589,6 +627,8 @@ Everything is read live and cached briefly; nothing is precomputed or exported.
 | Sprint statuses, priorities, user directory | Jira API | 10 minutes; the project list, an hour |
 | *Orders, Revenue & AOV*, *Best Sellers & Merchants* | the CRM's own Postgres tables | up to 15 minutes |
 | *Ads Spend & Return* | Google's Ads-to-BigQuery transfer | **a day**, by design |
+| *Cloud costs* | Google Cloud's billing export | up to 6 hours; the export is written in arrears and ends yesterday |
+| *Price competitiveness* | Merchant Center's Merchant API | up to 6 hours; Google recomputes benchmarks daily |
 | *Product Funnel & Friction* | Amplitude Dashboard API | **a day**, by design |
 
 The order book is the freshest thing here in kind, not just in minutes: it is a

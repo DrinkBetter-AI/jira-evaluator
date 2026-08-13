@@ -14,6 +14,7 @@ billing export. Everything here is a GET.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 from dataclasses import dataclass, field
 
@@ -86,6 +87,14 @@ class Burn:
     # Currencies set aside rather than added to the figure above, which is what
     # the caller names so the reader knows the total is not the whole bill.
     other_currencies: tuple[str, ...] = ()
+    # Days of the window the source can actually answer for, where that is
+    # fewer than the window: a billing export switched on last week holds a
+    # week, and averaging that week over a month is a discount nobody gave.
+    days_loaded: int | None = None
+    # Whether the period before this one is whole. A source that starts inside
+    # it holds a day or two of a month, and a month measured against two days
+    # of it is a rise of a thousand per cent that never happened.
+    comparable: bool = True
 
     @property
     def cost_change(self) -> float:
@@ -93,12 +102,15 @@ class Burn:
 
     @property
     def per_day(self) -> float:
-        """Averaged over the window, not over the days that had charges.
+        """Averaged over the days the source covers, not the days with charges.
 
         A quiet weekend is part of the monthly bill, so dividing by days with
-        charges would overstate what the next month is likely to cost.
+        charges would overstate what the next month is likely to cost. Days the
+        source has no answer for are the other error, and understate it: they
+        are not free days, they are days nobody can see.
         """
-        return self.cost / self.days if self.days else 0.0
+        span = self.days_loaded or self.days
+        return self.cost / span if span else 0.0
 
     @property
     def monthly(self) -> float:
@@ -194,6 +206,8 @@ def window(
     days: int,
     provider: str = "OpenAI",
     now: _dt.date | None = None,
+    loaded: int | None = None,
+    comparable: bool = True,
 ) -> Burn:
     """Split a daily cost frame into this window and the one before it.
 
@@ -213,14 +227,20 @@ def window(
     return Burn(
         days=days,
         provider=provider,
-        cost=float(current["cost"].sum()),
-        prev_cost=float(previous["cost"].sum()),
+        # To the cent, and adding zero, because neither is a no-op here: a
+        # credit of a hundredth of a cent against nothing else leaves a
+        # fraction below zero, and both it and -0.0 format as "$-0.00" - a
+        # refund of nothing, on a bill that had nothing on it.
+        cost=round(float(current["cost"].sum()), 2) + 0.0,
+        prev_cost=round(float(previous["cost"].sum()), 2) + 0.0,
         currency=money,
         days_with_data=int(current["day"].nunique()),
         first_day=min(current["day"]) if not current.empty else None,
         last_day=max(current["day"]) if not current.empty else None,
         lines=by_line(current),
         other_currencies=others,
+        days_loaded=min(loaded, days) if loaded else None,
+        comparable=comparable,
     )
 
 
@@ -274,6 +294,10 @@ def by_project(costs: pd.DataFrame) -> pd.DataFrame:
 # choice rather than a workload: it is context sent again.
 _CACHE_WORDS = ("cached", "cache write", "cache read")
 
+# The providers whose line items are tokens, and so where a cache line means
+# context re-sent rather than a service that happens to be a cache.
+TOKEN_PROVIDERS = ("OpenAI", "Anthropic")
+
 
 def cached_share(costs: pd.DataFrame) -> float:
     """The fraction of the bill that is cache traffic rather than new work."""
@@ -301,22 +325,27 @@ def verdicts(burn: Burn) -> list[str]:
         f"**{_money(burn.cost, money)} on {burn.provider} in {burn.days} days** - "
         f"{_money(burn.monthly, money)} a month at this rate."
     ]
-    if burn.prev_cost < burn.cost * _NEW_SPEND_SHARE:
-        lines.append(
-            f"**This spend is new** - the {burn.days} days before came to "
-            f"{_money(burn.prev_cost, money)}, so there is no earlier period to "
-            "read it against yet."
-        )
-    else:
-        share = burn.cost_change / burn.prev_cost
-        if abs(share) >= 0.1:
-            word = "up" if share > 0 else "down"
+    # Silent where the earlier period is only partly held: the caller says why,
+    # and a trend drawn against two days of a month is worse than no trend.
+    if burn.comparable:
+        if burn.prev_cost < burn.cost * _NEW_SPEND_SHARE:
             lines.append(
-                f"**Spend is {word} {_money(abs(burn.cost_change), money)} "
-                f"({share:+.0%}) on the {burn.days} days before**, so this is a "
-                "change in usage rather than the usual bill."
+                f"**This spend is new** - the {burn.days} days before came to "
+                f"{_money(burn.prev_cost, money)}, so there is no earlier period "
+                "to read it against yet."
             )
-    cached = cached_share(burn.lines)
+        else:
+            share = burn.cost_change / burn.prev_cost
+            if abs(share) >= 0.1:
+                word = "up" if share > 0 else "down"
+                lines.append(
+                    f"**Spend is {word} {_money(abs(burn.cost_change), money)} "
+                    f"({share:+.0%}) on the {burn.days} days before**, so this is "
+                    "a change in usage rather than the usual bill."
+                )
+    # Only of a token bill: a Cloud line called "Cloud Memorystore for
+    # Memcached" is a cache, but it is not context sent again.
+    cached = cached_share(burn.lines) if burn.provider in TOKEN_PROVIDERS else 0.0
     if cached >= 0.25:
         lines.append(
             f"**{cached:.0%} of it is cached context** - "
@@ -418,6 +447,9 @@ class Ledger:
     # account's own sales. The two are not the same money, and only one of them
     # has Stripe's processing fee charged against it here.
     platform: bool = True
+    # Whether the period before this one is whole. Stripe returns newest first,
+    # so a read that hit its ceiling is missing precisely those older days.
+    comparable: bool = True
 
     @property
     def net(self) -> float:
@@ -556,11 +588,25 @@ def stripe_disputes(key: str, days: int, now: _dt.date | None = None) -> int:
     return counted
 
 
+def reaches_past(entries: pd.DataFrame, days: int, now: _dt.date | None = None) -> bool:
+    """Whether the oldest row read is older than this window's first day.
+
+    A capped read is missing its oldest days, and how much that matters depends
+    on where the cap fell: past the window's start and the window itself is
+    whole, short of it and every figure in the window is missing sales too.
+    """
+    if entries.empty or "day" not in entries:
+        return False
+    today = now or _dt.date.today()
+    return min(entries["day"]) < today - _dt.timedelta(days=days - 1)
+
+
 def ledger_window(
     entries: pd.DataFrame,
     days: int,
     disputes: int = 0,
     now: _dt.date | None = None,
+    comparable: bool = True,
 ) -> Ledger:
     """Fold Stripe's ledger into this window and the takings of the one before."""
     today = now or _dt.date.today()
@@ -608,6 +654,7 @@ def ledger_window(
         last_day=max(current["day"]) if not current.empty else None,
         other_currencies=others,
         platform=platform,
+        comparable=comparable,
     )
 
 
@@ -633,7 +680,7 @@ def stripe_verdicts(ledger: Ledger) -> list[str]:
         )
         + ")."
     ]
-    if ledger.prev_net:
+    if ledger.prev_net and ledger.comparable:
         share = ledger.net_change / ledger.prev_net
         if abs(share) >= 0.1:
             word = "up" if share > 0 else "down"
@@ -662,12 +709,223 @@ def _dispute_line(ledger: Ledger) -> str:
     )
 
 
+# Google's own name for the standard usage cost export, suffixed with the
+# billing account's id. Found by prefix rather than configured: the suffix is
+# not something anybody should have to look up, and a project has one of these.
+BILLING_TABLE_PREFIX = "gcp_billing_export_v1_"
+DEFAULT_BILLING_DATASET = "billing_export"
+_BILLING_DATASET_ENV_VAR = "GCP_BILLING_BQ_DATASET"
+_BILLING_PROJECT_ENV_VAR = "GCP_BILLING_BQ_PROJECT"
+# The same credential the Ads dataset is read with: one service account reads
+# both, and on Cloud Run neither is set because the service is the credential.
+_BQ_KEY_ENV_VAR = "GCP_BIGQUERY_READONLY_KEY"
+
+
+@dataclass(frozen=True)
+class Billing:
+    """Where the Cloud billing export lives, and what reads it."""
+
+    project: str
+    dataset: str
+    key_json: str | None = None
+
+
+def load_billing_env() -> Billing | None:
+    """Where to read Google Cloud costs from, or ``None`` when unconfigured.
+
+    Nothing here is read from the Ads settings, though both read BigQuery under
+    the same credential: an invalid Ads customer id is not a reason to stop
+    reporting the Cloud bill, and it once was. The project comes from this
+    panel's own variable, else the key's own project, else the project Google's
+    libraries would default to - which on Cloud Run is the one the export is in.
+    """
+    import ads_client  # noqa: PLC0415 - avoids a cycle at import time
+
+    project = os.getenv(_BILLING_PROJECT_ENV_VAR, "").strip()
+    dataset = (
+        os.getenv(_BILLING_DATASET_ENV_VAR, "").strip() or DEFAULT_BILLING_DATASET
+    )
+    key_json = os.getenv(_BQ_KEY_ENV_VAR, "").strip() or None
+    if not project and key_json:
+        try:
+            info = json.loads(key_json)
+        except ValueError as exc:
+            raise CostConfigError(
+                f"{_BQ_KEY_ENV_VAR} is not valid JSON: paste the whole service "
+                "account key file, braces included."
+            ) from exc
+        project = str(info.get("project_id", "")).strip()
+    project = project or ads_client.default_project()
+    if not project:
+        return None
+    # Both are interpolated into a backquoted table reference, where a backquote
+    # would end the identifier and leave the rest of the value as SQL.
+    if not ads_client.valid_name(dataset):
+        raise CostConfigError(
+            f"{_BILLING_DATASET_ENV_VAR} is not a valid dataset name."
+        )
+    if not ads_client.valid_project(project):
+        raise CostConfigError(
+            f"{project!r} is not a GCP project id; check "
+            f"{_BILLING_PROJECT_ENV_VAR} and the key's project_id."
+        )
+    return Billing(project, dataset, key_json)
+
+
+def build_billing_client(config: Billing):
+    """A BigQuery client for the billing export, read-only by its credential."""
+    import ads_client  # noqa: PLC0415
+
+    try:
+        return ads_client.build_client(config)
+    except ads_client.AdsConfigError as exc:
+        raise CostConfigError(str(exc)) from exc
+
+
+def billing_tables(client, config: Billing) -> list[str]:
+    """The export tables in the dataset, oldest name first.
+
+    Usually one, and empty in three cases that are all the same sentence to a
+    reader: the dataset does not exist, the export was never enabled, or Google
+    has not written the first table in the hours since it was. None of them is
+    an error. More than one means more than one billing account exports here,
+    and the panel reads the first and says so rather than adding two accounts'
+    bills into one figure.
+    """
+    try:
+        tables = list(client.list_tables(f"{config.project}.{config.dataset}"))
+    except Exception as exc:  # noqa: BLE001 - the caller words this for a reader
+        if _absent(exc):
+            return []
+        raise CostConfigError(
+            f"Could not read `{config.project}.{config.dataset}`: {str(exc)[:200]}"
+        ) from exc
+    return [
+        f"{config.project}.{config.dataset}.{name}"
+        for name in sorted(
+            table.table_id
+            for table in tables
+            if table.table_id.startswith(BILLING_TABLE_PREFIX)
+        )
+    ]
+
+
+def _absent(exc: Exception) -> bool:
+    """Whether BigQuery said there is no such dataset, rather than refusing it.
+
+    A dataset nobody has created is where every deployment starts, and reads as
+    a 404; a dataset the credential may not see is a 403 and worth a warning.
+    """
+    try:
+        from google.api_core import exceptions  # noqa: PLC0415 - optional
+    except ImportError:  # pragma: no cover - only without the client library
+        return False
+    return isinstance(exc, exceptions.NotFound)
+
+
+def cloud_costs(
+    client, table: str, days: int, now: _dt.date | None = None
+) -> pd.DataFrame:
+    """Daily Google Cloud cost by project and service, over ``2 * days``.
+
+    Net of credits, because that is what the invoice says: a committed-use
+    discount or a free tier is applied against the line it belongs to, and the
+    gross figure would report money that was never charged. Twice the window in
+    one pass, as everywhere else here, since every figure is a comparison.
+    """
+    today = now or _dt.date.today()
+    first = today - _dt.timedelta(days=2 * days - 1)
+    sql = f"""
+        SELECT
+          DATE(usage_start_time) AS day,
+          COALESCE(project.id, 'unattributed') AS project,
+          -- Nullable, unlike a service's own name: rounding rows and invoice
+          -- adjustments carry no service, and pandas would drop the group and
+          -- leave the breakdown adding up to less than the total above it.
+          COALESCE(service.description, 'unattributed') AS line_item,
+          LOWER(currency) AS currency,
+          SUM(cost + IFNULL(
+            (SELECT SUM(credit.amount) FROM UNNEST(credits) AS credit), 0
+          )) AS cost
+        FROM `{table}`
+        WHERE DATE(usage_start_time) BETWEEN @first AND @last
+        GROUP BY day, project, line_item, currency
+    """
+    from google.cloud import bigquery  # noqa: PLC0415 - optional dependency
+
+    job = client.query(
+        sql,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("first", "DATE", first),
+                bigquery.ScalarQueryParameter("last", "DATE", today),
+            ]
+        ),
+    )
+    frame = job.result().to_dataframe()
+    if frame.empty:
+        return pd.DataFrame(
+            columns=["day", "project", "line_item", "cost", "currency"]
+        )
+    frame["day"] = pd.to_datetime(frame["day"]).dt.date
+    # A refund or a credit larger than the day's usage nets to zero or below;
+    # neither is a charge, and both would read as a line item on the bill. To
+    # the cent, since a credit that cancels usage leaves a fraction behind that
+    # survives an exact test and prints as "$-0.00" against a service name.
+    frame["cost"] = frame["cost"].astype(float).round(2) + 0.0
+    return frame[frame["cost"] != 0.0].reset_index(drop=True)
+
+
+# Below this a day holds no charges worth the name. The export dates rounding
+# corrections at the start of the billing period rather than at the usage they
+# correct, so a table five days old carries June 1st rows worth a billionth of
+# a cent - and a MIN over every row would call that a month of history.
+_BILLING_DAY_FLOOR = 0.01
+
+
+def billing_coverage(
+    client, table: str, now: _dt.date | None = None
+) -> tuple[_dt.date | None, _dt.date | None]:
+    """The first and last days the export covers.
+
+    Both ends matter and neither is today. The export is not retroactive, so it
+    holds nothing from before it was switched on: a 30-day figure over a
+    week-old export is a week's spend wearing a month's label. And it is
+    written in arrears and backfills over hours, so its last day trails the
+    calendar - a window ending today would read the missing days as free.
+    """
+    job = client.query(
+        "SELECT MIN(day) AS first, MAX(day) AS last FROM ("
+        "SELECT DATE(usage_start_time) AS day, SUM(cost) AS total "
+        f"FROM `{table}` GROUP BY day "
+        f"HAVING ABS(SUM(cost)) >= {_BILLING_DAY_FLOOR})"
+    )
+    rows = list(job.result())
+    if not rows:
+        return None, None
+    first, last = rows[0]["first"], rows[0]["last"]
+    # Never today, wherever the export has reached it: a day still being written
+    # is hours of charges wearing a whole day's label, and ends the window on a
+    # cheap day nobody had. The ads reader excludes today for the same reason.
+    yesterday = (now or _dt.date.today()) - _dt.timedelta(days=1)
+    if last is None or first is None or first > yesterday:
+        return None, None
+    return first, min(last, yesterday)
+
+
 __all__ = [
+    "Billing",
     "Burn",
     "Ledger",
     "CostConfigError",
+    "DEFAULT_BILLING_DATASET",
     "LOOKBACK_WINDOWS",
+    "billing_coverage",
+    "billing_tables",
+    "build_billing_client",
     "by_line",
+    "cloud_costs",
+    "load_billing_env",
     "by_project",
     "cached_share",
     "ledger_window",
