@@ -4180,7 +4180,13 @@ def _offer_sales_cached(source: str, days: int, today: _dt.date) -> pd.DataFrame
         raise orders_client.MedusaConfigError(
             "The order database configuration changed while it was being read."
         )
-    return orders_client.fetch_offer_sales(config, days)
+    sold = orders_client.fetch_offer_sales(config, days)
+    if sold.empty:
+        return sold
+    # An ice pack ships one per order and is nobody's bottle, so it would carry
+    # a wine-sized count into whichever price band it landed in. The wine table
+    # drops it the same way.
+    return sold[~sold["handle"].map(orders.is_add_on)].reset_index(drop=True)
 
 
 def _offer_sales() -> merchant_client.Sales:
