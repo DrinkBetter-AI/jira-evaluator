@@ -352,12 +352,14 @@ def price_gaps(config: Merchant, token: str, country: str = "") -> Prices:
         columns=["offer", "title", "brand", "price", "benchmark", "currency"],
     )
     frame = frame[(frame["benchmark"] > 0) & (frame["price"] > 0)]
-    # One row per bottle. The view's key is the whole REST id - channel, language,
-    # feed label and offer - so a catalogue listed twice would be counted twice in
-    # the share above the market and would take two places on the ask list with
-    # the same wine. It is one row per offer on this feed today; this keeps it so.
-    frame = frame.drop_duplicates(subset="offer")
     frame, currency, others = main_currency(frame)
+    # One row per bottle, and after the currency is chosen rather than before:
+    # the view's key is the whole REST id - channel, language, feed label and
+    # offer - so a catalogue listed twice would be counted twice in the share
+    # above the market and take two places on the ask list with the same wine,
+    # but dropping the duplicates first could keep the row in the wrong currency
+    # and lose the bottle to the filter below it.
+    frame = frame.drop_duplicates(subset="offer")
     frame = frame.assign(
         gap=(frame["price"] - frame["benchmark"]) / frame["benchmark"]
     ).reset_index(drop=True)

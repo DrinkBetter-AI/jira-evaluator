@@ -7272,6 +7272,9 @@ def _clear_page_caches(page_title: str) -> None:
         # Benchmarks move once a day, but a reader who has just changed a price
         # and pressed Refresh is asking about that price.
         _price_benchmark_cached,
+        # And whose listing each of those prices is: a merchant renamed or a
+        # product re-slugged would otherwise keep its old name for a day.
+        _offer_merchants_cached,
     )
     for cached in business if page_title == BUSINESS_PAGE_TITLE else engineering:
         cached.clear()
