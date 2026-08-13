@@ -353,6 +353,11 @@ click) and confirm every value is one of Yes/No/Maybe. The board is wide — zoo
 
 ## Testing the Business tab's "Price competitiveness" panel (Merchant Center + order book)
 
+> The merchant picker, the `Sold 90d` column, the evidence tab and the sales verdicts arrive with
+> PR #45. Until that lands, `develop` has three tabs, one download and no order-book read, and
+> `merchant_client.price_bands` / `sales_verdicts` and `orders_client.fetch_offer_sales` do not
+> exist yet: on `develop`, test only the paragraphs above that name Merchant Center alone.
+
 - The panel needs **two** live reads and degrades silently if either is missing:
   - `GOOGLE_MERCHANT_ID` (numeric account id, plus `GOOGLE_MERCHANT_COUNTRY`, e.g. `US`) with the
     `GCP_BIGQUERY_READONLY_KEY` service account authorised on that Merchant Center account. Without
