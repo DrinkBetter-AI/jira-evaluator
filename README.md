@@ -347,7 +347,20 @@ fully paid with nothing pending.
    shop next door charged for the same wine. Three tiles — the share of priced
    products above the benchmark, the typical (median, not mean: a handful sit near
    twice the market and would drag an average) gap, and how many products were
-   compared — over a table of the dearest offers, our price beside the market's.
+   compared — over three tables. **Ask the merchants** is the negotiation list:
+   the hundred bottles ranked on clicks times the gap, which is the demand
+   Shopping actually saw times how far over the market that demand was asked to
+   pay, with what it would take to reach the market price on each, which
+   merchants list that bottle (matched through the catalogue, since Google names
+   the wine and not whose listing it is), Google's own suggested cut where it
+   publishes one, and a slider asking what one percentage off the list would do
+   — a merchant agrees to a percentage over a range, not to five thousand prices.
+   Nothing there predicts extra orders: the feed carries no conversion tracking,
+   so conversions read zero on every row and an order count would be invented.
+   **Cheaper than the market** is the same read the other way up, the wines
+   already under the benchmark and being clicked on, which need nobody's
+   agreement and only the ad budget. **Dearest bottles** is the plain ranking by
+   gap, demand or no demand.
    Products no other merchant sells have no benchmark and are left out rather
    than counted as competitive, and a price within two pence of the benchmark is
    the same price rather than a problem. Prices in a second currency are set

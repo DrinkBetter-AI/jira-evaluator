@@ -72,6 +72,17 @@ _SAME_PRICE = 0.02
 # How far above the benchmark is worth naming in a table of the worst offenders.
 DEAR_GAP = 0.25
 
+# The window the click figures cover. Merchant Center's performance report
+# offers fixed ranges rather than an arbitrary number of days, and a month is
+# the shortest of them wide enough that a wine selling one bottle a fortnight
+# still shows demand.
+DEMAND_DAYS = 30
+
+# How many wines a negotiation list holds. A merchant will not reprice five
+# thousand bottles; a hundred is a conversation, and the tail below it is worth
+# a rounding error of the clicks.
+ASK_LIST = 100
+
 
 class MerchantConfigError(RuntimeError):
     """Raised when Merchant Center is unconfigured, or refuses the credential."""
@@ -168,6 +179,42 @@ class Insights:
             return self
         kept = self.offers[self.offers["offer"].isin(set(offers["offer"]))]
         return Insights(kept.reset_index(drop=True), self.truncated)
+
+
+@dataclass(frozen=True)
+class Demand:
+    """What shoppers actually did with each offer, over the last month.
+
+    Clicks are the only demand signal Merchant Center has that the shop cannot
+    get from its own order book: they count the shoppers who chose this bottle
+    out of a page of competing ones, including every shopper who then bought it
+    somewhere cheaper. Conversions are in the report too and are left out - the
+    feed carries no conversion tracking, so they are zero on every row and a
+    zero that means "not measured" is worse than no column.
+    """
+
+    offers: pd.DataFrame
+    truncated: bool = False
+
+    @property
+    def clicks(self) -> int:
+        return int(self.offers["clicks"].sum()) if len(self.offers) else 0
+
+    def against(self, offers: pd.DataFrame) -> pd.DataFrame:
+        """``offers`` with clicks and impressions on it, zero where unseen.
+
+        An offer nobody clicked is absent from the performance report rather
+        than present with a zero, so the join has to fill rather than drop: a
+        wine with no clicks is a real row with no demand, not a missing one.
+        """
+        if "offer" not in offers.columns:
+            return offers
+        if self.offers.empty:
+            return offers.assign(clicks=0, impressions=0)
+        joined = offers.merge(self.offers, on="offer", how="left")
+        joined["clicks"] = joined["clicks"].fillna(0).astype(int)
+        joined["impressions"] = joined["impressions"].fillna(0).astype(int)
+        return joined
 
 
 def load_merchant_env() -> Merchant | None:
@@ -357,7 +404,125 @@ def price_insights(config: Merchant, token: str) -> Insights:
     return Insights(frame.reset_index(drop=True), truncated)
 
 
-def verdicts(prices: Prices, insights: Insights | None = None) -> list[str]:
+def product_demand(config: Merchant, token: str) -> Demand:
+    """Clicks and impressions per offer over the last month.
+
+    Only the offers with a click: the report holds a row for every product that
+    was ever shown, the catalogue is tens of thousands of them, and the ones
+    nobody clicked carry no demand to rank by. Marketing method is left out of
+    the select on purpose - naming it would segment the report into an ads row
+    and an organic row per offer, and demand is demand.
+    """
+    query = (
+        "SELECT offer_id, clicks, impressions FROM product_performance_view "
+        "WHERE date DURING LAST_30_DAYS AND clicks > 0"
+    )
+    rows, truncated = _search(config, token, query)
+    frame = pd.DataFrame(
+        [
+            {
+                "offer": str(view.get("offerId", "")),
+                "clicks": int(view.get("clicks", 0) or 0),
+                "impressions": int(view.get("impressions", 0) or 0),
+            }
+            for view in (row.get("productPerformanceView", {}) for row in rows)
+        ],
+        columns=["offer", "clicks", "impressions"],
+    )
+    return Demand(frame, truncated)
+
+
+def bargains(prices: Prices, demand: Demand, limit: int = ASK_LIST) -> pd.DataFrame:
+    """The wines already cheaper than the market, the most wanted ones first.
+
+    The mirror of the ask list and the half of it nobody asks for: these need no
+    merchant's agreement, only a bigger share of the ad budget, because the
+    price comparison a shopper does in the next tab comes out in the shop's
+    favour.
+    """
+    if not prices.counted:
+        return prices.offers
+    cheaper = prices.offers[prices.offers["gap"] < -_SAME_PRICE]
+    if cheaper.empty:
+        return cheaper.assign(clicks=0, impressions=0)
+    frame = demand.against(cheaper)
+    frame = frame.assign(under=-frame["gap"] * frame["benchmark"])
+    return (
+        frame.sort_values(["clicks", "under"], ascending=False)
+        .head(limit)
+        .reset_index(drop=True)
+    )
+
+
+def ask_list(
+    prices: Prices,
+    demand: Demand,
+    insights: Insights | None = None,
+    limit: int = ASK_LIST,
+) -> pd.DataFrame:
+    """The bottles worth asking a merchant to reprice, best argument first.
+
+    Ranked on clicks times the gap, which is the demand actually seen times how
+    far over the market that demand was asked to pay. It deliberately does not
+    predict extra orders: the feed reports no conversions, so any figure in
+    orders would be a model of a model. Google's own suggestion is carried
+    alongside where it has one, as the second opinion it is, for the few hundred
+    offers it covers.
+
+    ``cut`` is what it would take to reach the market price, so a merchant can
+    be asked for a number rather than for less.
+    """
+    if not prices.counted:
+        return prices.offers
+    dear = prices.offers[prices.offers["gap"] > _SAME_PRICE]
+    if dear.empty:
+        return dear.assign(clicks=0, impressions=0)
+    frame = demand.against(dear)
+    frame = frame.assign(
+        cut=1 - frame["benchmark"] / frame["price"],
+        overpay=frame["price"] - frame["benchmark"],
+        impact=frame["clicks"] * frame["gap"],
+    )
+    if insights is not None and insights.counted:
+        advice = insights.offers[
+            ["offer", "suggested", "clicks_change", "conversions_change"]
+        ].rename(columns={"suggested": "google_price"})
+        frame = frame.merge(advice, on="offer", how="left")
+        frame["google_cut"] = 1 - frame["google_price"] / frame["price"]
+    return (
+        frame.sort_values(["impact", "clicks"], ascending=False)
+        .head(limit)
+        .reset_index(drop=True)
+    )
+
+
+def after_cut(offers: pd.DataFrame, cut: float) -> pd.DataFrame:
+    """The same offers repriced by ``cut``, with the gap that would leave.
+
+    Merchants agree to a percentage off a range, not to a price per bottle, so
+    the question a negotiation actually asks is what one percentage would do to
+    the whole list.
+    """
+    if offers.empty or "price" not in offers.columns:
+        return offers
+    price = offers["price"] * (1 - cut)
+    return offers.assign(
+        cut_price=price, cut_gap=(price - offers["benchmark"]) / offers["benchmark"]
+    )
+
+
+def beats_market(offers: pd.DataFrame) -> int:
+    """How many of the repriced offers would no longer be dearer than the rest."""
+    if offers.empty or "cut_gap" not in offers.columns:
+        return 0
+    return int((offers["cut_gap"] <= _SAME_PRICE).sum())
+
+
+def verdicts(
+    prices: Prices,
+    insights: Insights | None = None,
+    demand: Demand | None = None,
+) -> list[str]:
     """What the prices mean, in the sentences a leadership meeting would use."""
     if not prices.counted:
         return [
@@ -382,6 +547,21 @@ def verdicts(prices: Prices, insights: Insights | None = None) -> list[str]:
             + " cheaper than the market, and those are the ones worth "
             "advertising."
         )
+    # What a hundred phone calls would actually cover. The point of the ask list
+    # is that demand is not spread evenly over the catalogue, and the share below
+    # is the argument for negotiating a short list rather than a price policy.
+    if demand is not None:
+        wanted = ask_list(prices, demand, None, ASK_LIST)
+        dear = demand.against(prices.offers[prices.offers["gap"] > _SAME_PRICE])
+        dear_clicks = int(dear["clicks"].sum()) if not dear.empty else 0
+        asked = int(wanted["clicks"].sum()) if not wanted.empty else 0
+        if dear_clicks and asked:
+            lines.append(
+                f"The {len(wanted)} bottles worth asking about took {asked:,} of "
+                f"the {dear_clicks:,} clicks that went to a dearer-than-market "
+                f"wine, so {asked / dear_clicks:.0%} of that demand is one "
+                "conversation with a handful of merchants."
+            )
     # Only the suggestions for offers this panel compared: the insights report
     # is a wider population and "of them" is a claim about this one.
     if insights is not None:
@@ -406,17 +586,25 @@ def as_of(now: _dt.date | None = None) -> _dt.date:
 
 
 __all__ = [
+    "ASK_LIST",
     "DEAR_GAP",
     "DEFAULT_COUNTRY",
+    "DEMAND_DAYS",
+    "Demand",
     "Insights",
     "Merchant",
     "MerchantConfigError",
     "Prices",
     "access_token",
+    "after_cut",
     "as_of",
+    "ask_list",
+    "bargains",
+    "beats_market",
     "load_merchant_env",
     "main_currency",
     "price_gaps",
     "price_insights",
+    "product_demand",
     "verdicts",
 ]
