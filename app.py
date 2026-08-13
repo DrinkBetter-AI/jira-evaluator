@@ -3843,6 +3843,17 @@ def fetch_store_prefixes_cached(source: str) -> dict[str, str]:
     return orders_client.fetch_stores(config)
 
 
+def _unmathed(text: str) -> str:
+    """A sentence with money in it, safe to hand to ``st.markdown``.
+
+    Streamlit reads a pair of dollar signs on one line as inline LaTeX, so a
+    sentence saying ``$399 of $1,426`` renders as maths with both symbols eaten
+    and the figures between them in italics. Escaped only where it is drawn: the
+    same sentence goes into the printable report, which wants the plain text.
+    """
+    return text.replace("$", "\\$")
+
+
 def _money(amount: float, currency: str = "usd") -> str:
     symbol = {"usd": "$", "eur": "\u20ac", "gbp": "\u00a3"}.get(currency.lower(), "")
     return f"{symbol}{amount:,.2f}" + (f" {currency.upper()}" if not symbol else "")
@@ -4208,6 +4219,10 @@ class AdProducts(NamedTuple):
     # False when the report could not be read at all, which is not an account
     # that spent nothing - the same distinction ``Sales.read`` keeps.
     read: bool = True
+    # The earliest day the Shopping product table holds, asked of that table
+    # rather than of the campaign one beside it: the two are transferred
+    # separately, and only this one says how much of a per-wine window is real.
+    history_start: _dt.date | None = None
 
 
 def _no_ad_products(read: bool = True) -> AdProducts:
@@ -4238,17 +4253,39 @@ def _ad_products_cached(
     main = counted.most_common(1)[0][0]
     others = sorted({code for code in counted if code != main})
     billing = [account for account in accounts if account.currency == main]
-    frames = _parallel(
-        {
-            account.customer_id: (
-                lambda customer_id=account.customer_id: ads_client.product_stats(
-                    client, config, customer_id, days, today
-                )
+    tasks: dict[str, Callable[[], Any]] = {}
+    for account in billing:
+        customer_id = account.customer_id
+        tasks[f"spend:{customer_id}"] = (
+            lambda customer_id=customer_id: ads_client.product_stats(
+                client, config, customer_id, days, today
             )
-            for account in billing
-        }
+        )
+        # The product table's own first day. The campaign table's, already read
+        # for the accounts, is no answer here: the Shopping report is commonly
+        # added to a transfer months later, so a quarter of spend can be a week
+        # of it set beside a quarter of orders.
+        tasks[f"loaded:{customer_id}"] = (
+            lambda customer_id=customer_id: ads_client.loaded_from(
+                client, config, customer_id, today, ads_client.PRODUCT_TABLE
+            )
+        )
+    read = _parallel(tasks)
+    frames = [read[f"spend:{account.customer_id}"] for account in billing]
+    starts = [
+        day
+        for account in billing
+        if (day := read[f"loaded:{account.customer_id}"]) is not None
+    ]
+    return AdProducts(
+        _offers_together(frames),
+        main,
+        others,
+        # The latest of the accounts' first days, for the reason the campaign
+        # read takes it: a total is only wholly loaded once every account in it
+        # has reached back that far.
+        history_start=max(starts) if starts else None,
     )
-    return AdProducts(_offers_together(list(frames.values())), main, others)
 
 
 def _offers_together(frames: list[pd.DataFrame]) -> pd.DataFrame:
@@ -4800,7 +4837,7 @@ def _ad_claim(
     caption once they are on paper.
     """
     _report(TAB_BUSINESS).note("Ad spend per wine", claim)
-    st.markdown(claim)
+    st.markdown(_unmathed(claim))
     if wines.empty:
         return
     with st.expander(f"{label} - the {len(wines):,} wines behind this", expanded=False):
@@ -4847,8 +4884,33 @@ def _ad_ledger(
     )
 
 
+def _ad_window_note(ads: AdProducts, days: int = merchant_client.SALES_DAYS) -> None:
+    """How much of the window the product report actually holds.
+
+    The tab asks for a quarter of spend and puts it beside a quarter of the
+    shop's orders, but the Shopping product report is transferred separately from
+    the campaign one and is routinely switched on later: a fortnight of spend
+    against a quarter of orders reads as a return the ads never earned. Said only
+    when it is short, since a whole window needs no caveat.
+    """
+    if ads.frame.empty or ads.history_start is None:
+        return
+    wanted = ads_client.window_first_day(days)
+    if ads.history_start <= wanted:
+        return
+    held = (_dt.date.today() - _dt.timedelta(days=1) - ads.history_start).days + 1
+    st.caption(
+        f"**Google's product report only goes back to {ads.history_start}**, so "
+        f"the spend here is {max(held, 0)} days of it, not {days} - while the "
+        "bottles and revenue beside it are the whole window. The return per unit "
+        "spent is therefore flattered; the spend, the clicks and which wines took "
+        "the money are unaffected."
+    )
+
+
 def _ad_money_notes(ads: AdProducts, money: str, merchant: str) -> None:
     """What the figures above are not: one currency, one merchant, one feed."""
+    _ad_window_note(ads)
     if ads.other_currencies:
         st.caption(
             "Spend is the "
@@ -4972,7 +5034,7 @@ def _ad_advice(frame: pd.DataFrame, spent: str, money: str) -> None:
     st.markdown("#### What to do about it")
     for index, line in enumerate(said, start=1):
         _report(TAB_BUSINESS).note("Ad spend per wine", f"{index}. {line}")
-        st.markdown(f"{index}. {line}")
+        st.markdown(_unmathed(f"{index}. {line}"))
 
 
 def _no_ad_spend(ads: AdProducts, merchant: str) -> None:
@@ -5278,6 +5340,10 @@ def _render_sale_prices(
             "that can be said without the ad report."
         )
     )
+    if spent_known:
+        # The spend column here is the same short window as the ledger's, and it
+        # is what the list is ordered by.
+        _ad_window_note(ads)
 
 
 def _render_evidence(read: BenchmarkRead, merchant: str = _EVERY_MERCHANT) -> None:

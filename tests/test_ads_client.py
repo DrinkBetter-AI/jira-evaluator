@@ -574,6 +574,41 @@ def test_no_shopping_rows_at_all_reads_as_no_products_rather_than_an_error():
     assert list(frame.columns) == list(ac.PRODUCT_COLUMNS)
 
 
+class FakeRows:
+    """A client that records the SQL and answers with rows rather than a frame."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.sql = ""
+
+    def query(self, sql, job_config=None):  # noqa: D401 - mimics the client
+        self.sql = sql
+        rows = self.rows
+
+        class Job:
+            def result(self):
+                return rows
+
+        return Job()
+
+
+def test_which_table_a_history_is_asked_of_is_the_callers_to_choose():
+    """The Shopping product report is transferred separately from the campaign
+    one and is routinely switched on months later, so the campaign table's first
+    day says nothing about how much per-wine spend is loaded."""
+    client = FakeRows([{"first_day": dt.date(2026, 7, 6)}])
+    config = ac.AdsConfig("w266-project-329918", "google_ads", None, None)
+    assert ac.loaded_from(client, config, "8876864797") == dt.date(2026, 7, 6)
+    assert "ads_CampaignBasicStats_8876864797" in client.sql
+    ac.loaded_from(client, config, "8876864797", TODAY, ac.PRODUCT_TABLE)
+    assert "ads_ShoppingProductStats_8876864797" in client.sql
+
+
+def test_a_window_begins_the_day_after_it_is_long_and_never_includes_today():
+    assert ac.window_first_day(90, TODAY) == dt.date(2026, 5, 8)
+    assert ac.window_first_day(1, TODAY) == YESTERDAY
+
+
 def test_a_customer_id_cannot_smuggle_a_table_name_into_the_product_read():
     client = FakeQuery(PRODUCTS)
     config = ac.AdsConfig("w266-project-329918", "google_ads", None, None)

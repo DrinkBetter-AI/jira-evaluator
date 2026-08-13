@@ -30,6 +30,7 @@ _SALES_READ = dashboard._offer_sales_cached
 HARNESS = str(Path(__file__).resolve().parent / "_benchmark_harness.py")
 
 HARNESS_SOURCE = '''
+import datetime as dt
 import os
 import sys
 
@@ -121,6 +122,16 @@ elif MODE in ("adsblind", "adsbadconfig"):
     # A rejected setting fails the read the same way, which is why it is a mode
     # of its own: the reader is meant to be sent to the setting, not to BigQuery.
     dashboard._ad_products = lambda days: dashboard._no_ad_products(read=False)
+elif MODE == "adspartial":
+    # Configured and spending, but the Shopping product table only reached back a
+    # week: the same spend against a whole quarter of orders, which the tab has
+    # to say rather than let the return be read as a quarter's.
+    dashboard._ad_products = lambda days: dashboard.AdProducts(
+        ADS,
+        "USD",
+        [],
+        history_start=dt.date.today() - dt.timedelta(days=7),
+    )
 elif MODE == "adseur":
     # An account billed in euros beside a dollar one: the euro accounts are the
     # majority here, so the dollar one is the one set aside.
@@ -138,6 +149,7 @@ if MODE in (
     "adsquiet",
     "adsblind",
     "adsbadconfig",
+    "adspartial",
     "adseur",
 ):
     dashboard.orders_client.load_medusa_env = lambda: dashboard.orders_client.DbConfig(
@@ -566,7 +578,9 @@ print("an add-on shipped with the wine is not counted as bottles sold: ok")
 # Where the ad money went, per wine: the tab exists to be argued with, so the
 # arithmetic on screen is checked against the stubbed spend rather than trusted.
 ads_body = sold_body
-assert "$160 of $200" in ads_body, ads_body[-1500:]
+# Escaped, because two dollar signs in one markdown line are read by Streamlit
+# as inline maths and both symbols disappear from the sentence.
+assert "\\$160 of \\$200" in ads_body, ads_body[-1500:]
 # $170 of the $200 went to wines with no bottles against them (a, c's absence,
 # and the offer that has left the feed).
 assert "80% of the ad spend went to 2 wines that sold nothing" in ads_body, ads_body[
@@ -656,6 +670,7 @@ euro_said = texts(euros)
 assert "of the ad spend went to" in euro_said, euro_said[-1500:]
 assert " of \u20ac" in euro_said, euro_said[-1500:]
 assert " of $" not in euro_said, euro_said[-1500:]
+assert " of \\$" not in euro_said, euro_said[-1500:]
 print("ad spend is shown in the currency Google billed, or set aside: ok")
 
 # No ads dataset is not an empty account: the tab says how to point it at one.
@@ -694,6 +709,15 @@ mistyped = texts(run("adsbadconfig"))
 assert "check what they are set to" in mistyped, mistyped[-900:]
 assert "the credential cannot see it" not in mistyped, mistyped[-900:]
 print("a rejected Ads setting is not a BigQuery permission hunt: ok")
+
+# A product table that has only loaded part of the window is spend from a week
+# set beside a quarter of orders: the shortfall is stated, and the whole-window
+# case says nothing, since a caveat on a complete window is noise.
+short = texts(run("adspartial"))
+assert "only goes back to" in short, short[-1500:]
+assert "days of it, not 90" in short, short[-1500:]
+assert "only goes back to" not in ads_body, ads_body[-1500:]
+print("a part-loaded product report is not presented as a whole quarter: ok")
 
 # An order book that opened and matched none of the advertised wines is the same
 # falsehood as a shut one: what they sold is unknown, not nil.
