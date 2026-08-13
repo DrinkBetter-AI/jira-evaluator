@@ -43,49 +43,53 @@ MODE = os.getenv("ADS_MODE", "live")
 if not hasattr(dashboard, "_REAL_STRIPE_ENV"):
     dashboard._REAL_STRIPE_ENV = dashboard.cost_client.load_stripe_env
 
+# Only the key is swapped per mode. Everything else is stubbed on every mode,
+# so a mode run on its own - or a new one inserted before this - cannot fall
+# through to a live provider on the strength of an earlier mode having run.
 if MODE == "badstripe":
     dashboard.cost_client.load_stripe_env = dashboard._REAL_STRIPE_ENV
 else:
     dashboard.cost_client.load_stripe_env = lambda: "sk_test_stub"
 
-    def _ledger(days):
-        rows = [
-            {
-                "day": dt.date.today() - dt.timedelta(days=n),
-                "type": "application_fee",
-                "category": "connect_collection_transfer",
-                "amount": 100.0,
-                "fee": 0.0,
-                "currency": "usd",
-            }
-            for n in range(2 * days)
-        ]
-        columns = ["day", "type", "category", "amount", "fee", "currency"]
-        return pd.DataFrame(rows, columns=columns), False
 
-    dashboard._stripe_ledger_cached = _ledger
-    # Disputes are a separate call, and the Payments section makes it.
-    dashboard._stripe_disputes_cached = lambda days: 0
+def _ledger(days):
+    rows = [
+        {
+            "day": dt.date.today() - dt.timedelta(days=n),
+            "type": "application_fee",
+            "category": "connect_collection_transfer",
+            "amount": 100.0,
+            "fee": 0.0,
+            "currency": "usd",
+        }
+        for n in range(2 * days)
+    ]
+    columns = ["day", "type", "category", "amount", "fee", "currency"]
+    return pd.DataFrame(rows, columns=columns), False
 
-    # OpenAI's bill likewise: the printable report asserts the AI section is in
-    # it, and that section is only drawn when an admin key answers.
-    dashboard.cost_client.load_openai_env = lambda: "sk-admin-stub"
+dashboard._stripe_ledger_cached = _ledger
+# Disputes are a separate call, and the Payments section makes it.
+dashboard._stripe_disputes_cached = lambda days: 0
 
-    def _ai_costs(days):
-        rows = [
-            {
-                "day": dt.date.today() - dt.timedelta(days=n),
-                "project": "vinovoss",
-                "line_item": "gpt-4o-mini, inputs",
-                "cost": 4.0,
-                "currency": "usd",
-            }
-            for n in range(days)
-        ]
-        columns = ["day", "project", "line_item", "cost", "currency"]
-        return pd.DataFrame(rows, columns=columns)
+# OpenAI's bill likewise: the printable report asserts the AI section is in
+# it, and that section is only drawn when an admin key answers.
+dashboard.cost_client.load_openai_env = lambda: "sk-admin-stub"
 
-    dashboard._openai_costs_cached = _ai_costs
+def _ai_costs(days):
+    rows = [
+        {
+            "day": dt.date.today() - dt.timedelta(days=n),
+            "project": "vinovoss",
+            "line_item": "gpt-4o-mini, inputs",
+            "cost": 4.0,
+            "currency": "usd",
+        }
+        for n in range(days)
+    ]
+    columns = ["day", "project", "line_item", "cost", "currency"]
+    return pd.DataFrame(rows, columns=columns)
+
+dashboard._openai_costs_cached = _ai_costs
 
 
 
@@ -324,6 +328,10 @@ def run(mode: str) -> AppTest:
         os.environ["STRIPE_READONLY_API_KEY"] = "sk_live_thiswouldbeafullsecretkey"
     elif STRIPE_KEY:
         os.environ["STRIPE_READONLY_API_KEY"] = STRIPE_KEY
+    else:
+        # Nothing to restore means the fake live key has to go, or every mode
+        # after badstripe runs with a key that reads as a real one.
+        os.environ.pop("STRIPE_READONLY_API_KEY", None)
     test = AppTest.from_file(HARNESS, default_timeout=180)
     test.run()
     if "Read the shop's figures" in [b.label for b in test.button]:
