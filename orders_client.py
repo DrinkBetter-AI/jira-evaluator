@@ -377,6 +377,10 @@ join {SCHEMA}.product pr
  and pr.external_id is not null
  and pr.external_id <> ''
 where p.payment_status = any(%(paid)s)
+  -- A cancelled order is not a sale, whatever its payments say: a refund on a
+  -- cancelled order reads as `refunded`, which is otherwise a paid status. The
+  -- same guard the orders panel applies, so both count the same bottles.
+  and p.status <> 'canceled'
 group by pr.external_id
 """
 )

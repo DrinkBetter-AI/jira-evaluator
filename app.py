@@ -4203,8 +4203,14 @@ _DEFAULT_CUT_PERCENT = 10
 
 
 @st.cache_data(ttl=_OFFER_MERCHANTS_TTL_SECONDS, show_spinner=False)
-def _offer_merchants_cached(source: str, offers: tuple[str, ...]) -> dict[str, str]:
-    """Which merchants list each of these Google offers, as one printable name.
+def _offer_merchants_cached(
+    source: str, offers: tuple[str, ...]
+) -> dict[str, tuple[str, ...]]:
+    """Which merchants list each of these Google offers.
+
+    Each offer's merchants are kept apart rather than joined into a string: a
+    shop is free to have a comma in its name, and a name split back out of one
+    would be a merchant that matches nothing.
 
     Google knows the bottle and its price; only the catalogue knows whose
     listing that is, and a bottle several merchants stock names all of them -
@@ -4218,22 +4224,21 @@ def _offer_merchants_cached(source: str, offers: tuple[str, ...]) -> dict[str, s
         )
     handles = orders_client.fetch_offer_handles(config, list(offers))
     prefixes = orders_client.fetch_stores(config)
-    named: dict[str, str] = {}
-    for offer, listings in handles.items():
-        merchants = sorted(
-            {orders.merchant_of(handle, prefixes) for handle in listings}
+    return {
+        offer: tuple(
+            sorted({orders.merchant_of(handle, prefixes) for handle in listings})
         )
-        named[offer] = ", ".join(merchants)
-    return named
+        for offer, listings in handles.items()
+    }
 
 
-# The choice that means no filter at all, and the separator a wine stocked by
-# two merchants is named with.
+# The choice that means no filter at all, and how a wine stocked by two
+# merchants is named on the page.
 _EVERY_MERCHANT = "Every merchant"
 _MERCHANT_SEPARATOR = ", "
 
 
-def _offer_merchants(offers: pd.DataFrame) -> dict[str, str]:
+def _offer_merchants(offers: pd.DataFrame) -> dict[str, tuple[str, ...]]:
     """Each offer's merchants, or nothing at all when the catalogue is shut."""
     if offers.empty or "offer" not in offers.columns:
         return {}
@@ -4247,7 +4252,9 @@ def _offer_merchants(offers: pd.DataFrame) -> dict[str, str]:
 
 
 def _one_merchant(
-    prices: merchant_client.Prices, named: dict[str, str], merchant: str
+    prices: merchant_client.Prices,
+    named: dict[str, tuple[str, ...]],
+    merchant: str,
 ) -> merchant_client.Prices:
     """The same read, cut down to the offers one merchant lists.
 
@@ -4259,11 +4266,7 @@ def _one_merchant(
     """
     if merchant == _EVERY_MERCHANT or not named:
         return prices
-    mine = {
-        offer
-        for offer, names in named.items()
-        if merchant in names.split(_MERCHANT_SEPARATOR)
-    }
+    mine = {offer for offer, names in named.items() if merchant in names}
     kept = prices.offers[prices.offers["offer"].isin(mine)].reset_index(drop=True)
     return merchant_client.Prices(
         kept, prices.currency, prices.other_currencies, prices.truncated
@@ -4279,7 +4282,11 @@ def _with_merchants(frame: pd.DataFrame) -> pd.DataFrame:
     named = _offer_merchants(frame)
     if not named:
         return frame
-    return frame.assign(merchant=frame["offer"].map(named).fillna(""))
+    return frame.assign(
+        merchant=frame["offer"].map(
+            lambda offer: _MERCHANT_SEPARATOR.join(named.get(offer, ()))
+        )
+    )
 
 
 def _demand_note(demand: merchant_client.Demand) -> str:
@@ -4612,12 +4619,7 @@ def _render_price_benchmark() -> None:
     named = _offer_merchants(prices.offers)
     if named:
         merchants = sorted(
-            {
-                name
-                for names in named.values()
-                for name in names.split(_MERCHANT_SEPARATOR)
-                if name
-            }
+            {name for names in named.values() for name in names if name}
         )
         chosen = st.selectbox(
             "Merchant",
