@@ -659,6 +659,11 @@ print("ad spend is shown in the currency Google billed, or set aside: ok")
 noads = texts(run("noads"))
 assert "the transfer will need the Shopping product stats table" in noads, noads[-900:]
 assert "of the ad spend went to" not in noads, noads[-900:]
+# The sale-price feed still has wines to offer without Ads, and says what its
+# order means: with every spend nought, "the costliest first" would be a ranking
+# the data cannot support.
+assert "ordered by how far each one is above the market" in noads, noads[-1500:]
+assert "the ones the ad budget is already going to" not in noads, noads[-1500:]
 print("a dashboard with no ads dataset says so rather than showing $0: ok")
 
 # And an account that is configured and simply spent nothing is not told to

@@ -5148,6 +5148,7 @@ def _render_sale_prices(
     price for a fortnight and the result read here.
     """
     frame, ads = _ad_ledger(read, named, merchant)
+    spent_known = not frame.empty
     if frame.empty:
         # Without ad spend there is still a feed to make, from the benchmark
         # alone: the wines to try are the expensive ones, spend only orders them.
@@ -5166,6 +5167,28 @@ def _render_sale_prices(
             named,
         )
     feed = ads_evidence.sale_price_feed(frame)
+    if not feed.empty and not spent_known:
+        # Every spend in this frame is nought, so ordering by it would be the
+        # feed's own order presented as a ranking: order by what each wine is
+        # over the market instead, and say that is what the order is.
+        feed = (
+            feed.assign(over=feed["price"] - feed["sale_price"])
+            .sort_values("over", ascending=False)
+            .drop(columns="over")
+            .reset_index(drop=True)
+        )
+        st.caption(
+            (
+                "Google Ads' product report could not be read, so what each of "
+                "these wines costs in ad spend is unknown: "
+                if not ads.read
+                else "No ad spend is recorded against these wines, so: "
+            )
+            + "the list below is ordered by how far each one is above the "
+            "market rather than by what it cost, and the ad spend column is nil "
+            "because it is unknown rather than because the wine is free to "
+            "advertise."
+        )
     if feed.empty:
         st.caption(
             "Nothing here is priced far enough above the market to be worth "
@@ -5185,6 +5208,9 @@ def _render_sale_prices(
             help=(
                 "The costliest first, so a small test is a test of the wines the "
                 "budget is actually going to."
+                if spent_known
+                else "Furthest above the market first: without the ad report "
+                "there is no spend to rank them by."
             ),
         )
     else:
@@ -5235,8 +5261,14 @@ def _render_sale_prices(
         "The suggested price is Google's benchmark itself - the market, not "
         "under it. A sale price shows as a struck-through price in Shopping and "
         "does not touch the shop's own prices, so it can be reversed by deleting "
-        "the feed. Which wines to try is a judgement: these are the ones the ad "
-        "budget is already going to at a price the market is not paying."
+        "the feed. Which wines to try is a judgement: "
+        + (
+            "these are the ones the ad budget is already going to at a price the "
+            "market is not paying."
+            if spent_known
+            else "these are the ones furthest above the market, which is all "
+            "that can be said without the ad report."
+        )
     )
 
 
