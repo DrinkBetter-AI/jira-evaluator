@@ -55,6 +55,10 @@ DEFAULT_DATASET = "google_ads"
 _STATS_TABLE = "ads_CampaignBasicStats"
 _CAMPAIGN_TABLE = "ads_Campaign"
 _CUSTOMER_TABLE = "ads_Customer"
+# Shopping's own grain: one row per product per day, keyed by the offer id the
+# Merchant Center feed uses, which is what lets ad spend be set beside the price
+# of the bottle it was spent on.
+_PRODUCT_TABLE = "ads_ShoppingProductStats"
 
 MICROS = 1_000_000
 
@@ -360,6 +364,53 @@ def daily_stats(
         )
     frame["day"] = pd.to_datetime(frame["day"]).dt.date
     return frame
+
+
+PRODUCT_COLUMNS = ("offer", "spend", "clicks", "impressions", "ad_conversions")
+
+
+def product_stats(
+    client,
+    config: AdsConfig,
+    customer_id: str,
+    days: int,
+    now: _dt.date | None = None,
+) -> pd.DataFrame:
+    """What each advertised product cost and drew over the last ``days`` days.
+
+    One row per offer id, which is the same id the Merchant Center feed and the
+    catalogue's ``external_id`` carry, so the spend on a bottle can be read
+    beside its price against the market and the bottles it actually sold.
+
+    ``ad_conversions`` is Google's own attribution and is reported as such: the
+    account records a few dozen against the CRM's hundreds of orders, so it is
+    evidence about the ad, not about the shop.
+    """
+    end = now or _dt.date.today()
+    last = end - _dt.timedelta(days=1)
+    first = last - _dt.timedelta(days=days - 1)
+    sql = f"""
+        SELECT
+          segments_product_item_id AS offer,
+          SUM(metrics_cost_micros) / {MICROS} AS spend,
+          SUM(metrics_clicks) AS clicks,
+          SUM(metrics_impressions) AS impressions,
+          SUM(metrics_conversions) AS ad_conversions
+        FROM {_table(config, _PRODUCT_TABLE, customer_id)}
+        WHERE segments_date BETWEEN @first AND @last
+        GROUP BY offer
+    """
+    frame = _run(client, sql, first=first, last=last)
+    if frame.empty:
+        return pd.DataFrame(columns=list(PRODUCT_COLUMNS))
+    frame["offer"] = frame["offer"].astype(str).str.strip()
+    for column in ("spend", "clicks", "impressions", "ad_conversions"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
+    return (
+        frame[frame["offer"] != ""]
+        .sort_values("spend", ascending=False)
+        .reset_index(drop=True)
+    )
 
 
 def campaign_names(client, config: AdsConfig, customer_id: str) -> pd.DataFrame:

@@ -515,3 +515,67 @@ def test_commission_charged_is_read_even_where_the_crm_has_no_revenue():
 def test_a_commission_return_divides_only_when_there_was_spend():
     assert ac.earned_return(147.0, 176.0) == pytest.approx(0.84)
     assert ac.earned_return(147.0, 0.0) == 0.0
+
+
+class FakeQuery:
+    """A BigQuery client that records the SQL and answers with a frame."""
+
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.frame = frame
+        self.sql = ""
+        self.params: dict = {}
+
+    def query(self, sql, job_config=None):  # noqa: D401 - mimics the client
+        self.sql = sql
+        self.params = {
+            param.name: param.value for param in (job_config.query_parameters or [])
+        }
+        frame = self.frame
+
+        class Job:
+            def result(self):
+                class Rows:
+                    def to_dataframe(self):
+                        return frame
+
+                return Rows()
+
+        return Job()
+
+
+PRODUCTS = pd.DataFrame(
+    [
+        ("wine-1", 12.5, 40, 900, 1.0),
+        (" wine-2 ", 3.25, 8, 120, 0.0),
+        ("", 1.0, 2, 30, 0.0),
+    ],
+    columns=["offer", "spend", "clicks", "impressions", "ad_conversions"],
+)
+
+
+def test_product_spend_is_read_per_offer_over_the_window_asked_for():
+    client = FakeQuery(PRODUCTS)
+    config = ac.AdsConfig("w266-project-329918", "google_ads", None, None)
+    frame = ac.product_stats(client, config, "8876864797", 90, now=TODAY)
+    # Yesterday backwards, today excluded: today is a part-day and would read as
+    # spend collapsing.
+    assert client.params == {"first": dt.date(2026, 5, 8), "last": YESTERDAY}
+    assert "ads_ShoppingProductStats_8876864797" in client.sql
+    # An offer id with nothing in it joins to every wine and to none, so it goes.
+    assert list(frame["offer"]) == ["wine-1", "wine-2"]
+    assert float(frame["spend"].iloc[0]) == 12.5
+
+
+def test_no_shopping_rows_at_all_reads_as_no_products_rather_than_an_error():
+    client = FakeQuery(pd.DataFrame())
+    config = ac.AdsConfig("w266-project-329918", "google_ads", None, None)
+    frame = ac.product_stats(client, config, "8876864797", 30, now=TODAY)
+    assert frame.empty
+    assert list(frame.columns) == list(ac.PRODUCT_COLUMNS)
+
+
+def test_a_customer_id_cannot_smuggle_a_table_name_into_the_product_read():
+    client = FakeQuery(PRODUCTS)
+    config = ac.AdsConfig("w266-project-329918", "google_ads", None, None)
+    with pytest.raises(ac.AdsConfigError):
+        ac.product_stats(client, config, "8876864797` UNION ALL SELECT", 30, now=TODAY)

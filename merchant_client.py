@@ -102,6 +102,23 @@ _LAST_BAND = f"More than {DEAR_GAP:.0%} more expensive"
 
 _BAND_COLUMNS = ("band", "listings", "clicks", "bottles", "per_100_clicks")
 
+# How several merchants listing the same bottle are named in one cell.
+MERCHANT_SEPARATOR = ", "
+
+BAND_NAMES = tuple(name for _, name in _BANDS) + (_LAST_BAND,)
+
+
+def band_of(gaps: pd.Series) -> pd.Series:
+    """Each gap against the market as the band it falls in.
+
+    Shared so that anything grouping by price band - the sales evidence, the ad
+    spend beside it - splits the catalogue at the same three prices. Two panels
+    disagreeing about what counts as expensive is how a merchant is told two
+    different things about the same bottle.
+    """
+    edges = [-float("inf")] + [edge for edge, _ in _BANDS] + [float("inf")]
+    return pd.cut(gaps, bins=edges, labels=list(BAND_NAMES), right=True)
+
 
 class MerchantConfigError(RuntimeError):
     """Raised when Merchant Center is unconfigured, or refuses the credential."""
@@ -322,11 +339,7 @@ def price_bands(prices: Prices, demand: Demand, sales: Sales) -> pd.DataFrame:
     if not prices.counted:
         return pd.DataFrame(columns=list(_BAND_COLUMNS))
     frame = sales.against(demand.against(prices.offers))
-    edges = [-float("inf")] + [edge for edge, _ in _BANDS] + [float("inf")]
-    labels = [name for _, name in _BANDS] + [_LAST_BAND]
-    frame = frame.assign(
-        band=pd.cut(frame["gap"], bins=edges, labels=labels, right=True)
-    )
+    frame = frame.assign(band=band_of(frame["gap"]))
     grouped = (
         frame.groupby("band", observed=False)
         .agg(

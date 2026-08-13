@@ -76,6 +76,7 @@ from hygiene import (
     stale_candidates,
 )
 import ads_client
+import ads_evidence
 import cost_client
 import amplitude_client
 import merchant_client
@@ -4190,6 +4191,68 @@ def _offer_sales_cached(source: str, days: int, today: _dt.date) -> pd.DataFrame
     return sold[~sold["handle"].map(orders.is_add_on)].reset_index(drop=True)
 
 
+# Ad spend per wine is read over the same quarter as the sales it is set beside:
+# a month of spend against a quarter of orders would read as a return the ads
+# never earned.
+_AD_PRODUCTS_TTL_SECONDS = 6 * 3600
+
+
+@st.cache_data(ttl=_AD_PRODUCTS_TTL_SECONDS, show_spinner=False)
+def _ad_products_cached(
+    project: str, dataset: str, days: int, today: _dt.date
+) -> pd.DataFrame:
+    """What each advertised offer cost, summed over every account in the dataset.
+
+    Keyed on the day for the reason the campaign reads are: the window has to
+    roll forward with the calendar rather than with the cache's timer.
+    """
+    config = _ads_config(project, dataset)
+    client = _ads_bigquery_client(project, dataset)
+    accounts = _ads_accounts(project, dataset, today)
+    if not accounts:
+        return pd.DataFrame(columns=list(ads_client.PRODUCT_COLUMNS))
+    frames = _parallel(
+        {
+            account.customer_id: (
+                lambda customer_id=account.customer_id: ads_client.product_stats(
+                    client, config, customer_id, days, today
+                )
+            )
+            for account in accounts
+        }
+    )
+    together = pd.concat(list(frames.values()), ignore_index=True)
+    if together.empty:
+        return pd.DataFrame(columns=list(ads_client.PRODUCT_COLUMNS))
+    # One row per offer even where two accounts advertised the same bottle: the
+    # panel's subject is the wine, and the same wine twice would halve its
+    # apparent return.
+    return (
+        together.groupby("offer", as_index=False)
+        .sum(numeric_only=True)
+        .sort_values("spend", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def _ad_products(days: int) -> pd.DataFrame:
+    """Ad spend per offer, or nothing at all when Ads cannot be read.
+
+    Empty rather than raised: this is one tab of a panel whose other tabs do not
+    need Google Ads, and a dataset nobody has set up is not an error on a page
+    about prices.
+    """
+    try:
+        config = ads_client.load_ads_env()
+        if config is None:
+            return pd.DataFrame(columns=list(ads_client.PRODUCT_COLUMNS))
+        return _ad_products_cached(
+            config.project, config.dataset, days, _dt.date.today()
+        )
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame(columns=list(ads_client.PRODUCT_COLUMNS))
+
+
 def _offer_sales() -> merchant_client.Sales:
     """What the shop sold, or an unread ``Sales`` when the CRM is unreachable."""
     try:
@@ -4243,7 +4306,7 @@ def _offer_merchants_cached(
 # The choice that means no filter at all, and how a wine stocked by two
 # merchants is named on the page.
 _EVERY_MERCHANT = "Every merchant"
-_MERCHANT_SEPARATOR = ", "
+_MERCHANT_SEPARATOR = merchant_client.MERCHANT_SEPARATOR
 
 
 def _offer_merchants(offers: pd.DataFrame) -> dict[str, tuple[str, ...]]:
@@ -4622,6 +4685,389 @@ def _merchant_letter(bands: pd.DataFrame, merchant: str, sales_days: int) -> Non
     )
 
 
+def _ad_ledger_table(frame: pd.DataFrame, money: str) -> pd.DataFrame:
+    """The per-wine ledger as a reader sees it, money and gaps formatted."""
+    return frame.assign(
+        spend=frame["spend"].map(lambda value: _money(value, money)),
+        sold_revenue=frame["sold_revenue"].map(lambda value: _money(value, money)),
+        price=frame["price"].map(
+            lambda value: "\u2014" if pd.isna(value) else _money(value, money)
+        ),
+        benchmark=frame["benchmark"].map(
+            lambda value: "\u2014" if pd.isna(value) else _money(value, money)
+        ),
+        gap=frame["gap"].map(
+            lambda value: "\u2014" if pd.isna(value) else f"{value:+.0%}"
+        ),
+        clicks=frame["clicks"].map(lambda value: f"{int(value):,}"),
+        impressions=frame["impressions"].map(lambda value: f"{int(value):,}"),
+        bottles=frame["bottles"].map(lambda value: f"{int(value):,}"),
+    ).rename(
+        columns={
+            "offer": "Offer",
+            "title": "Wine",
+            "merchant": "Merchant",
+            "spend": "Ad spend",
+            "clicks": "Clicks",
+            "impressions": "Shown",
+            "bottles": f"Bottles {merchant_client.SALES_DAYS}d",
+            "sold_revenue": "Revenue",
+            "price": "Our price",
+            "benchmark": "Market",
+            "gap": "Gap",
+        }
+    )
+
+
+def _ad_claim(
+    label: str, claim: str, wines: pd.DataFrame, money: str, key: str
+) -> None:
+    """One claim with the wines behind it folded up underneath.
+
+    Every sentence this panel makes is opened by clicking it: the argument it is
+    part of is with the person who runs the campaign, and a summary he cannot
+    drill into is a summary he is right to distrust.
+    """
+    st.markdown(claim)
+    if wines.empty:
+        return
+    with st.expander(f"{label} - the {len(wines):,} wines behind this", expanded=False):
+        st.dataframe(
+            _ad_ledger_table(wines.head(_AD_LEDGER_ROWS), money),
+            width="stretch",
+            hide_index=True,
+        )
+        if len(wines) > _AD_LEDGER_ROWS:
+            st.caption(
+                f"The {_AD_LEDGER_ROWS} costliest of {len(wines):,}; the file "
+                "below holds all of them."
+            )
+        st.download_button(
+            "Download these",
+            data=wines.to_csv(index=False).encode("utf-8"),
+            file_name=f"ads-{key}-{merchant_client.as_of()}.csv",
+            mime="text/csv",
+            key=f"ads_claim_{key}",
+        )
+
+
+def _ad_ledger(
+    read: BenchmarkRead, named: dict | None, merchant: str
+) -> pd.DataFrame:
+    """The per-wine ad ledger, cut to one merchant's wines when one is picked.
+
+    The picker above promises every figure below is that merchant's alone, and
+    ad spend is no exception: showing a merchant somebody else's wasted spend
+    would be the panel arguing with the wrong person.
+    """
+    ads = _ad_products(merchant_client.SALES_DAYS)
+    if merchant != _EVERY_MERCHANT and not ads.empty:
+        ads = ads[ads["offer"].isin(set(read.prices.offers["offer"]))]
+    return ads_evidence.ledger(ads, read.prices, read.sales, named)
+
+
+def _render_ad_money(
+    read: BenchmarkRead, money: str, named: dict | None, merchant: str
+) -> None:
+    """Where the ad budget went, wine by wine, against price and against sales.
+
+    The panel's other tabs ask a merchant to change a price. This one asks the
+    account itself a cheaper question: of the money already spent, how much went
+    to bottles that nobody bought - which needs nobody's agreement to change.
+    """
+    frame = _ad_ledger(read, named, merchant)
+    if frame.empty:
+        st.caption(
+            "Per-wine ad spend comes from Google Ads' Shopping product report in "
+            "BigQuery. Set GOOGLE_ADS_BQ_PROJECT and GOOGLE_ADS_BQ_DATASET, and "
+            "the transfer will need the Shopping product stats table."
+        )
+        return
+    if not read.sales.read:
+        st.caption(
+            "The order book could not be read, so bottles below are unknown "
+            "rather than none, and no return per dollar is shown."
+        )
+    split = ads_evidence.spend_split(frame)
+    tiles = st.columns(3)
+    _tile(
+        tiles[0],
+        TAB_BUSINESS,
+        "Ad spend per wine",
+        f"Spend {merchant_client.SALES_DAYS}d",
+        _money(float(frame["spend"].sum()), money),
+    )
+    nothing = split[split["outcome"] == ads_evidence.NOTHING]
+    _tile(
+        tiles[1],
+        TAB_BUSINESS,
+        "Ad spend per wine",
+        "On wines that sold nothing",
+        f"{float(nothing['spend'].iloc[0]) / float(frame['spend'].sum()):.0%}"
+        if not nothing.empty and float(frame["spend"].sum()) > 0
+        else "\u2014",
+    )
+    _tile(
+        tiles[2],
+        TAB_BUSINESS,
+        "Ad spend per wine",
+        "Wines advertised",
+        f"{len(frame):,}",
+    )
+    _ad_pictures(frame, money)
+    for index, claim in enumerate(ads_evidence.verdicts(frame)):
+        wines, key, label = _ad_claim_wines(frame, index)
+        _ad_claim(label, claim, wines, money, key)
+    st.download_button(
+        f"Download every advertised wine ({len(frame):,})",
+        data=frame.to_csv(index=False).encode("utf-8"),
+        file_name=f"ads-per-wine-{merchant_client.as_of()}.csv",
+        mime="text/csv",
+        key="ads_ledger_download",
+        help=(
+            "One row per wine: what Google charged for it, what it was shown "
+            "and clicked, what it sold, and its price against the market."
+        ),
+    )
+    st.caption(
+        f"Google Ads' own product report, last {merchant_client.SALES_DAYS} days, "
+        "beside the same window of the shop's orders. Bottles are every sale of "
+        "that wine in the window rather than sales an ad can be shown to have "
+        "caused - Google's own attribution records a fraction of the shop's "
+        "orders - so a return here is the return on advertising a wine, not the "
+        "sales advertising created."
+    )
+
+
+# How many rows a folded-up claim shows before it becomes a file.
+_AD_LEDGER_ROWS = 50
+
+
+def _ad_claim_wines(frame: pd.DataFrame, index: int) -> tuple[pd.DataFrame, str, str]:
+    """The wines behind each of ``ads_evidence.verdicts``' claims, in its order."""
+    if index == 0:
+        return (
+            frame[frame["bottles"] <= 0].sort_values("spend", ascending=False),
+            "sold-nothing",
+            "Sold nothing",
+        )
+    if index == 1:
+        return (
+            frame[frame["gap"].notna()].sort_values("spend", ascending=False),
+            "by-price",
+            "Priced against the market",
+        )
+    return (
+        frame[frame["gap"].isna()].sort_values("spend", ascending=False),
+        "no-benchmark",
+        "No benchmark",
+    )
+
+
+def _ad_pictures(frame: pd.DataFrame, money: str) -> None:
+    """The two figures as pictures: where the money went, and what came back."""
+    split = ads_evidence.spend_split(frame)
+    bands = ads_evidence.by_band(frame)
+    left, right = st.columns(2)
+    if not split.empty and float(split["spend"].sum()) > 0:
+        with left:
+            ring = px.pie(
+                split,
+                names="outcome",
+                values="spend",
+                color="outcome",
+                color_discrete_map=ads_evidence.SPLIT_COLOURS,
+                hole=0.35,
+                title=f"Ad spend, last {merchant_client.SALES_DAYS} days",
+            )
+            ring.update_traces(
+                textinfo="percent",
+                hovertemplate="%{label}: %{value:$,.0f} across %{customdata[0]:,} "
+                "wines<extra></extra>",
+                customdata=split[["wines"]].to_numpy(),
+            )
+            ring.update_layout(margin=dict(t=54, b=0, l=0, r=0), legend_title_text="")
+            st.plotly_chart(ring, width="stretch")
+    rated = bands[bands["per_dollar"].notna()]
+    if rated.empty:
+        return
+    with right:
+        colours = {
+            band: merchant_letter.BAND_COLOURS[index]
+            for index, band in enumerate(merchant_client.BAND_NAMES)
+        }
+        bars = px.bar(
+            rated,
+            x="per_dollar",
+            y=rated["band"].astype(str),
+            orientation="h",
+            color=rated["band"].astype(str),
+            color_discrete_map=colours,
+            title=f"Revenue per {_money(1, money)} of ads, by price against market",
+            text=rated["per_dollar"].map(lambda value: f"{value:,.0f}"),
+        )
+        bars.update_layout(
+            margin=dict(t=54, b=0, l=0, r=0),
+            showlegend=False,
+            xaxis_title="",
+            yaxis_title="",
+            yaxis=dict(autorange="reversed"),
+        )
+        st.plotly_chart(bars, width="stretch")
+
+
+def _render_most_clicked(
+    read: BenchmarkRead, money: str, named: dict | None, merchant: str
+) -> None:
+    """The wines shoppers chose most, and what each one's price did next.
+
+    Clicks are demand the shop did not have to earn: a shopper on a Shopping row
+    has picked this bottle out of a dozen of the same wine. What happened after
+    the click - a bottle sold, or nothing - is the whole argument, per wine, with
+    the price gap that goes with it.
+    """
+    frame = _ad_ledger(read, named, merchant)
+    if frame.empty:
+        st.caption(
+            "Clicks per wine come from Google Ads' Shopping product report; the "
+            "tab beside this one says how to point the dashboard at it."
+        )
+        return
+    wanted = ads_evidence.most_clicked(frame, _MOST_CLICKED)
+    if wanted.empty:
+        st.caption("Nothing was clicked in the window.")
+        return
+    st.dataframe(
+        _ad_ledger_table(wanted, money), width="stretch", hide_index=True
+    )
+    st.download_button(
+        "Download the most clicked",
+        data=wanted.to_csv(index=False).encode("utf-8"),
+        file_name=f"ads-most-clicked-{merchant_client.as_of()}.csv",
+        mime="text/csv",
+        key="ads_clicked_download",
+    )
+    st.caption(
+        f"The {len(wanted)} most clicked advertised wines of the last "
+        f"{merchant_client.SALES_DAYS} days, with the bottles each sold in the "
+        "same window and its price against the market. A wine with clicks, no "
+        "bottles and a gap well above the market is the case this panel is "
+        "making; a wine with clicks, no bottles and a keen price is a different "
+        "problem, and worth reading as one."
+    )
+
+
+# How many wines the most-clicked table names. Enough to see the pattern without
+# becoming the ledger, which is a download rather than a table.
+_MOST_CLICKED = 40
+
+# How the sale-price test is sized: in tens, and never more than a few hundred
+# wines, which is as large as a price test can be and still be read afterwards.
+_SALE_FEED_STEP = 10
+_SALE_FEED_MAX = 500
+
+
+def _render_sale_prices(
+    read: BenchmarkRead, money: str, named: dict | None, merchant: str
+) -> None:
+    """A supplemental feed that tries the market price without changing a price.
+
+    The panel's ask - drop the price - needs a merchant to agree, a shop update
+    and a wait. Merchant Center takes a ``sale_price`` per offer in a
+    supplemental feed instead, so the same wines can be tried at the market
+    price for a fortnight and the result read here.
+    """
+    frame = _ad_ledger(read, named, merchant)
+    if frame.empty:
+        # Without ad spend there is still a feed to make, from the benchmark
+        # alone: the wines to try are the expensive ones, spend only orders them.
+        frame = ads_evidence.ledger(
+            pd.DataFrame(
+                {
+                    "offer": read.prices.offers["offer"],
+                    "spend": 0.0,
+                    "clicks": 0,
+                    "impressions": 0,
+                    "ad_conversions": 0.0,
+                }
+            ),
+            read.prices,
+            read.sales,
+            named,
+        )
+    feed = ads_evidence.sale_price_feed(frame)
+    if feed.empty:
+        st.caption(
+            "Nothing here is priced far enough above the market to be worth "
+            "putting on sale."
+        )
+        return
+    # A slider needs two ends to it: a handful of wines is the whole test, and
+    # asking how many of five to try is a question with one answer.
+    if len(feed) > _SALE_FEED_STEP:
+        count = st.slider(
+            "How many wines to try",
+            min_value=_SALE_FEED_STEP,
+            max_value=min(_SALE_FEED_MAX, len(feed)),
+            value=min(50, len(feed)),
+            step=_SALE_FEED_STEP,
+            key="ads_sale_feed_count",
+            help=(
+                "The costliest first, so a small test is a test of the wines the "
+                "budget is actually going to."
+            ),
+        )
+    else:
+        count = len(feed)
+    trying = feed.head(count)
+    st.dataframe(
+        trying.assign(
+            price=trying["price"].map(lambda value: _money(value, money)),
+            sale_price=trying["sale_price"].map(lambda value: _money(value, money)),
+            spend=trying["spend"].map(lambda value: _money(value, money)),
+            clicks=trying["clicks"].map(lambda value: f"{int(value):,}"),
+        ).rename(
+            columns={
+                "id": "Offer",
+                "title": "Wine",
+                "price": "Our price",
+                "sale_price": "Suggested sale price",
+                "clicks": "Clicks",
+                "spend": "Ad spend",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.download_button(
+        f"Download a supplemental feed ({len(trying):,} wines)",
+        data=trying[["id", "price", "sale_price"]]
+        .assign(
+            price=trying["price"].map(lambda value: f"{value:.2f} {money or 'USD'}"),
+            sale_price=trying["sale_price"].map(
+                lambda value: f"{value:.2f} {money or 'USD'}"
+            ),
+        )
+        .to_csv(index=False)
+        .encode("utf-8"),
+        file_name=f"sale-price-feed-{merchant_client.as_of()}.csv",
+        mime="text/csv",
+        key="ads_sale_feed_download",
+        help=(
+            "Merchant Center, Data sources, add a supplemental feed and upload "
+            "this: it sets sale_price on these offers and leaves everything "
+            "else alone."
+        ),
+    )
+    st.caption(
+        "The suggested price is Google's benchmark itself - the market, not "
+        "under it. A sale price shows as a struck-through price in Shopping and "
+        "does not touch the shop's own prices, so it can be reversed by deleting "
+        "the feed. Which wines to try is a judgement: these are the ones the ad "
+        "budget is already going to at a price the market is not paying."
+    )
+
+
 def _render_evidence(read: BenchmarkRead, merchant: str = _EVERY_MERCHANT) -> None:
     """What the shop's own sales say about the price it charged.
 
@@ -4800,11 +5246,22 @@ def _render_price_benchmark() -> None:
         )
 
     if prices.counted:
-        ask_tab, bargain_tab, evidence_tab, dear_tab = st.tabs(
+        (
+            ask_tab,
+            bargain_tab,
+            evidence_tab,
+            ads_tab,
+            clicked_tab,
+            feed_tab,
+            dear_tab,
+        ) = st.tabs(
             [
                 f"Ask the merchants ({merchant_client.ASK_LIST})",
                 "Cheaper than the market",
                 "What price did to sales",
+                "Where the ad money went",
+                "Most clicked",
+                "Try a sale price",
                 "Most expensive bottles",
             ]
         )
@@ -4814,6 +5271,12 @@ def _render_price_benchmark() -> None:
             _render_bargains(read, money, named)
         with evidence_tab:
             _render_evidence(read, chosen)
+        with ads_tab:
+            _render_ad_money(read, money, named, chosen)
+        with clicked_tab:
+            _render_most_clicked(read, money, named, chosen)
+        with feed_tab:
+            _render_sale_prices(read, money, named, chosen)
         with dear_tab:
             st.dataframe(
                 prices.worst.head(_WORST_OFFERS)

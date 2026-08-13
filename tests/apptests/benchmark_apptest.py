@@ -97,7 +97,26 @@ LISTED = {
     "d": ("Blackbear", "Yiannis"),
 }
 
-if MODE in ("sold", "merchant", "nomatch"):
+# What Google charged for each of those offers over the same window. The dear
+# bottle takes the most money and sells nothing; one offer took money and is not
+# in the feed at all, which is spend a benchmark cannot speak for.
+ADS = pd.DataFrame(
+    [
+        {"offer": "a", "spend": 60.0, "clicks": 4, "impressions": 400},
+        {"offer": "b", "spend": 30.0, "clicks": 90, "impressions": 2000},
+        {"offer": "d", "spend": 10.0, "clicks": 30, "impressions": 900},
+        {"offer": "gone", "spend": 100.0, "clicks": 7, "impressions": 70},
+    ]
+).assign(ad_conversions=0.0)
+
+if MODE == "noads":
+    dashboard._ad_products = lambda days: pd.DataFrame(
+        columns=list(dashboard.ads_client.PRODUCT_COLUMNS)
+    )
+else:
+    dashboard._ad_products = lambda days: ADS
+
+if MODE in ("sold", "merchant", "nomatch", "noads"):
     dashboard.orders_client.load_medusa_env = lambda: dashboard.orders_client.DbConfig(
         "host", "db", "user", "secret", 5432
     )
@@ -447,7 +466,24 @@ figures = {m.label: m.value for m in mine.metric}
 # third rather than the shop's half.
 assert figures["Priced products compared"] == "3", figures
 assert figures["More expensive than the market"] == "33%", figures
-only_mine = [f.value for f in mine.dataframe if "Merchant" in f.value.columns]
+# The ads ledger is cut to the same merchant, so its spend is theirs too: the
+# offer that took the most money is somebody else's wine and is gone with them.
+mine_ads = [
+    f.value for f in mine.dataframe if "Ad spend" in f.value.columns
+]
+for frame in mine_ads:
+    assert "gone" not in set(frame["Offer"]), frame.to_string()
+assert mine_ads, [list(f.value.columns) for f in mine.dataframe]
+assert {m.label: m.value for m in mine.metric}["Spend 90d"] == "$40.00", [
+    (m.label, m.value) for m in mine.metric
+]
+print("the ad spend shown to one merchant is that merchant's own: ok")
+
+only_mine = [
+    f.value
+    for f in mine.dataframe
+    if "Merchant" in f.value.columns and "Ad spend" not in f.value.columns
+]
 assert only_mine, [list(f.value.columns) for f in mine.dataframe]
 for frame in only_mine:
     for names in frame["Merchant"]:
@@ -503,5 +539,63 @@ finally:
     dashboard.orders_client.load_medusa_env = _env
 assert list(kept["handle"]) == ["yiannis-a-cheap-wine"], kept.to_string()
 print("an add-on shipped with the wine is not counted as bottles sold: ok")
+
+# Where the ad money went, per wine: the tab exists to be argued with, so the
+# arithmetic on screen is checked against the stubbed spend rather than trusted.
+ads_body = sold_body
+assert "$160 of $200" in ads_body, ads_body[-1500:]
+# $170 of the $200 went to wines with no bottles against them (a, c's absence,
+# and the offer that has left the feed).
+assert "80% of the ad spend went to 2 wines that sold nothing" in ads_body, ads_body[
+    -1500:
+]
+assert "50% of the spend went to 1 offer Google publishes no benchmark for" in (
+    ads_body
+), ads_body[-1500:]
+print("the ad spend split is stated and the unbenchmarked part disclosed: ok")
+
+ads_metrics = {m.label: m.value for m in sold_run.metric}
+assert ads_metrics["Spend 90d"] == "$200.00", ads_metrics
+assert ads_metrics["On wines that sold nothing"] == "80%", ads_metrics
+assert ads_metrics["Wines advertised"] == "4", ads_metrics
+
+# The most clicked wine is the keenly priced one, and the ledger names what each
+# wine sold beside what it cost to advertise.
+# Several tables carry these columns - each folded-up claim is one - so the most
+# clicked table is picked out by being the one ordered by clicks.
+def by_clicks():
+    for frame in sold_tables:
+        if not {"Clicks", "Ad spend", "Gap"} <= set(frame.columns):
+            continue
+        clicks = [int(value.replace(",", "")) for value in frame["Clicks"]]
+        if len(clicks) > 2 and clicks == sorted(clicks, reverse=True):
+            return frame
+    raise AssertionError([list(f.columns) for f in sold_tables])
+
+
+clicked = by_clicks()
+assert clicked["Wine"].iloc[0] == "Villa Pozzi Pinot Grigio", clicked.to_string()
+assert clicked["Ad spend"].iloc[0] == "$30.00", clicked.to_string()
+assert clicked["Bottles 90d"].iloc[0] == "9", clicked.to_string()
+# Spend on an offer the feed no longer carries is kept and shown as unpriced,
+# because dropping it would quietly shrink the total the panel is arguing about.
+gone = clicked[clicked["Offer"] == "gone"].iloc[0]
+assert (gone["Our price"], gone["Gap"]) == ("\u2014", "\u2014"), gone.to_string()
+print("the ledger keeps spend on wines the feed cannot price: ok")
+
+# The feed a supplemental upload would carry: the market price, on the wines the
+# budget is already going to, and never on a wine already priced under it.
+feed = sold_table_with("Suggested sale price")
+assert list(feed["Wine"]) == ["Atalon Cabernet Sauvignon", "Villa Pozzi Pinot Grigio"], (
+    feed.to_string()
+)
+assert feed["Suggested sale price"].iloc[0] == "$28.42", feed.to_string()
+print("the sale-price feed offers the market price on the expensive wines: ok")
+
+# No ads dataset is not an empty account: the tab says how to point it at one.
+noads = texts(run("noads"))
+assert "GOOGLE_ADS_BQ_PROJECT" in noads, noads[-900:]
+assert "of the ad spend went to" not in noads, noads[-900:]
+print("a dashboard with no ads dataset says so rather than showing $0: ok")
 
 print("all price-competitiveness scenarios passed")
