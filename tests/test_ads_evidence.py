@@ -31,6 +31,11 @@ def sales(rows: list[tuple[str, int, float]]) -> mc.Sales:
     return mc.Sales(pd.DataFrame(rows, columns=["offer", "bottles", "revenue"]), 90)
 
 
+def unread() -> mc.Sales:
+    """The order book as it arrives when Postgres cannot be reached at all."""
+    return mc.Sales(pd.DataFrame(), 90, read=False)
+
+
 def ads(rows: list[tuple[str, float, int]]) -> pd.DataFrame:
     frame = pd.DataFrame(rows, columns=["offer", "spend", "clicks"])
     return frame.assign(impressions=frame["clicks"] * 10, ad_conversions=0.0)
@@ -149,7 +154,7 @@ def test_the_claims_name_the_share_that_sold_nothing():
         prices([("a", 10.0, 10.0), ("b", 10.0, 10.0)]),
         sales([("a", 1, 10.0)]),
     )
-    said = " ".join(ae.verdicts(ledger))
+    said = " ".join(claim for _, claim in ae.verdicts(ledger))
     assert "75% of the ad spend went to 1 wines" not in said
     assert "sold nothing" in said
     assert "$75 of $100" in said
@@ -161,6 +166,39 @@ def test_nothing_is_claimed_about_a_window_with_no_spend_in_it():
     )
     assert ae.verdicts(ledger) == []
     assert ae.verdicts(ae.ledger(pd.DataFrame(), prices([]), sales([]))) == []
+
+
+def test_an_unread_order_book_is_never_reported_as_wines_that_sold_nothing():
+    """The mistake worth a test of its own: with Postgres down, every wine joins
+    to no sale, and filled with zeroes that reads as the whole budget wasted."""
+    ledger = ae.ledger(
+        ads([("a", 25.0, 10), ("b", 75.0, 30)]),
+        prices([("a", 20.0, 10.0), ("b", 10.0, 10.0)]),
+        unread(),
+    )
+    assert not ae.sold_known(ledger)
+    assert float(ledger["spend"].sum()) == 100.0
+    assert ledger["bottles"].isna().all()
+    assert ae.spend_split(ledger).empty
+    assert ae.by_band(ledger)["per_dollar"].isna().all()
+    assert ae.waste(ledger).empty
+    tags = [tag for tag, _ in ae.verdicts(ledger)]
+    assert ae.WASTED not in tags and ae.BY_PRICE not in tags
+    # The feed does not need the order book: it is a price argument.
+    assert list(ae.sale_price_feed(ledger)["id"]) == ["a"]
+
+
+def test_each_claim_names_the_wines_it_is_about_rather_than_its_position():
+    """The band claim is dropped whenever one band earned nothing, and the claim
+    behind it must not inherit the wines that claim would have had."""
+    ledger = ae.ledger(
+        ads([("priced", 10.0, 10), ("unknown", 90.0, 40)]),
+        prices([("priced", 20.0, 10.0)]),
+        sales([]),
+    )
+    tags = [tag for tag, _ in ae.verdicts(ledger)]
+    assert ae.BY_PRICE not in tags
+    assert tags == [ae.WASTED, ae.NO_BENCHMARK]
 
 
 def test_a_merchant_is_named_beside_each_wine_where_the_catalogue_knows_one():

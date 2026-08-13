@@ -46,6 +46,24 @@ NOTHING = "Sold nothing"
 
 SPLIT_COLOURS = {SOLD: "#15803d", NOTHING: "#b91c1c"}
 
+# What each claim is about, so the wines behind it are chosen by which claim it
+# is rather than by where it happened to land in the list.
+WASTED = "sold-nothing"
+BY_PRICE = "by-price"
+NO_BENCHMARK = "no-benchmark"
+
+
+def sold_known(frame: pd.DataFrame) -> bool:
+    """Whether this ledger knows what each wine sold, or merely has no figure.
+
+    An order book that could not be read and a wine nobody bought both arrive as
+    an absence, and only one of them is a fact about the wine: every claim about
+    what the money bought is withheld unless the sales were read.
+    """
+    if frame.empty or "bottles" not in frame.columns:
+        return False
+    return bool(frame["bottles"].notna().all())
+
 
 def ledger(
     ads: pd.DataFrame,
@@ -66,6 +84,12 @@ def ledger(
     frame = sales.against(ads.merge(wines, on="offer", how="left"))
     if "sold_revenue" not in frame.columns:
         frame = frame.assign(bottles=0, sold_revenue=0.0)
+    if not sales.read:
+        # Unread, not unsold. ``Sales.against`` fills a wine with no sale with a
+        # zero, which is right for a bottle nobody bought and wrong for a
+        # database that was down: left as zeroes it would have this panel
+        # announce that every advertised bottle was a waste of money.
+        frame = frame.assign(bottles=pd.NA, sold_revenue=pd.NA)
     frame["merchant"] = frame["offer"].map(
         lambda offer: merchant_client.MERCHANT_SEPARATOR.join((named or {}).get(offer, ()))
     )
@@ -79,7 +103,7 @@ def spend_split(frame: pd.DataFrame) -> pd.DataFrame:
     depend on price at all: however the campaign is meant to work, this is how
     much of it went to bottles nobody bought.
     """
-    if frame.empty:
+    if not sold_known(frame):
         return pd.DataFrame(columns=["outcome", "wines", "spend", "clicks", "revenue"])
     sold = frame["bottles"] > 0
     rows = [
@@ -124,6 +148,10 @@ def by_band(frame: pd.DataFrame) -> pd.DataFrame:
     grouped["per_dollar"] = (
         grouped["revenue"] / grouped["spend"].where(grouped["spend"] > 0)
     ).round(0)
+    if not sold_known(frame):
+        # A band still has wines, spend and clicks in it without the order book.
+        # What it gave back is the column that would be invented.
+        grouped[["bottles", "revenue", "per_dollar"]] = pd.NA
     return grouped[columns]
 
 
@@ -134,8 +162,8 @@ def waste(frame: pd.DataFrame, gap: float = merchant_client.DEAR_GAP) -> pd.Data
     them is a bottle Google charged for showing to somebody who then bought
     elsewhere, and none of them needs a merchant's agreement to stop.
     """
-    if frame.empty or "gap" not in frame.columns:
-        return frame
+    if frame.empty or "gap" not in frame.columns or not sold_known(frame):
+        return frame.iloc[0:0]
     return frame[
         (frame["gap"] > gap) & (frame["clicks"] > 0) & (frame["bottles"] <= 0)
     ].sort_values("spend", ascending=False)
@@ -188,11 +216,15 @@ def sale_price_feed(
     return feed.sort_values("spend", ascending=False).reset_index(drop=True)
 
 
-def verdicts(frame: pd.DataFrame) -> list[str]:
+def verdicts(frame: pd.DataFrame) -> list[tuple[str, str]]:
     """What the ledger says, in the order an argument about it would go.
 
-    Each line is a claim the panel puts a table under, so it can be checked
-    rather than believed.
+    Each claim is a line the panel puts a table under, so it can be checked
+    rather than believed, and each carries the name of the wines it is about:
+    any of them can be left out - a shut order book takes the first two, a feed
+    Google benchmarks entirely takes the last - and a claim paired with the
+    wines that happened to be in its position would be a claim about somebody
+    else's wines.
     """
     if frame.empty:
         return []
@@ -201,14 +233,17 @@ def verdicts(frame: pd.DataFrame) -> list[str]:
         return []
     split = spend_split(frame)
     nothing = split[split["outcome"] == NOTHING]
-    lines = []
+    claims: list[tuple[str, str]] = []
     if not nothing.empty:
         wasted = float(nothing["spend"].iloc[0])
         wines = int(nothing["wines"].iloc[0])
-        lines.append(
-            f"**{wasted / total:.0%} of the ad spend went to {wines:,} "
-            f"wine{'' if wines == 1 else 's'} that sold nothing** - "
-            f"${wasted:,.0f} of ${total:,.0f}."
+        claims.append(
+            (
+                WASTED,
+                f"**{wasted / total:.0%} of the ad spend went to {wines:,} "
+                f"wine{'' if wines == 1 else 's'} that sold nothing** - "
+                f"${wasted:,.0f} of ${total:,.0f}.",
+            )
         )
     bands = by_band(frame)
     rated = bands[bands["per_dollar"].notna()]
@@ -216,20 +251,26 @@ def verdicts(frame: pd.DataFrame) -> list[str]:
         best = rated.loc[rated["per_dollar"].idxmax()]
         worst = rated.loc[rated["per_dollar"].idxmin()]
         if float(worst["per_dollar"]) > 0:
-            lines.append(
-                f"**A dollar spent on wines {str(best['band']).lower()} returned "
-                f"${float(best['per_dollar']):,.0f}, against "
-                f"${float(worst['per_dollar']):,.0f} on wines "
-                f"{str(worst['band']).lower()}.** Revenue is every sale of those "
-                "wines in the window, not sales the ads can be shown to have "
-                "caused."
+            claims.append(
+                (
+                    BY_PRICE,
+                    f"**A dollar spent on wines {str(best['band']).lower()} "
+                    f"returned ${float(best['per_dollar']):,.0f}, against "
+                    f"${float(worst['per_dollar']):,.0f} on wines "
+                    f"{str(worst['band']).lower()}.** Revenue is every sale of "
+                    "those wines in the window, not sales the ads can be shown "
+                    "to have caused.",
+                )
             )
     unpriced = frame[frame["gap"].isna()] if "gap" in frame.columns else frame.iloc[0:0]
     if not unpriced.empty:
-        lines.append(
-            f"{float(unpriced['spend'].sum()) / total:.0%} of the spend went to "
-            f"{len(unpriced):,} offer{'' if len(unpriced) == 1 else 's'} Google "
-            "publishes no benchmark for, so price says nothing about that part of "
-            "the account either way."
+        claims.append(
+            (
+                NO_BENCHMARK,
+                f"{float(unpriced['spend'].sum()) / total:.0%} of the spend went "
+                f"to {len(unpriced):,} offer{'' if len(unpriced) == 1 else 's'} "
+                "Google publishes no benchmark for, so price says nothing about "
+                "that part of the account either way.",
+            )
         )
-    return lines
+    return claims

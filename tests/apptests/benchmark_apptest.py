@@ -110,13 +110,15 @@ ADS = pd.DataFrame(
 ).assign(ad_conversions=0.0)
 
 if MODE == "noads":
-    dashboard._ad_products = lambda days: pd.DataFrame(
-        columns=list(dashboard.ads_client.PRODUCT_COLUMNS)
-    )
+    dashboard._ad_products = lambda days: dashboard._no_ad_products()
+elif MODE == "adseur":
+    # An account billed in euros beside a dollar one: the euro accounts are the
+    # majority here, so the dollar one is the one set aside.
+    dashboard._ad_products = lambda days: dashboard.AdProducts(ADS, "EUR", ["USD"])
 else:
-    dashboard._ad_products = lambda days: ADS
+    dashboard._ad_products = lambda days: dashboard.AdProducts(ADS, "USD", [])
 
-if MODE in ("sold", "merchant", "nomatch", "noads"):
+if MODE in ("sold", "merchant", "nomatch", "noads", "adseur"):
     dashboard.orders_client.load_medusa_env = lambda: dashboard.orders_client.DbConfig(
         "host", "db", "user", "secret", 5432
     )
@@ -591,6 +593,42 @@ assert list(feed["Wine"]) == ["Atalon Cabernet Sauvignon", "Villa Pozzi Pinot Gr
 )
 assert feed["Suggested sale price"].iloc[0] == "$28.42", feed.to_string()
 print("the sale-price feed offers the market price on the expensive wines: ok")
+
+# The list to act on in the campaign rather than in the shop, and the only claim
+# here that needs nobody's agreement: expensive, clicked, and no bottle sold.
+assert "wines to stop paying for first" in ads_body, ads_body[-1500:]
+print("the clicked-expensive-unsold list is on the tab, not only in the module: ok")
+
+# An unread order book is the dangerous case: every wine joins to no sale, and
+# filled with zeroes that reads as the whole budget wasted. The live mode has ads
+# and no order book, so the tab must withhold every claim about what sold.
+assert "$200.00" == {m.label: m.value for m in live.metric}["Spend 90d"], [
+    (m.label, m.value) for m in live.metric
+]
+assert {m.label: m.value for m in live.metric}["On wines that sold nothing"] == (
+    "\u2014"
+), [(m.label, m.value) for m in live.metric]
+assert "of the ad spend went to" not in body, body[-1500:]
+assert "what each of these wines sold is unknown rather than none" in body, body[-1500:]
+# The ledger still stands as a spend ledger, with the bottles column withheld.
+unsold = [f.value for f in live.dataframe if "Ad spend" in f.value.columns]
+assert unsold, [list(f.value.columns) for f in live.dataframe]
+assert set(unsold[0]["Bottles 90d"]) == {"\u2014"}, unsold[0].to_string()
+print("a shut order book withholds the sold-nothing claim rather than filling it: ok")
+
+# Whose spend a merchant sees is said rather than left to be inferred from a
+# total that does not match the shop's.
+assert "Google publishes a benchmark for" in texts(mine), texts(mine)[-1500:]
+print("a merchant's ad tab says which of their wines it covers: ok")
+
+# Google bills the account in its own currency, and euros are never added to
+# dollars nor labelled with a dollar sign.
+euros = run("adseur")
+euro_metrics = {m.label: m.value for m in euros.metric}
+assert euro_metrics["Spend 90d"].startswith("\u20ac"), euro_metrics
+assert "left out rather than added to them" in texts(euros), texts(euros)[-1500:]
+assert "not the same money" in texts(euros), texts(euros)[-1500:]
+print("ad spend is shown in the currency Google billed, or set aside: ok")
 
 # No ads dataset is not an empty account: the tab says how to point it at one.
 noads = texts(run("noads"))
