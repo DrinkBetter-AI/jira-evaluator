@@ -4142,7 +4142,9 @@ def _price_benchmark_cached(account: str, country: str) -> BenchmarkRead:
     try:
         demand = merchant_client.product_demand(config, token)
     except Exception:  # noqa: BLE001
-        demand = merchant_client.Demand(pd.DataFrame())
+        # Marked unread rather than empty: an empty report says nobody clicked,
+        # and the panel would otherwise print that as a finding about the shop.
+        demand = merchant_client.Demand(pd.DataFrame(), read=False)
     return BenchmarkRead(prices, insights, demand)
 
 
@@ -4199,6 +4201,27 @@ def _with_merchants(frame: pd.DataFrame) -> pd.DataFrame:
     if not named:
         return frame
     return frame.assign(merchant=frame["offer"].map(named).fillna(""))
+
+
+def _demand_note(demand: merchant_client.Demand) -> str:
+    """What the ordering rests on, and what it does not.
+
+    A report that could not be read and a shop nobody clicked leave the same
+    empty frame behind, and only one of them is a fact about the wines.
+    """
+    if demand.measured:
+        return f"Clicks are the last {merchant_client.DEMAND_DAYS} days in Shopping."
+    if not demand.read:
+        return (
+            "Ranked by the gap alone: Merchant Center's performance report "
+            "could not be read, so how many shoppers each of these lost is "
+            "unknown rather than none."
+        )
+    return (
+        "Ranked by the gap alone: Shopping reported no clicks on these "
+        f"products in the last {merchant_client.DEMAND_DAYS} days, so there is "
+        "no demand to weigh it by."
+    )
 
 
 def _price_columns(money: str) -> dict[str, object]:
@@ -4269,12 +4292,7 @@ def _render_ask_list(read: BenchmarkRead, money: str) -> None:
     st.caption(
         f"At {cut:.0%} off, {beaten} of these {len(priced)} would be at or below "
         f"the market price, and {len(priced) - beaten} would still be dearer. "
-        + (
-            f"Clicks are the last {merchant_client.DEMAND_DAYS} days in Shopping."
-            if demand.measured
-            else "Ranked by the gap alone: Shopping reported no clicks for "
-            "these products, so there is no demand to weigh it by."
-        )
+        + _demand_note(demand)
     )
     if demand.truncated:
         st.caption(
@@ -4372,8 +4390,8 @@ def _render_bargains(read: BenchmarkRead, money: str) -> None:
             f", most clicked on in the last {merchant_client.DEMAND_DAYS} days "
             "first."
             if read.demand.measured
-            else ", ordered by how far under the market they are: Shopping "
-            "reported no clicks to rank them by."
+            else ", ordered by how far under the market they are. "
+            + _demand_note(read.demand)
         )
     )
 

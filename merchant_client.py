@@ -195,6 +195,10 @@ class Demand:
 
     offers: pd.DataFrame
     truncated: bool = False
+    # False when the report could not be read at all. An empty frame otherwise
+    # means the shop was shown and nobody clicked, which is a finding; a report
+    # that never arrived is not, and the panel must not report one as the other.
+    read: bool = True
 
     @property
     def clicks(self) -> int:
@@ -202,13 +206,8 @@ class Demand:
 
     @property
     def measured(self) -> bool:
-        """Whether there is any demand to rank by.
-
-        A report that could not be read and a shop nobody clicked look the same
-        from here - both leave every offer on zero - and either way an ordering
-        that claims to be by demand would be an ordering by nothing.
-        """
-        return bool(len(self.offers)) and self.clicks > 0
+        """Whether there is any demand to rank by."""
+        return self.read and bool(len(self.offers)) and self.clicks > 0
 
     def against(self, offers: pd.DataFrame) -> pd.DataFrame:
         """``offers`` with clicks and impressions on it, zero where unseen.
@@ -353,6 +352,11 @@ def price_gaps(config: Merchant, token: str, country: str = "") -> Prices:
         columns=["offer", "title", "brand", "price", "benchmark", "currency"],
     )
     frame = frame[(frame["benchmark"] > 0) & (frame["price"] > 0)]
+    # One row per bottle. The view's key is the whole REST id - channel, language,
+    # feed label and offer - so a catalogue listed twice would be counted twice in
+    # the share above the market and would take two places on the ask list with
+    # the same wine. It is one row per offer on this feed today; this keeps it so.
+    frame = frame.drop_duplicates(subset="offer")
     frame, currency, others = main_currency(frame)
     frame = frame.assign(
         gap=(frame["price"] - frame["benchmark"]) / frame["benchmark"]
