@@ -4116,7 +4116,7 @@ class BenchmarkRead(NamedTuple):
 
 
 @st.cache_data(ttl=BENCHMARK_TTL_SECONDS, show_spinner=False)
-def _price_benchmark_cached(account: str) -> BenchmarkRead:
+def _price_benchmark_cached(account: str, country: str) -> BenchmarkRead:
     """What Merchant Center says the shop's prices look like against the market.
 
     Keyed on the account rather than on the config, so that Streamlit hashes a
@@ -4124,7 +4124,7 @@ def _price_benchmark_cached(account: str) -> BenchmarkRead:
     never becomes part of a cache key.
     """
     config = merchant_client.load_merchant_env()
-    if config is None or config.account != account:
+    if config is None or (config.account, config.country) != (account, country):
         raise merchant_client.MerchantConfigError(
             "The Merchant Center configuration changed while it was being read."
         )
@@ -4165,7 +4165,7 @@ def _render_price_benchmark() -> None:
 
     try:
         with st.spinner("Reading Merchant Center's price benchmarks..."):
-            read = _price_benchmark_cached(config.account)
+            read = _price_benchmark_cached(config.account, config.country)
     except merchant_client.MerchantConfigError as exc:
         st.warning(str(exc))
         return
@@ -4197,6 +4197,13 @@ def _render_price_benchmark() -> None:
         "Priced products compared",
         f"{prices.counted:,}",
     )
+
+    if not prices.counted:
+        st.caption(
+            f"Read for {config.country}, the country the feed is taken to "
+            "target. Benchmarks are published per country, so set "
+            "GOOGLE_MERCHANT_COUNTRY if this feed targets another one."
+        )
 
     if prices.counted:
         st.dataframe(

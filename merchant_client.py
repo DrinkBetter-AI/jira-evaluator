@@ -35,7 +35,12 @@ import pandas as pd
 import requests
 
 _MERCHANT_ENV_VAR = "GOOGLE_MERCHANT_ID"
+_COUNTRY_ENV_VAR = "GOOGLE_MERCHANT_COUNTRY"
 _KEY_ENV_VAR = "GCP_BIGQUERY_READONLY_KEY"
+
+# Benchmarks are published per country, so reading a country the feed does not
+# target returns nothing at all rather than an error.
+DEFAULT_COUNTRY = "US"
 
 # v1, not v1beta: the beta endpoint was switched off on 28 February 2026 and
 # answers every request with a 409 telling you so.
@@ -78,6 +83,7 @@ class Merchant:
 
     account: str
     key_json: str | None = None
+    country: str = DEFAULT_COUNTRY
 
 
 @dataclass(frozen=True)
@@ -151,6 +157,18 @@ class Insights:
     def conversions_gain(self) -> float:
         return float(self.offers["conversions_change"].mean()) if self.counted else 0.0
 
+    def within(self, offers: pd.DataFrame) -> "Insights":
+        """The suggestions for offers that were actually compared.
+
+        The two reports are not one population: this view carries no country,
+        benchmark or currency filter, so a count taken straight off it could
+        claim a cut on more products than the panel says it compared.
+        """
+        if self.offers.empty or "offer" not in offers.columns:
+            return self
+        kept = self.offers[self.offers["offer"].isin(set(offers["offer"]))]
+        return Insights(kept.reset_index(drop=True), self.truncated)
+
 
 def load_merchant_env() -> Merchant | None:
     """Which Merchant Center account to read, or ``None`` when unconfigured."""
@@ -162,7 +180,15 @@ def load_merchant_env() -> Merchant | None:
             f"{_MERCHANT_ENV_VAR} should be the numeric Merchant Center id, "
             "shown at the top right of merchants.google.com."
         )
-    return Merchant(account, os.getenv(_KEY_ENV_VAR, "").strip() or None)
+    country = os.getenv(_COUNTRY_ENV_VAR, "").strip() or DEFAULT_COUNTRY
+    if not _COUNTRY_PATTERN.match(country):
+        raise MerchantConfigError(
+            f"{_COUNTRY_ENV_VAR} should be a two-letter country code, the one "
+            "the feed targets in Merchant Center."
+        )
+    return Merchant(
+        account, os.getenv(_KEY_ENV_VAR, "").strip() or None, country.upper()
+    )
 
 
 def access_token(config: Merchant) -> str:
@@ -234,13 +260,14 @@ def _currency(value: dict | None) -> str:
     return str((value or {}).get("currencyCode", "") or "").upper()
 
 
-def price_gaps(config: Merchant, token: str, country: str = "US") -> Prices:
+def price_gaps(config: Merchant, token: str, country: str = "") -> Prices:
     """Each offer's price against Google's benchmark for the same product.
 
     Offers without a benchmark are dropped rather than counted as competitive:
     Google publishes one only where enough other merchants sell the product, and
     a wine nobody else lists has no market price to be dearer than.
     """
+    country = country or config.country
     if not _COUNTRY_PATTERN.match(country):
         raise MerchantConfigError(
             f"{country!r} is not a two-letter country code."
@@ -355,6 +382,10 @@ def verdicts(prices: Prices, insights: Insights | None = None) -> list[str]:
             + " cheaper than the market, and those are the ones worth "
             "advertising."
         )
+    # Only the suggestions for offers this panel compared: the insights report
+    # is a wider population and "of them" is a claim about this one.
+    if insights is not None:
+        insights = insights.within(prices.offers)
     if insights is not None and insights.counted:
         lines.append(
             f"Google would cut the price on {insights.counted:,} of them, and "
@@ -376,6 +407,7 @@ def as_of(now: _dt.date | None = None) -> _dt.date:
 
 __all__ = [
     "DEAR_GAP",
+    "DEFAULT_COUNTRY",
     "Insights",
     "Merchant",
     "MerchantConfigError",

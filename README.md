@@ -73,6 +73,7 @@ profile when they are not all set.
 | `GCP_BILLING_BQ_DATASET` | no | `billing_export` | Dataset the *standard usage cost* billing export writes to; the table inside it is found by name, and until Google writes one the *Cloud costs* section says so |
 | `GCP_BIGQUERY_READONLY_KEY` | no | — | A BigQuery service-account key as JSON, for reading the Ads and billing datasets from outside GCP; unset on Cloud Run, which authenticates as its own service account. Also the credential the Merchant Center read uses |
 | `GOOGLE_MERCHANT_ID` | no | — | Merchant Center account id (top right of merchants.google.com), for the *Price competitiveness* section. The account reading it — the key above, or Cloud Run's own service account — must be a user of that Merchant Center account with read access, and its GCP project must be registered against the account as a Merchant API developer; without either the section says so and everything else works |
+| `GOOGLE_MERCHANT_COUNTRY` | no | `US` | Two-letter country the feed targets. Benchmarks are published per country, so reading a country the feed does not target returns no rows rather than an error; the section names the country it read when it finds nothing |
 | `DASHBOARD_PASSWORD`          | no locally, **yes on Cloud Run** | —                                                | Shared password visitors must enter; remembered per browser for 30 days in a signed cookie; leave it unset locally (a copy in `.env` prompts on every run), unset on Cloud Run (`K_SERVICE` present) refuses to serve at all                                     |
 | `DASHBOARD_COOKIE_KEY` | no, but set it when hosted | derived from `DASHBOARD_PASSWORD` with scrypt | Independent secret signing the access cookie, so the cookie is not a verifier for guesses at the password; rotating it signs every browser out without changing the password anyone types |
 
@@ -352,7 +353,10 @@ fully paid with nothing pending.
    the same price rather than a problem. Prices in a second currency are set
    aside and named, never compared with the main one. Where Google also publishes
    a suggested price, the verdicts say how many products it would cut and what it
-   predicts that would do to clicks and conversions. Not read from BigQuery,
+   predicts that would do to clicks and conversions — counted over the offers
+   that were compared, since that report carries no benchmark, country or
+   currency filter and would otherwise claim a cut on more products than the
+   panel compared. Not read from BigQuery,
    though a Merchant Center transfer once wrote these rows there: Google
    deprecated `export_price_benchmarks`, so benchmarks reach only the Merchant
    API now — its `v1` endpoints, `v1beta` having been switched off in February
