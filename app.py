@@ -79,6 +79,7 @@ import ads_client
 import cost_client
 import amplitude_client
 import merchant_client
+import merchant_letter
 import orders
 import orders_client
 from prioritization import add_priority_score, assignee_rollup
@@ -4538,7 +4539,90 @@ def _render_bargains(
     )
 
 
-def _render_evidence(read: BenchmarkRead) -> None:
+def _band_pictures(bands: pd.DataFrame, merchant: str) -> None:
+    """The two figures as a picture, which is the form a merchant reads.
+
+    A wine merchant is not going to be argued out of a price by a column called
+    bottles per 100 clicks. The same numbers as a coloured ring and a row of
+    bars make the case at a glance: this much of your range is red, and the red
+    is the part that is not selling.
+    """
+    slices = bands[bands["listings"] > 0]
+    if slices.empty:
+        return
+    colours = {
+        band: merchant_letter.BAND_COLOURS[index]
+        for index, band in enumerate(bands["band"].astype(str))
+    }
+    left, right = st.columns(2)
+    with left:
+        ring = px.pie(
+            slices,
+            names=slices["band"].astype(str),
+            values="listings",
+            color=slices["band"].astype(str),
+            color_discrete_map=colours,
+            hole=0.35,
+            title=f"{merchant}: the range, by price against the market",
+        )
+        ring.update_traces(textinfo="percent", hovertemplate="%{label}: %{value} wines")
+        ring.update_layout(margin=dict(t=54, b=0, l=0, r=0), legend_title_text="")
+        st.plotly_chart(ring, width="stretch")
+    rated = bands[bands["per_100_clicks"].notna()]
+    if rated.empty:
+        return
+    with right:
+        bars = px.bar(
+            rated,
+            x="per_100_clicks",
+            y=rated["band"].astype(str),
+            orientation="h",
+            color=rated["band"].astype(str),
+            color_discrete_map=colours,
+            title="Bottles sold per 100 shoppers who looked",
+            text=rated["per_100_clicks"].map(lambda value: f"{value:.0f}"),
+        )
+        bars.update_layout(
+            margin=dict(t=54, b=0, l=0, r=0),
+            showlegend=False,
+            xaxis_title="",
+            yaxis_title="",
+            yaxis=dict(autorange="reversed"),
+        )
+        st.plotly_chart(bars, width="stretch")
+
+
+def _merchant_letter(bands: pd.DataFrame, merchant: str, sales_days: int) -> None:
+    """The same picture as a page to send, rather than a screen to describe."""
+    rows = [
+        merchant_letter.Band(
+            str(row["band"]),
+            int(row["listings"]),
+            int(row["clicks"]),
+            int(row["bottles"]),
+            None if pd.isna(row["per_100_clicks"]) else float(row["per_100_clicks"]),
+        )
+        for _, row in bands.iterrows()
+    ]
+    st.download_button(
+        f"Download a page for {merchant}",
+        data=merchant_letter.one_pager(
+            merchant,
+            rows,
+            sales_days=sales_days,
+            demand_days=merchant_client.DEMAND_DAYS,
+        ).encode("utf-8"),
+        file_name=merchant_letter.filename(merchant),
+        mime="text/html",
+        key="price_evidence_letter",
+        help=(
+            "One page, their name on it, no jargon: the ring, the bars and one "
+            "sentence. Opens in any browser and prints to a PDF."
+        ),
+    )
+
+
+def _render_evidence(read: BenchmarkRead, merchant: str = _EVERY_MERCHANT) -> None:
     """What the shop's own sales say about the price it charged.
 
     The tab to send a merchant. Everywhere else the panel argues from Google's
@@ -4574,6 +4658,8 @@ def _render_evidence(read: BenchmarkRead) -> None:
     if bands.empty:
         st.caption("Nothing has both a benchmark and a click to compare.")
         return
+    named = "The shop" if merchant == _EVERY_MERCHANT else merchant
+    _band_pictures(bands, named)
     shown = bands.assign(
         per_100_clicks=bands["per_100_clicks"].map(
             lambda value: "\u2014" if pd.isna(value) else f"{value:.0f}"
@@ -4602,6 +4688,7 @@ def _render_evidence(read: BenchmarkRead) -> None:
         mime="text/csv",
         key="price_evidence_download",
     )
+    _merchant_letter(bands, named, sales.days)
     st.caption(
         f"Clicks are Google Shopping's last {merchant_client.DEMAND_DAYS} days; "
         f"bottles are what the shop sold in the last {sales.days} days, paid "
@@ -4653,6 +4740,7 @@ def _render_price_benchmark() -> None:
     # mistaken below for a feed with no benchmarks in it.
     whole_feed_counted = prices.counted
     filtered_to_nothing = False
+    chosen = _EVERY_MERCHANT
     # Whose wine each offer is, read once for the whole catalogue so the same
     # names can both filter it and label the rows below.
     named = _offer_merchants(prices.offers)
@@ -4725,7 +4813,7 @@ def _render_price_benchmark() -> None:
         with bargain_tab:
             _render_bargains(read, money, named)
         with evidence_tab:
-            _render_evidence(read)
+            _render_evidence(read, chosen)
         with dear_tab:
             st.dataframe(
                 prices.worst.head(_WORST_OFFERS)
