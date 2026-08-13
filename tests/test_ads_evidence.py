@@ -272,6 +272,21 @@ def test_the_advice_is_sized_from_this_ledger_rather_than_recited():
     assert ae.advice(ae.ledger(pd.DataFrame(), prices([]), sales([]))) == []
 
 
+def test_each_slice_of_the_ring_says_its_own_money_and_count():
+    """The tooltip is written here rather than assembled by the chart: read back
+    through Plotly's own number format it came out as "- across NaN wines"."""
+    ledger = ae.ledger(
+        ads([("sold", 25.0, 10), ("expensive", 75.0, 30)]),
+        prices([("sold", 7.0, 10.0), ("expensive", 20.0, 10.0)]),
+        sales([("sold", 10, 500.0)]),
+    )
+    hovers = ae.split_hovers(ae.spend_split(ledger), "eur")
+    assert hovers == [
+        "Sold something: \u20ac25 across 1 wine",
+        "Sold nothing: \u20ac75 across 1 wine",
+    ]
+
+
 def test_spend_billed_in_euros_is_never_written_with_a_dollar_sign():
     """The tiles carry the billed currency; these sentences are the same figures,
     and they are what the printable report keeps once the captions are gone."""

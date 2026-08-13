@@ -140,6 +140,21 @@ def spend_split(frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def split_hovers(split: pd.DataFrame, spent: str = "usd") -> list[str]:
+    """What each slice of the spend ring says when it is pointed at.
+
+    Whole sentences, one per slice, rather than a template over ``customdata``:
+    the money has to be written here anyway to carry the currency Google billed,
+    and a two-column array of a number and a string read back through Plotly's
+    own number format is how that tooltip came to say ``- across NaN wines``.
+    """
+    return [
+        f"{row.outcome}: {_sum(float(row.spend), spent)} across "
+        f"{int(row.wines):,} wine" + ("" if int(row.wines) == 1 else "s")
+        for row in split.itertuples()
+    ]
+
+
 def by_band(frame: pd.DataFrame) -> pd.DataFrame:
     """The same ledger folded into price bands, with what each gave back.
 

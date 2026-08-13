@@ -5054,13 +5054,11 @@ def _ad_pictures(frame: pd.DataFrame, money: str) -> None:
             )
             ring.update_traces(
                 textinfo="percent",
-                # Formatted here rather than by Plotly's ``$`` format, which
-                # would label a euro-billed account's spend in dollars.
-                hovertemplate="%{label}: %{customdata[1]} across "
-                "%{customdata[0]:,} wines<extra></extra>",
-                customdata=split.assign(
-                    shown=split["spend"].map(lambda value: _money(value, money))
-                )[["wines", "shown"]].to_numpy(),
+                # A written sentence per slice rather than a template over
+                # ``customdata``: the money is formatted here anyway, to carry
+                # the currency Google billed rather than Plotly's ``$``.
+                hovertext=ads_evidence.split_hovers(split, money),
+                hovertemplate="%{hovertext}<extra></extra>",
             )
             ring.update_layout(margin=dict(t=54, b=0, l=0, r=0), legend_title_text="")
             st.plotly_chart(ring, width="stretch")
