@@ -21,8 +21,8 @@ def bands():
     return [
         ml.Band("Cheaper than the market", 12, 300, 60, 20.0),
         ml.Band("About the market", 4, 100, 5, 5.0),
-        ml.Band("Up to 25% dearer", 20, 400, 12, 3.0),
-        ml.Band("More than 25% dearer", 64, 200, 2, 1.0),
+        ml.Band("Up to 25% more expensive", 20, 400, 12, 3.0),
+        ml.Band("More than 25% more expensive", 64, 200, 2, 1.0),
     ]
 
 
@@ -40,7 +40,7 @@ def test_a_band_with_no_wines_is_not_drawn_as_a_hairline():
 
 
 def test_one_band_holding_everything_is_a_whole_circle():
-    svg = ml.pie_svg([ml.Band("More than 25% dearer", 40, 100, 1, 1.0)])
+    svg = ml.pie_svg([ml.Band("More than 25% more expensive", 40, 100, 1, 1.0)])
     # An arc of exactly 360 degrees draws nothing, so that case is a circle.
     assert "a 108 108 0 1 1" in svg, svg
 
@@ -65,10 +65,10 @@ def test_a_shop_with_nothing_in_it_draws_no_ring_at_all():
 
 
 def test_a_band_nobody_clicked_gets_no_bar_rather_than_a_zero_one():
-    unclicked = bands()[:2] + [ml.Band("Up to 25% dearer", 9, 0, 0, None)]
+    unclicked = bands()[:2] + [ml.Band("Up to 25% more expensive", 9, 0, 0, None)]
     bars = ml.bars_svg(unclicked)
     assert bars.count("<rect") == 2, bars
-    assert "Up to 25% dearer" not in bars, bars
+    assert "Up to 25% more expensive" not in bars, bars
 
 
 def test_the_longest_bar_is_the_best_selling_band():
@@ -86,7 +86,7 @@ def test_the_headline_names_both_ends_in_bottles_a_merchant_recognises():
 def test_no_headline_is_claimed_when_an_end_of_it_never_sold():
     quiet = [
         ml.Band("Cheaper than the market", 12, 300, 0, 0.0),
-        ml.Band("More than 25% dearer", 64, 200, 2, 1.0),
+        ml.Band("More than 25% more expensive", 64, 200, 2, 1.0),
     ]
     assert ml.headline(quiet) == ""
     assert ml.headline([]) == ""

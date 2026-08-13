@@ -236,7 +236,7 @@ print("an empty feed names the country it read: ok")
 live = run("live")
 metrics = {m.label: m.value for m in live.metric}
 print(metrics)
-assert metrics["Dearer than the market"] == "50%", metrics
+assert metrics["More expensive than the market"] == "50%", metrics
 # Two of the four sit near 2x, so the median of the four gaps is high: a median
 # rather than a mean, but a median of a tiny frame is still a big number.
 assert metrics["Typical gap"] == "+99%", metrics
@@ -402,7 +402,7 @@ evidence = sold_table_with("Against the market", "Bottles per 100 clicks")
 rates = dict(zip(evidence["Against the market"], evidence["Bottles per 100 clicks"]))
 # 10 bottles on the cheap wine's 30 clicks, 9 on the dear one's 90.
 assert rates["Cheaper than the market"] == "33", evidence.to_string()
-assert rates["More than 25% dearer"] == "10", evidence.to_string()
+assert rates["More than 25% more expensive"] == "10", evidence.to_string()
 # Nobody clicked the wine priced at the market, so it has no rate to report.
 assert rates["About the market"] == "\u2014", evidence.to_string()
 assert "sold 33 bottles per 100 clicks" in sold_body, sold_body[-1500:]
@@ -446,7 +446,7 @@ figures = {m.label: m.value for m in mine.metric}
 # the 2% that counts as the same price, one under it - so its own headline is a
 # third rather than the shop's half.
 assert figures["Priced products compared"] == "3", figures
-assert figures["Dearer than the market"] == "33%", figures
+assert figures["More expensive than the market"] == "33%", figures
 only_mine = [f.value for f in mine.dataframe if "Merchant" in f.value.columns]
 assert only_mine, [list(f.value.columns) for f in mine.dataframe]
 for frame in only_mine:

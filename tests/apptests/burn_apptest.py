@@ -483,7 +483,7 @@ cloud_metrics = {m.label: m.value for m in cloud.metric}
 # 30 days at $50 a day, against $40 a day before it.
 assert cloud_metrics["Google Cloud (30d)"] == "$1,500.00", cloud_metrics
 assert cloud_metrics["A day of Cloud"] == "$50.00", cloud_metrics
-assert cloud_metrics["Dearest service"] == "Cloud Run", cloud_metrics
+assert cloud_metrics["Most expensive service"] == "Cloud Run", cloud_metrics
 cloud_body = texts(cloud)
 assert "$1,500 on Google Cloud in 30 days" in cloud_body, cloud_body[-1200:]
 assert "up $300 (+25%)" in cloud_body, cloud_body[-1200:]

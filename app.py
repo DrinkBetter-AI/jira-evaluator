@@ -4423,7 +4423,7 @@ def _render_ask_list(
     demand = read.demand
     st.caption(
         f"At {cut:.0%} off, {beaten} of these {len(priced)} would be at or below "
-        f"the market price, and {len(priced) - beaten} would still be dearer. "
+        f"the market price, and {len(priced) - beaten} would still be above it. "
         + _demand_note(demand)
     )
     if demand.truncated:
@@ -4771,7 +4771,7 @@ def _render_price_benchmark() -> None:
         tiles[0],
         TAB_BUSINESS,
         section,
-        "Dearer than the market",
+        "More expensive than the market",
         f"{prices.dear_share:.0%}" if prices.counted else "\u2014",
     )
     _tile(
@@ -4805,7 +4805,7 @@ def _render_price_benchmark() -> None:
                 f"Ask the merchants ({merchant_client.ASK_LIST})",
                 "Cheaper than the market",
                 "What price did to sales",
-                "Dearest bottles",
+                "Most expensive bottles",
             ]
         )
         with ask_tab:
@@ -5696,7 +5696,7 @@ def _render_cloud(days: int) -> None:
         tiles[2],
         TAB_BUSINESS,
         cloud,
-        "Dearest service",
+        "Most expensive service",
         f"{burn.lines.iloc[0]['line_item']}" if not burn.lines.empty else "\u2014",
     )
 

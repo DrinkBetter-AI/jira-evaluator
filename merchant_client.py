@@ -96,9 +96,9 @@ SALES_DAYS = 90
 _BANDS = (
     (-_SAME_PRICE, "Cheaper than the market"),
     (_SAME_PRICE, "About the market"),
-    (DEAR_GAP, f"Up to {DEAR_GAP:.0%} dearer"),
+    (DEAR_GAP, f"Up to {DEAR_GAP:.0%} more expensive"),
 )
-_LAST_BAND = f"More than {DEAR_GAP:.0%} dearer"
+_LAST_BAND = f"More than {DEAR_GAP:.0%} more expensive"
 
 _BAND_COLUMNS = ("band", "listings", "clicks", "bottles", "per_100_clicks")
 
@@ -749,8 +749,8 @@ def verdicts(
         if dear_clicks and asked:
             lines.append(
                 f"The {len(wanted)} bottles worth asking about took {asked:,} of "
-                f"the {dear_clicks:,} clicks that went to a dearer-than-market "
-                f"wine, so {asked / dear_clicks:.0%} of that demand is one "
+                f"the {dear_clicks:,} clicks that went to a wine priced above "
+                f"the market, so {asked / dear_clicks:.0%} of that demand is one "
                 "conversation with a handful of merchants."
             )
     # Only the suggestions for offers this panel compared: the insights report

@@ -4,7 +4,7 @@ The panel argues in tables, which is the wrong shape for the argument: the
 merchants being asked to drop a price are wine people, not analysts, and a
 column called ``per_100_clicks`` reads as a demand rather than a case. The same
 two figures as a coloured pie and a row of bars make it in one look - this much
-of your range is dearer than everyone else's, and here is what each slice of it
+of your range costs more than everyone else's, and here is what each slice of it
 actually sold.
 
 The page carries its own SVG and its own stylesheet and fetches nothing, so it
