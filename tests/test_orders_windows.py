@@ -144,7 +144,7 @@ def test_an_offer_names_every_merchant_listing_it(monkeypatch):
         ("  ", "orphan-handle"),
     ]
     monkeypatch.setattr(oc, "_connect", lambda config: _Connection(rows, seen))
-    config = oc.DbConfig("host", 5432, "db", "user", "secret")
+    config = oc.DbConfig("host", "db", "user", "secret", 5432)
     found = oc.fetch_offer_handles(config, ["001037450", "001037450", " "])
     assert found == {
         "001037450": (
@@ -169,7 +169,7 @@ def test_no_offers_asks_the_database_nothing(monkeypatch):
         raise AssertionError("the database was opened for an empty list")
 
     monkeypatch.setattr(oc, "_connect", _refuse)
-    config = oc.DbConfig("host", 5432, "db", "user", "secret")
+    config = oc.DbConfig("host", "db", "user", "secret", 5432)
     assert oc.fetch_offer_handles(config, []) == {}
 
 
@@ -209,7 +209,7 @@ def test_the_bottles_sold_are_counted_per_google_offer(monkeypatch):
             rows, seen, ["offer", "handle", "bottles", "revenue"]
         ),
     )
-    config = oc.DbConfig("host", 5432, "db", "user", "secret")
+    config = oc.DbConfig("host", "db", "user", "secret", 5432)
     now = dt.datetime(2026, 8, 13, tzinfo=dt.timezone.utc)
     frame = oc.fetch_offer_sales(config, 90, now)
     # The offer with no id is not a sale of anything Google prices.
@@ -238,7 +238,7 @@ def test_a_shop_with_no_sales_yet_is_an_empty_frame_not_a_crash(monkeypatch):
         lambda config: _FrameConnection([], seen, ["offer", "handle", "bottles",
                                                    "revenue"]),
     )
-    config = oc.DbConfig("host", 5432, "db", "user", "secret")
+    config = oc.DbConfig("host", "db", "user", "secret", 5432)
     frame = oc.fetch_offer_sales(config, 30)
     assert frame.empty
     assert list(frame.columns) == ["offer", "handle", "bottles", "revenue"]

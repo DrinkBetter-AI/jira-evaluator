@@ -86,6 +86,8 @@ dashboard.github_client.load_github_env = lambda: None
 dashboard.amplitude_client.load_amplitude_env = lambda: None
 dashboard.orders_client.load_medusa_env = lambda: None
 dashboard.ads_client.load_ads_env = lambda: None
+# Merchant Center is drawn by the same page and is not what this check is about.
+dashboard.merchant_client.load_merchant_env = lambda: None
 
 
 def _openai_costs(days: int) -> pd.DataFrame:

@@ -81,6 +81,14 @@ dashboard.fetch_available_transition_statuses = lambda *a, **k: ["Done"]
 dashboard.github_client.load_github_env = lambda: None
 # The CRM is out of scope here, and a missing key is one of its own branches.
 dashboard.orders_client.load_medusa_env = lambda: None
+# The funnel is one panel on a page of them, and rendering the page renders the
+# rest: refused here rather than left to whatever keys the machine has, so this
+# check reads no money source it is not about.
+dashboard.ads_client.load_ads_env = lambda: None
+dashboard.cost_client.load_openai_env = lambda: None
+dashboard.cost_client.load_stripe_env = lambda: None
+dashboard.cost_client.load_billing_env = lambda: None
+dashboard.merchant_client.load_merchant_env = lambda: None
 
 if MODE == "nokeys":
     dashboard.amplitude_client.load_amplitude_env = lambda: None

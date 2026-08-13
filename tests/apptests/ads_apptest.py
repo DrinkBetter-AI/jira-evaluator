@@ -138,6 +138,10 @@ dashboard.fetch_all_users = lambda *a, **k: {}
 dashboard.fetch_available_transition_statuses = lambda *a, **k: ["Done"]
 dashboard.github_client.load_github_env = lambda: None
 dashboard.amplitude_client.load_amplitude_env = lambda: None
+# Every source the page draws but this check is not about, refused rather than
+# left to whatever keys the machine has.
+dashboard.cost_client.load_billing_env = lambda: None
+dashboard.merchant_client.load_merchant_env = lambda: None
 
 
 def _order_book():
