@@ -115,9 +115,11 @@ elif MODE == "adsquiet":
     # Configured, read, and nothing spent: a different emptiness from the above,
     # and telling this reader to set environment variables would be a lie.
     dashboard._ad_products = lambda days: dashboard.AdProducts(ADS.iloc[0:0], "USD", [])
-elif MODE == "adsblind":
+elif MODE in ("adsblind", "adsbadconfig"):
     # Configured, but the report itself could not be read: what each wine cost
     # is unknown rather than nil, and neither of the other two captions is true.
+    # A rejected setting fails the read the same way, which is why it is a mode
+    # of its own: the reader is meant to be sent to the setting, not to BigQuery.
     dashboard._ad_products = lambda days: dashboard._no_ad_products(read=False)
 elif MODE == "adseur":
     # An account billed in euros beside a dollar one: the euro accounts are the
@@ -126,7 +128,7 @@ elif MODE == "adseur":
 else:
     dashboard._ad_products = lambda days: dashboard.AdProducts(ADS, "USD", [])
 
-dashboard._ads_configured = lambda: MODE != "noads"
+dashboard._ads_configured = lambda: MODE not in ("noads", "adsbadconfig")
 
 if MODE in (
     "sold",
@@ -135,6 +137,7 @@ if MODE in (
     "noads",
     "adsquiet",
     "adsblind",
+    "adsbadconfig",
     "adseur",
 ):
     dashboard.orders_client.load_medusa_env = lambda: dashboard.orders_client.DbConfig(
@@ -684,6 +687,13 @@ assert "the transfer will need the Shopping product stats table" not in blind, b
     -900:
 ]
 print("a product report that could not be read is not an account at rest: ok")
+
+# A setting the Ads client rejects fails the read like an absent table does, and
+# is the one of the two the reader can fix: it is sent to the setting.
+mistyped = texts(run("adsbadconfig"))
+assert "check what they are set to" in mistyped, mistyped[-900:]
+assert "the credential cannot see it" not in mistyped, mistyped[-900:]
+print("a rejected Ads setting is not a BigQuery permission hunt: ok")
 
 # An order book that opened and matched none of the advertised wines is the same
 # falsehood as a shut one: what they sold is unknown, not nil.

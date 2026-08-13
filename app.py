@@ -4982,19 +4982,25 @@ def _no_ad_spend(ads: AdProducts, merchant: str) -> None:
     set environment variables: a merchant whose wines took no money would be
     told to configure an account that is already configured and spending, and a
     report that could not be read would be reported as an account at rest.
+
+    Settings are asked about before the read is: a name the Ads client rejects
+    fails the read like an absent table does, and sending somebody hunting
+    BigQuery permissions over a typo is the worst of the four to get wrong.
     """
-    if not ads.read:
+    if not _ads_configured():
+        st.caption(
+            "Per-wine ad spend comes from Google Ads' Shopping product report in "
+            "BigQuery. Set GOOGLE_ADS_BQ_PROJECT and GOOGLE_ADS_BQ_DATASET - and "
+            "check what they are set to, since a value the Ads client rejects "
+            "reads the same from here as one nobody set - and the transfer will "
+            "need the Shopping product stats table."
+        )
+    elif not ads.read:
         st.caption(
             "Google Ads' Shopping product report could not be read, so what each "
             "wine cost is unknown rather than nil. The dataset is configured; "
             "either the transfer is not carrying the Shopping product stats "
             "table, or the credential cannot see it."
-        )
-    elif not _ads_configured():
-        st.caption(
-            "Per-wine ad spend comes from Google Ads' Shopping product report in "
-            "BigQuery. Set GOOGLE_ADS_BQ_PROJECT and GOOGLE_ADS_BQ_DATASET, and "
-            "the transfer will need the Shopping product stats table."
         )
     elif merchant != _EVERY_MERCHANT:
         st.caption(
