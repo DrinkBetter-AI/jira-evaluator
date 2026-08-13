@@ -4157,8 +4157,9 @@ def _price_benchmark_cached(account: str, country: str) -> BenchmarkRead:
     return BenchmarkRead(prices, insights, demand)
 
 
-# The catalogue moves slower than the prices in it, and this read is only asked
-# about the hundred wines on screen, so it is held for a day.
+# The catalogue moves slower than the prices in it, and the whole feed's
+# merchants are read once and then handed to every table below, so it is held
+# for a day.
 _OFFER_MERCHANTS_TTL_SECONDS = 24 * 3600
 
 # Orders arrive all day, but a quarter of them is a slow-moving figure and this
@@ -4273,13 +4274,15 @@ def _one_merchant(
     )
 
 
-def _with_merchants(frame: pd.DataFrame) -> pd.DataFrame:
+def _with_merchants(
+    frame: pd.DataFrame, named: dict[str, tuple[str, ...]] | None = None
+) -> pd.DataFrame:
     """``frame`` with a merchant column, or unchanged if the catalogue is shut.
 
     The names are worth a lot to the conversation and nothing to the arithmetic,
     so a CRM that cannot be reached costs the column rather than the table.
     """
-    named = _offer_merchants(frame)
+    named = _offer_merchants(frame) if named is None else named
     if not named:
         return frame
     return frame.assign(
@@ -4379,7 +4382,11 @@ _ASK_COLUMNS = (
 )
 
 
-def _render_ask_list(read: BenchmarkRead, money: str) -> None:
+def _render_ask_list(
+    read: BenchmarkRead,
+    money: str,
+    named: dict[str, tuple[str, ...]] | None = None,
+) -> None:
     """The hundred bottles worth taking to a merchant, best argument first.
 
     Nobody reprices five thousand wines, so the panel's job is to choose the
@@ -4417,7 +4424,7 @@ def _render_ask_list(read: BenchmarkRead, money: str) -> None:
             "The clicks are as far as the performance report was read, so a "
             "wine further down it can read lower here than it was."
         )
-    shown = _with_merchants(read.sales.against(priced))
+    shown = _with_merchants(read.sales.against(priced), named)
     columns = _visible(shown, _ASK_COLUMNS, demand.measured, read.sales.read)
     table = _formatted(shown, money)[columns]
     if "google_cut" in table.columns:
@@ -4463,7 +4470,11 @@ def _render_ask_list(read: BenchmarkRead, money: str) -> None:
     )
 
 
-def _render_bargains(read: BenchmarkRead, money: str) -> None:
+def _render_bargains(
+    read: BenchmarkRead,
+    money: str,
+    named: dict[str, tuple[str, ...]] | None = None,
+) -> None:
     """The wines already cheaper than everyone else, most wanted first.
 
     The other half of the same read, and the cheaper half to act on: these need
@@ -4473,7 +4484,7 @@ def _render_bargains(read: BenchmarkRead, money: str) -> None:
     if wines.empty:
         st.caption("Nothing in the feed is priced below the market.")
         return
-    shown = _with_merchants(read.sales.against(wines))
+    shown = _with_merchants(read.sales.against(wines), named)
     columns = _visible(
         shown,
         ("title", "merchant", "clicks", "bottles", "price", "benchmark", "gap"),
@@ -4528,6 +4539,16 @@ def _render_evidence(read: BenchmarkRead) -> None:
         st.caption(
             "The order book could not be read, so what these prices sold is "
             "unknown rather than nothing."
+        )
+        return
+    if not sales.measured:
+        # A join that matched nothing and a shop that sold nothing leave the
+        # same empty frame, and printing a zero against every band would be the
+        # panel telling a merchant its wines do not sell on our own bad match.
+        st.caption(
+            "No bottles in the order book match these listings, so there is "
+            "nothing to set beside the prices - which is not the same as "
+            "nothing having sold."
         )
         return
     if not demand.measured:
@@ -4678,9 +4699,9 @@ def _render_price_benchmark() -> None:
             ]
         )
         with ask_tab:
-            _render_ask_list(read, money)
+            _render_ask_list(read, money, named)
         with bargain_tab:
-            _render_bargains(read, money)
+            _render_bargains(read, money, named)
         with evidence_tab:
             _render_evidence(read)
         with dear_tab:
