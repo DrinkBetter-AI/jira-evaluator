@@ -4643,6 +4643,9 @@ def _render_price_benchmark() -> None:
 
     read = read._replace(sales=_offer_sales())
     prices, insights = read.prices, read.insights
+    # Held before the merchant filter can empty it, so an empty filter is never
+    # mistaken below for a feed with no benchmarks in it.
+    whole_feed_counted = prices.counted
     filtered_to_nothing = False
     # Whose wine each offer is, read once for the whole catalogue so the same
     # names can both filter it and label the rows below.
@@ -4692,10 +4695,10 @@ def _render_price_benchmark() -> None:
         f"{prices.counted:,}",
     )
 
-    # Against the whole read, not the merchant's slice of it: an empty filter
+    # Against the whole feed, not the merchant's slice of it: an empty filter
     # is already explained above, and telling the reader to change the feed's
     # country for it would send them after a setting that is not the matter.
-    if not read.prices.counted:
+    if not whole_feed_counted:
         st.caption(
             f"Read for {config.country}, the country the feed is taken to "
             "target. Benchmarks are published per country, so set "
