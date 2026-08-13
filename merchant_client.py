@@ -200,6 +200,16 @@ class Demand:
     def clicks(self) -> int:
         return int(self.offers["clicks"].sum()) if len(self.offers) else 0
 
+    @property
+    def measured(self) -> bool:
+        """Whether there is any demand to rank by.
+
+        A report that could not be read and a shop nobody clicked look the same
+        from here - both leave every offer on zero - and either way an ordering
+        that claims to be by demand would be an ordering by nothing.
+        """
+        return bool(len(self.offers)) and self.clicks > 0
+
     def against(self, offers: pd.DataFrame) -> pd.DataFrame:
         """``offers`` with clicks and impressions on it, zero where unseen.
 
@@ -429,6 +439,10 @@ def product_demand(config: Merchant, token: str) -> Demand:
         ],
         columns=["offer", "clicks", "impressions"],
     )
+    # One row per offer whatever the report segments by: a wine split across two
+    # rows is one wine's demand, and left split it would rank as half of it.
+    if not frame.empty:
+        frame = frame.groupby("offer", as_index=False)[["clicks", "impressions"]].sum()
     return Demand(frame, truncated)
 
 
@@ -447,10 +461,9 @@ def bargains(prices: Prices, demand: Demand, limit: int = ASK_LIST) -> pd.DataFr
         return cheaper.assign(clicks=0, impressions=0)
     frame = demand.against(cheaper)
     frame = frame.assign(under=-frame["gap"] * frame["benchmark"])
+    order = ["clicks", "under"] if demand.measured else ["under"]
     return (
-        frame.sort_values(["clicks", "under"], ascending=False)
-        .head(limit)
-        .reset_index(drop=True)
+        frame.sort_values(order, ascending=False).head(limit).reset_index(drop=True)
     )
 
 
@@ -483,16 +496,29 @@ def ask_list(
         overpay=frame["price"] - frame["benchmark"],
         impact=frame["clicks"] * frame["gap"],
     )
-    if insights is not None and insights.counted:
-        advice = insights.offers[
-            ["offer", "suggested", "clicks_change", "conversions_change"]
-        ].rename(columns={"suggested": "google_price"})
-        frame = frame.merge(advice, on="offer", how="left")
-        frame["google_cut"] = 1 - frame["google_price"] / frame["price"]
+    if insights is not None:
+        # The same discipline the verdicts keep: the insights report carries no
+        # country, currency or benchmark filter, so a suggestion is only ours if
+        # it names an offer this panel compared - otherwise the percentage below
+        # could divide one currency by another. One row per offer, too: an offer
+        # id repeated across feed labels would otherwise take several of the
+        # hundred places with the same wine.
+        advice = insights.within(dear)
+        if advice.counted:
+            columns = advice.offers[
+                ["offer", "suggested", "clicks_change", "conversions_change"]
+            ].rename(columns={"suggested": "google_price"})
+            frame = frame.merge(
+                columns.drop_duplicates(subset="offer"), on="offer", how="left"
+            )
+            frame["google_cut"] = 1 - frame["google_price"] / frame["price"]
+    # Without clicks there is no demand to weigh the gap by, and a ranking by a
+    # column of zeros is an arbitrary hundred wines dressed as a shortlist. The
+    # gap alone is a worse argument but an honest one; the panel says which it
+    # is showing.
+    order = ["impact", "clicks"] if demand.measured else ["gap"]
     return (
-        frame.sort_values(["impact", "clicks"], ascending=False)
-        .head(limit)
-        .reset_index(drop=True)
+        frame.sort_values(order, ascending=False).head(limit).reset_index(drop=True)
     )
 
 

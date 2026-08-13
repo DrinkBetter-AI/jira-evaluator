@@ -4214,6 +4214,21 @@ def _price_columns(money: str) -> dict[str, object]:
     }
 
 
+def _visible(frame: pd.DataFrame, wanted: tuple[str, ...], clicked: bool) -> list[str]:
+    """Which of ``wanted`` the frame can actually show.
+
+    A clicks column of nothing but zeros reads as a measurement rather than as
+    a missing report, so when there is no demand to show the column goes with
+    it and the caption says why.
+    """
+    return [
+        column
+        for column in wanted
+        if column in frame.columns
+        and (clicked or column not in ("clicks", "impressions"))
+    ]
+
+
 def _formatted(frame: pd.DataFrame, money: str) -> pd.DataFrame:
     formatters = _price_columns(money)
     shown = frame.copy()
@@ -4250,15 +4265,26 @@ def _render_ask_list(read: BenchmarkRead, money: str) -> None:
     cut = percent / 100
     priced = merchant_client.after_cut(wines, cut)
     beaten = merchant_client.beats_market(priced)
+    demand = read.demand
     st.caption(
         f"At {cut:.0%} off, {beaten} of these {len(priced)} would be at or below "
         f"the market price, and {len(priced) - beaten} would still be dearer. "
-        f"Clicks are the last {merchant_client.DEMAND_DAYS} days in Shopping."
+        + (
+            f"Clicks are the last {merchant_client.DEMAND_DAYS} days in Shopping."
+            if demand.measured
+            else "Ranked by the gap alone: Shopping reported no clicks for "
+            "these products, so there is no demand to weigh it by."
+        )
     )
+    if demand.truncated:
+        st.caption(
+            "The clicks are as far as the performance report was read, so a "
+            "wine further down it can read lower here than it was."
+        )
     shown = _with_merchants(priced)
-    columns = [
-        column
-        for column in (
+    columns = _visible(
+        shown,
+        (
             "title",
             "merchant",
             "clicks",
@@ -4268,9 +4294,9 @@ def _render_ask_list(read: BenchmarkRead, money: str) -> None:
             "cut",
             "overpay",
             "google_cut",
-        )
-        if column in shown.columns
-    ]
+        ),
+        demand.measured,
+    )
     table = _formatted(shown, money)[columns]
     if "google_cut" in table.columns:
         table["google_cut"] = shown["google_cut"].map(
@@ -4320,11 +4346,11 @@ def _render_bargains(read: BenchmarkRead, money: str) -> None:
         st.caption("Nothing in the feed is priced below the market.")
         return
     shown = _with_merchants(wines)
-    columns = [
-        column
-        for column in ("title", "merchant", "clicks", "price", "benchmark", "gap")
-        if column in shown.columns
-    ]
+    columns = _visible(
+        shown,
+        ("title", "merchant", "clicks", "price", "benchmark", "gap"),
+        read.demand.measured,
+    )
     st.dataframe(
         _formatted(shown, money)[columns].rename(
             columns={
@@ -4340,9 +4366,15 @@ def _render_bargains(read: BenchmarkRead, money: str) -> None:
         hide_index=True,
     )
     st.caption(
-        "Cheaper here than the median merchant, and clicked on in the last "
-        f"{merchant_client.DEMAND_DAYS} days. These are what the ad budget can "
-        "be pointed at without asking anybody to change a price."
+        "Cheaper here than the median merchant. These are what the ad budget "
+        "can be pointed at without asking anybody to change a price"
+        + (
+            f", most clicked on in the last {merchant_client.DEMAND_DAYS} days "
+            "first."
+            if read.demand.measured
+            else ", ordered by how far under the market they are: Shopping "
+            "reported no clicks to rank them by."
+        )
     )
 
 
