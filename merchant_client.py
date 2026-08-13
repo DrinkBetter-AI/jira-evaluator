@@ -364,9 +364,10 @@ def sales_verdicts(prices: Prices, demand: Demand, sales: Sales) -> list[str]:
         return []
     lines = [
         f"**Wines priced under the market sold {cheap_rate:.0f} bottles per 100 "
-        f"clicks over the last {sales.days} days; wines priced above it sold "
-        f"{dear_rate:.0f}.** Same shop, same shoppers, "
-        f"{cheap_rate / dear_rate:.1f}x the sales for the same attention."
+        f"clicks - {sales.days} days of orders against the last {DEMAND_DAYS} "
+        f"days of clicks - where wines priced above it sold {dear_rate:.0f}.** "
+        f"Same shop, same shoppers, {cheap_rate / dear_rate:.1f}x the sales for "
+        "the same attention."
     ]
     lines.append(
         "That is a comparison rather than an experiment - a keenly priced wine "
