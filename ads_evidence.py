@@ -65,6 +65,13 @@ def _sum(amount: float, currency: str) -> str:
     return f"{symbol}{amount:,.0f}" + (f" {currency.upper()}" if not symbol else "")
 
 
+def _rate(amount: float, currency: str) -> str:
+    """A return per unit spent, to the cent while it is small enough to matter."""
+    symbol = _SYMBOLS.get(currency.lower(), "")
+    figure = f"{amount:,.0f}" if amount >= 10 else f"{amount:,.2f}"
+    return f"{symbol}{figure}" + (f" {currency.upper()}" if not symbol else "")
+
+
 def sold_known(frame: pd.DataFrame) -> bool:
     """Whether this ledger knows what each wine sold, or merely has no figure.
 
@@ -159,9 +166,12 @@ def by_band(frame: pd.DataFrame) -> pd.DataFrame:
     # Revenue for each dollar the band cost, blank where it cost nothing: a band
     # that took no spend has no return per dollar, and 0 would read as a band
     # that was advertised and sold nothing.
+    # Kept to the cent rather than the unit: this column is also the test for
+    # whether a band returned anything at all, and a band returning forty cents
+    # a dollar rounded to the unit is a band reported as having sold nothing.
     grouped["per_dollar"] = (
         grouped["revenue"] / grouped["spend"].where(grouped["spend"] > 0)
-    ).round(0)
+    ).round(2)
     if not sold_known(frame):
         # A band still has wines, spend and clicks in it without the order book.
         # What it gave back is the column that would be invented.
@@ -279,8 +289,8 @@ def verdicts(
                     BY_PRICE,
                     f"**{_sum(1, spent)} spent on wines "
                     f"{str(best['band']).lower()} returned "
-                    f"{_sum(float(best['per_dollar']), money)}, against "
-                    f"{_sum(float(worst['per_dollar']), money)} on wines "
+                    f"{_rate(float(best['per_dollar']), money)}, against "
+                    f"{_rate(float(worst['per_dollar']), money)} on wines "
                     f"{str(worst['band']).lower()}.** Revenue is every sale of "
                     "those wines in the window, not sales the ads can be shown "
                     "to have caused.",

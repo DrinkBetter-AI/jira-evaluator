@@ -92,6 +92,21 @@ def test_bands_use_the_same_edges_as_the_sales_evidence():
     assert float(bands.loc[bands["band"] == mc.BAND_NAMES[3], "per_dollar"].iloc[0]) == 0
 
 
+def test_a_band_returning_less_than_a_unit_still_returned_something():
+    """Rounded to the unit, forty cents a dollar is nothing - and the claim the
+    panel exists to make is dropped on any band whose return is that small."""
+    ledger = ae.ledger(
+        ads([("cheap", 100.0, 10), ("lots", 100.0, 10)]),
+        prices([("cheap", 7.0, 10.0), ("lots", 20.0, 10.0)]),
+        sales([("cheap", 50, 500.0), ("lots", 4, 40.0)]),
+    )
+    bands = ae.by_band(ledger)
+    assert float(bands.loc[bands["band"] == mc.BAND_NAMES[3], "per_dollar"].iloc[0]) == 0.4
+    claim = dict(ae.verdicts(ledger))[ae.BY_PRICE]
+    assert "$0.40" in claim and "$5" in claim
+    assert any("x more" in line or "x " in line for line in ae.advice(ledger))
+
+
 def test_a_band_nobody_advertised_has_no_return_rather_than_zero():
     ledger = ae.ledger(
         ads([("cheap", 2.0, 10)]),

@@ -5080,7 +5080,11 @@ def _ad_pictures(frame: pd.DataFrame, money: str) -> None:
             color=rated["band"].astype(str),
             color_discrete_map=colours,
             title=f"Revenue per {_money(1, money)} of ads, by price against market",
-            text=rated["per_dollar"].map(lambda value: f"{value:,.0f}"),
+            # To the cent while the return is small: a band giving back forty
+            # cents a dollar labelled 0 reads as a band that sold nothing.
+            text=rated["per_dollar"].map(
+                lambda value: f"{value:,.0f}" if value >= 10 else f"{value:,.2f}"
+            ),
         )
         bars.update_layout(
             margin=dict(t=54, b=0, l=0, r=0),
