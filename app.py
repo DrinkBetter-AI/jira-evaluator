@@ -4544,8 +4544,8 @@ def _band_pictures(bands: pd.DataFrame, merchant: str) -> None:
 
     A wine merchant is not going to be argued out of a price by a column called
     bottles per 100 clicks. The same numbers as a coloured ring and a row of
-    bars make the case at a glance: this much of your range is red, and the red
-    is the part that is not selling.
+    bars make the case at a glance: this much of what Google could compare is
+    red, and the red is the part that is not selling.
     """
     slices = bands[bands["listings"] > 0]
     if slices.empty:
@@ -4563,7 +4563,7 @@ def _band_pictures(bands: pd.DataFrame, merchant: str) -> None:
             color=slices["band"].astype(str),
             color_discrete_map=colours,
             hole=0.35,
-            title=f"{merchant}: the range, by price against the market",
+            title=f"{merchant}: compared wines, by price against the market",
         )
         ring.update_traces(textinfo="percent", hovertemplate="%{label}: %{value} wines")
         ring.update_layout(margin=dict(t=54, b=0, l=0, r=0), legend_title_text="")
