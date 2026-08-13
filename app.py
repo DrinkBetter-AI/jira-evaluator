@@ -4234,6 +4234,8 @@ def _price_columns(money: str) -> dict[str, object]:
         "overpay": lambda value: _money(value, money),
         "clicks": lambda value: f"{int(value):,}",
         "impressions": lambda value: f"{int(value):,}",
+        "cut_price": lambda value: _money(value, money),
+        "cut_gap": lambda value: f"{value:+.0%}",
     }
 
 
@@ -4309,6 +4311,8 @@ def _render_ask_list(read: BenchmarkRead, money: str) -> None:
             "price",
             "benchmark",
             "gap",
+            "cut_price",
+            "cut_gap",
             "cut",
             "overpay",
             "google_cut",
@@ -4329,6 +4333,8 @@ def _render_ask_list(read: BenchmarkRead, money: str) -> None:
                 "price": "Our price",
                 "benchmark": "Market",
                 "gap": "Gap",
+                "cut_price": f"At -{percent}%",
+                "cut_gap": "Gap then",
                 "cut": "Cut to match",
                 "overpay": "Per bottle",
                 "google_cut": "Google suggests",
@@ -4339,7 +4345,12 @@ def _render_ask_list(read: BenchmarkRead, money: str) -> None:
     )
     st.download_button(
         "Download the ask list",
-        data=shown.to_csv(index=False).encode("utf-8"),
+        # The same rule the table keeps: a spreadsheet is read further from its
+        # caption than a screen is, so a zero meaning "not measured" leaves with
+        # the column rather than on its own into a meeting.
+        data=shown[_visible(shown, tuple(shown.columns), demand.measured)]
+        .to_csv(index=False)
+        .encode("utf-8"),
         file_name=f"price-ask-list-{merchant_client.as_of()}.csv",
         mime="text/csv",
         key="price_ask_download",
