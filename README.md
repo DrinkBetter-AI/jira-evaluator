@@ -723,6 +723,19 @@ never diverges from the health numbers:
 
 Tune the weights via the constants at the top of `prioritization.py`.
 
+## Checks
+
+    pip install -r requirements-dev.txt
+    python -m pytest -q                 # everything
+    python -m pytest -q -m "not slow"    # the readers and rules only
+
+No credentials are needed and none are used: Jira, the order book, Merchant
+Center, Google Ads, Amplitude, Stripe and OpenAI are each answered by a stub, so
+a run tests the code rather than the live shop. `tests/` holds the readers and
+their rules; `tests/apptests/` renders whole pages through Streamlit's `AppTest`
+and asserts on what the tiles and sentences say, which is slower and marked
+`slow`. Both run on every pull request (`.github/workflows/checks.yml`).
+
 ## Other scripts
 
 - `get_jira_projects.py` — list the Jira projects visible to the configured account.

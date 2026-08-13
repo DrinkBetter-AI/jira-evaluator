@@ -1,0 +1,3 @@
+# What the checks need on top of the app's own dependencies.
+-r requirements.txt
+pytest>=8.0.0
