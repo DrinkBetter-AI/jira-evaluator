@@ -420,7 +420,7 @@ def price_insights(config: Merchant, token: str) -> Insights:
     return Insights(frame.reset_index(drop=True), truncated)
 
 
-def product_demand(config: Merchant, token: str) -> Demand:
+def product_demand(config: Merchant, token: str, country: str = "") -> Demand:
     """Clicks and impressions per offer over the last month.
 
     Only the offers with a click: the report holds a row for every product that
@@ -428,10 +428,18 @@ def product_demand(config: Merchant, token: str) -> Demand:
     nobody clicked carry no demand to rank by. Marketing method is left out of
     the select on purpose - naming it would segment the report into an ads row
     and an organic row per offer, and demand is demand.
+
+    The shopper's country is not: the prices are compared against one country's
+    benchmark, so a click from another one is demand that never saw the price
+    being argued about.
     """
+    country = country or config.country
+    if not _COUNTRY_PATTERN.match(country):
+        raise MerchantConfigError(f"{country!r} is not a two-letter country code.")
     query = (
         "SELECT offer_id, clicks, impressions FROM product_performance_view "
-        "WHERE date DURING LAST_30_DAYS AND clicks > 0"
+        "WHERE date DURING LAST_30_DAYS AND clicks > 0 "
+        f"AND customer_country_code = '{country.upper()}'"
     )
     rows, truncated = _search(config, token, query)
     frame = pd.DataFrame(

@@ -4140,7 +4140,7 @@ def _price_benchmark_cached(account: str, country: str) -> BenchmarkRead:
     # Likewise the clicks: without them the tables lose their ordering, not
     # their subject, and the headline above them does not depend on demand.
     try:
-        demand = merchant_client.product_demand(config, token)
+        demand = merchant_client.product_demand(config, token, country)
     except Exception:  # noqa: BLE001
         # Marked unread rather than empty: an empty report says nobody clicked,
         # and the panel would otherwise print that as a finding about the shop.
@@ -4263,6 +4263,26 @@ def _formatted(frame: pd.DataFrame, money: str) -> pd.DataFrame:
     return shown
 
 
+# What the ask list shows, on screen and in the file, in the order a phone call
+# would go through them. The frame behind it also carries the working out - the
+# impact score, and Google's predicted change in conversions, which this panel
+# will not report because the feed measures none - and neither belongs in a
+# spreadsheet read a long way from the caption that would have said so.
+_ASK_COLUMNS = (
+    "title",
+    "merchant",
+    "clicks",
+    "price",
+    "benchmark",
+    "gap",
+    "cut_price",
+    "cut_gap",
+    "cut",
+    "overpay",
+    "google_cut",
+)
+
+
 def _render_ask_list(read: BenchmarkRead, money: str) -> None:
     """The hundred bottles worth taking to a merchant, best argument first.
 
@@ -4302,23 +4322,7 @@ def _render_ask_list(read: BenchmarkRead, money: str) -> None:
             "wine further down it can read lower here than it was."
         )
     shown = _with_merchants(priced)
-    columns = _visible(
-        shown,
-        (
-            "title",
-            "merchant",
-            "clicks",
-            "price",
-            "benchmark",
-            "gap",
-            "cut_price",
-            "cut_gap",
-            "cut",
-            "overpay",
-            "google_cut",
-        ),
-        demand.measured,
-    )
+    columns = _visible(shown, _ASK_COLUMNS, demand.measured)
     table = _formatted(shown, money)[columns]
     if "google_cut" in table.columns:
         table["google_cut"] = shown["google_cut"].map(
@@ -4345,12 +4349,8 @@ def _render_ask_list(read: BenchmarkRead, money: str) -> None:
     )
     st.download_button(
         "Download the ask list",
-        # The same rule the table keeps: a spreadsheet is read further from its
-        # caption than a screen is, so a zero meaning "not measured" leaves with
-        # the column rather than on its own into a meeting.
-        data=shown[_visible(shown, tuple(shown.columns), demand.measured)]
-        .to_csv(index=False)
-        .encode("utf-8"),
+        # The columns on the screen and no others.
+        data=shown[columns].to_csv(index=False).encode("utf-8"),
         file_name=f"price-ask-list-{merchant_client.as_of()}.csv",
         mime="text/csv",
         key="price_ask_download",
