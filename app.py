@@ -4113,6 +4113,7 @@ class BenchmarkRead(NamedTuple):
 
     prices: merchant_client.Prices
     insights: merchant_client.Insights
+    demand: merchant_client.Demand
 
 
 @st.cache_data(ttl=BENCHMARK_TTL_SECONDS, show_spinner=False)
@@ -4136,7 +4137,274 @@ def _price_benchmark_cached(account: str, country: str) -> BenchmarkRead:
         insights = merchant_client.price_insights(config, token)
     except Exception:  # noqa: BLE001
         insights = merchant_client.Insights(pd.DataFrame())
-    return BenchmarkRead(prices, insights)
+    # Likewise the clicks: without them the tables lose their ordering, not
+    # their subject, and the headline above them does not depend on demand.
+    try:
+        demand = merchant_client.product_demand(config, token, country)
+    except Exception:  # noqa: BLE001
+        # Marked unread rather than empty: an empty report says nobody clicked,
+        # and the panel would otherwise print that as a finding about the shop.
+        demand = merchant_client.Demand(pd.DataFrame(), read=False)
+    return BenchmarkRead(prices, insights, demand)
+
+
+# The catalogue moves slower than the prices in it, and this read is only asked
+# about the hundred wines on screen, so it is held for a day.
+_OFFER_MERCHANTS_TTL_SECONDS = 24 * 3600
+
+# How far a merchant might be asked to come down. Past a third off, the question
+# stops being a price negotiation and becomes a question about the wine.
+_MAX_CUT_PERCENT = 30
+_DEFAULT_CUT_PERCENT = 10
+
+
+@st.cache_data(ttl=_OFFER_MERCHANTS_TTL_SECONDS, show_spinner=False)
+def _offer_merchants_cached(source: str, offers: tuple[str, ...]) -> dict[str, str]:
+    """Which merchants list each of these Google offers, as one printable name.
+
+    Google knows the bottle and its price; only the catalogue knows whose
+    listing that is, and a bottle several merchants stock names all of them -
+    the one to ask is the one whose price is the one in the feed, and this is
+    the panel saying who to start with rather than deciding for you.
+    """
+    config = orders_client.load_medusa_env()
+    if config is None or config.label != source:
+        raise orders_client.MedusaConfigError(
+            "The order database configuration changed while it was being read."
+        )
+    handles = orders_client.fetch_offer_handles(config, list(offers))
+    prefixes = orders_client.fetch_stores(config)
+    named: dict[str, str] = {}
+    for offer, listings in handles.items():
+        merchants = sorted(
+            {orders.merchant_of(handle, prefixes) for handle in listings}
+        )
+        named[offer] = ", ".join(merchants)
+    return named
+
+
+def _with_merchants(frame: pd.DataFrame) -> pd.DataFrame:
+    """``frame`` with a merchant column, or unchanged if the catalogue is shut.
+
+    The names are worth a lot to the conversation and nothing to the arithmetic,
+    so a CRM that cannot be reached costs the column rather than the table.
+    """
+    if frame.empty or "offer" not in frame.columns:
+        return frame
+    try:
+        config = orders_client.load_medusa_env()
+        if config is None:
+            return frame
+        named = _offer_merchants_cached(config.label, tuple(frame["offer"]))
+    except Exception:  # noqa: BLE001
+        return frame
+    if not named:
+        return frame
+    return frame.assign(merchant=frame["offer"].map(named).fillna(""))
+
+
+def _demand_note(demand: merchant_client.Demand) -> str:
+    """What the ordering rests on, and what it does not.
+
+    A report that could not be read and a shop nobody clicked leave the same
+    empty frame behind, and only one of them is a fact about the wines.
+    """
+    if demand.measured:
+        return f"Clicks are the last {merchant_client.DEMAND_DAYS} days in Shopping."
+    if not demand.read:
+        return (
+            "Ranked by the gap alone: Merchant Center's performance report "
+            "could not be read, so how many shoppers each of these lost is "
+            "unknown rather than none."
+        )
+    return (
+        "Ranked by the gap alone: Shopping reported no clicks on these "
+        f"products in the last {merchant_client.DEMAND_DAYS} days, so there is "
+        "no demand to weigh it by."
+    )
+
+
+def _price_columns(money: str) -> dict[str, object]:
+    """The formatters the price tables share, so the same column reads the same."""
+    return {
+        "price": lambda value: _money(value, money),
+        "benchmark": lambda value: _money(value, money),
+        "gap": lambda value: f"{value:+.0%}",
+        "cut": lambda value: f"-{value:.0%}",
+        "overpay": lambda value: _money(value, money),
+        "clicks": lambda value: f"{int(value):,}",
+        "impressions": lambda value: f"{int(value):,}",
+        "cut_price": lambda value: _money(value, money),
+        "cut_gap": lambda value: f"{value:+.0%}",
+    }
+
+
+def _visible(frame: pd.DataFrame, wanted: tuple[str, ...], clicked: bool) -> list[str]:
+    """Which of ``wanted`` the frame can actually show.
+
+    A clicks column of nothing but zeros reads as a measurement rather than as
+    a missing report, so when there is no demand to show the column goes with
+    it and the caption says why.
+    """
+    return [
+        column
+        for column in wanted
+        if column in frame.columns
+        and (clicked or column not in ("clicks", "impressions"))
+    ]
+
+
+def _formatted(frame: pd.DataFrame, money: str) -> pd.DataFrame:
+    formatters = _price_columns(money)
+    shown = frame.copy()
+    for column, formatter in formatters.items():
+        if column in shown.columns:
+            shown[column] = shown[column].map(formatter)
+    return shown
+
+
+# What the ask list shows, on screen and in the file, in the order a phone call
+# would go through them. The frame behind it also carries the working out - the
+# impact score, and Google's predicted change in conversions, which this panel
+# will not report because the feed measures none - and neither belongs in a
+# spreadsheet read a long way from the caption that would have said so.
+_ASK_COLUMNS = (
+    "title",
+    "merchant",
+    "clicks",
+    "price",
+    "benchmark",
+    "gap",
+    "cut_price",
+    "cut_gap",
+    "cut",
+    "overpay",
+    "google_cut",
+)
+
+
+def _render_ask_list(read: BenchmarkRead, money: str) -> None:
+    """The hundred bottles worth taking to a merchant, best argument first.
+
+    Nobody reprices five thousand wines, so the panel's job is to choose the
+    argument: the wines shoppers are already clicking on and finding dearer
+    here than everywhere else, which is where a percentage off buys the most
+    back. Ranked on clicks times the gap - demand seen, times how far over the
+    market that demand was asked to pay.
+    """
+    wines = merchant_client.ask_list(
+        read.prices, read.demand, read.insights, merchant_client.ASK_LIST
+    )
+    if wines.empty:
+        st.caption("Nothing in the feed is priced above the market.")
+        return
+    percent = st.slider(
+        "If merchants came down by",
+        min_value=0,
+        max_value=_MAX_CUT_PERCENT,
+        value=_DEFAULT_CUT_PERCENT,
+        step=1,
+        format="%d%%",
+        key="price_ask_cut",
+    )
+    cut = percent / 100
+    priced = merchant_client.after_cut(wines, cut)
+    beaten = merchant_client.beats_market(priced)
+    demand = read.demand
+    st.caption(
+        f"At {cut:.0%} off, {beaten} of these {len(priced)} would be at or below "
+        f"the market price, and {len(priced) - beaten} would still be dearer. "
+        + _demand_note(demand)
+    )
+    if demand.truncated:
+        st.caption(
+            "The clicks are as far as the performance report was read, so a "
+            "wine further down it can read lower here than it was."
+        )
+    shown = _with_merchants(priced)
+    columns = _visible(shown, _ASK_COLUMNS, demand.measured)
+    table = _formatted(shown, money)[columns]
+    if "google_cut" in table.columns:
+        table["google_cut"] = shown["google_cut"].map(
+            lambda value: "" if pd.isna(value) else f"-{value:.0%}"
+        )
+    st.dataframe(
+        table.rename(
+            columns={
+                "title": "Wine",
+                "merchant": "Merchant",
+                "clicks": "Clicks 30d",
+                "price": "Our price",
+                "benchmark": "Market",
+                "gap": "Gap",
+                "cut_price": f"At -{percent}%",
+                "cut_gap": "Gap then",
+                "cut": "Cut to match",
+                "overpay": "Per bottle",
+                "google_cut": "Google suggests",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.download_button(
+        "Download the ask list",
+        # The columns on the screen and no others.
+        data=shown[columns].to_csv(index=False).encode("utf-8"),
+        file_name=f"price-ask-list-{merchant_client.as_of()}.csv",
+        mime="text/csv",
+        key="price_ask_download",
+    )
+    st.caption(
+        "Cut to match is what it would take to reach the market price on that "
+        "bottle. Google suggests is Google's own recommendation where it has "
+        "one, which it publishes for a few hundred products rather than all of "
+        "them. No figure here predicts extra orders: the feed carries no "
+        "conversion tracking, so an order count would be invented."
+    )
+
+
+def _render_bargains(read: BenchmarkRead, money: str) -> None:
+    """The wines already cheaper than everyone else, most wanted first.
+
+    The other half of the same read, and the cheaper half to act on: these need
+    nobody's agreement, only the ad budget pointed at them.
+    """
+    wines = merchant_client.bargains(read.prices, read.demand)
+    if wines.empty:
+        st.caption("Nothing in the feed is priced below the market.")
+        return
+    shown = _with_merchants(wines)
+    columns = _visible(
+        shown,
+        ("title", "merchant", "clicks", "price", "benchmark", "gap"),
+        read.demand.measured,
+    )
+    st.dataframe(
+        _formatted(shown, money)[columns].rename(
+            columns={
+                "title": "Wine",
+                "merchant": "Merchant",
+                "clicks": "Clicks 30d",
+                "price": "Our price",
+                "benchmark": "Market",
+                "gap": "Gap",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption(
+        "Cheaper here than the median merchant. These are what the ad budget "
+        "can be pointed at without asking anybody to change a price"
+        + (
+            f", most clicked on in the last {merchant_client.DEMAND_DAYS} days "
+            "first."
+            if read.demand.measured
+            else ", ordered by how far under the market they are. "
+            + _demand_note(read.demand)
+        )
+    )
 
 
 def _render_price_benchmark() -> None:
@@ -4206,29 +4474,46 @@ def _render_price_benchmark() -> None:
         )
 
     if prices.counted:
-        st.dataframe(
-            prices.worst.head(_WORST_OFFERS)
-            .assign(
-                price=lambda frame: frame["price"].map(
-                    lambda value: _money(value, money)
-                ),
-                benchmark=lambda frame: frame["benchmark"].map(
-                    lambda value: _money(value, money)
-                ),
-                gap=lambda frame: frame["gap"].map(lambda value: f"{value:+.0%}"),
-            )[["title", "brand", "price", "benchmark", "gap"]]
-            .rename(
-                columns={
-                    "title": "Wine",
-                    "brand": "Brand",
-                    "price": "Our price",
-                    "benchmark": "Market",
-                    "gap": "Gap",
-                }
-            ),
-            width="stretch",
-            hide_index=True,
+        ask_tab, bargain_tab, dear_tab = st.tabs(
+            [
+                f"Ask the merchants ({merchant_client.ASK_LIST})",
+                "Cheaper than the market",
+                "Dearest bottles",
+            ]
         )
+        with ask_tab:
+            _render_ask_list(read, money)
+        with bargain_tab:
+            _render_bargains(read, money)
+        with dear_tab:
+            st.dataframe(
+                prices.worst.head(_WORST_OFFERS)
+                .assign(
+                    price=lambda frame: frame["price"].map(
+                        lambda value: _money(value, money)
+                    ),
+                    benchmark=lambda frame: frame["benchmark"].map(
+                        lambda value: _money(value, money)
+                    ),
+                    gap=lambda frame: frame["gap"].map(lambda value: f"{value:+.0%}"),
+                )[["title", "brand", "price", "benchmark", "gap"]]
+                .rename(
+                    columns={
+                        "title": "Wine",
+                        "brand": "Brand",
+                        "price": "Our price",
+                        "benchmark": "Market",
+                        "gap": "Gap",
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+            st.caption(
+                "The furthest above the market in percentage terms, whether or "
+                "not anybody is looking at them. What to do about them is the "
+                "first tab, which weighs the same gap by the shoppers it lost."
+            )
 
     if prices.other_currencies:
         st.caption(
@@ -4244,7 +4529,7 @@ def _render_price_benchmark() -> None:
         "rather than counted as competitive."
     )
 
-    lines = merchant_client.verdicts(prices, insights)
+    lines = merchant_client.verdicts(prices, insights, read.demand)
     if lines:
         with st.expander("What the prices say", expanded=True):
             _said(TAB_BUSINESS, section, lines)
@@ -6998,6 +7283,9 @@ def _clear_page_caches(page_title: str) -> None:
         # Benchmarks move once a day, but a reader who has just changed a price
         # and pressed Refresh is asking about that price.
         _price_benchmark_cached,
+        # And whose listing each of those prices is: a merchant renamed or a
+        # product re-slugged would otherwise keep its old name for a day.
+        _offer_merchants_cached,
     )
     for cached in business if page_title == BUSINESS_PAGE_TITLE else engineering:
         cached.clear()

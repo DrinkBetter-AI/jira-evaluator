@@ -354,6 +354,18 @@ from {SCHEMA}.store
 where deleted_at is null
 """
 
+# A wine in the Google feed is a product in the catalogue, tied by the id the
+# feed calls an offer and the catalogue keeps as `external_id`. Several
+# merchants list the same wine, so this is deliberately not unique on either
+# side: the handles it returns are every listing of that bottle.
+_OFFER_HANDLES_SQL = f"""
+select external_id as offer,
+       handle
+from {SCHEMA}.product
+where deleted_at is null
+  and external_id = any(%(offers)s)
+"""
+
 
 def _normalise_orders(frame: pd.DataFrame) -> pd.DataFrame:
     """Types and casing the metrics rely on, and a refusal if a figure is absent."""
@@ -499,6 +511,38 @@ def fetch_stores(config: DbConfig) -> dict[str, str]:
     return {**_prefix_aliases(), **prefixes}
 
 
+def fetch_offer_handles(
+    config: DbConfig, offers: list[str]
+) -> dict[str, tuple[str, ...]]:
+    """Each Google offer id mapped to the product handles that carry it.
+
+    Google names a bottle and says how its price compares with the market; it
+    does not say which of the shop's merchants is charging that price, and that
+    is the whole question when the price has to be renegotiated. The handle
+    answers it, because every merchant slugs its products with its own prefix.
+    """
+    wanted = sorted({str(offer).strip() for offer in offers if str(offer).strip()})
+    if not wanted:
+        return {}
+    try:
+        with closing(_connect(config)) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(_OFFER_HANDLES_SQL, {"offers": wanted})
+                rows = cursor.fetchall()
+    except psycopg2.Error as exc:
+        raise MedusaConfigError(
+            f"The order database at {config.label} refused the product list: "
+            f"{str(exc).strip()}"
+        ) from exc
+    handles: dict[str, list[str]] = {}
+    for offer, handle in rows:
+        offer = str(offer or "").strip()
+        handle = str(handle or "").strip().lower()
+        if offer and handle:
+            handles.setdefault(offer, []).append(handle)
+    return {offer: tuple(sorted(set(found))) for offer, found in handles.items()}
+
+
 __all__ = [
     "COLUMNS",
     "ITEM_COLUMNS",
@@ -508,6 +552,7 @@ __all__ = [
     "MedusaConfigError",
     "OrderBook",
     "PAID_PAYMENT_STATUSES",
+    "fetch_offer_handles",
     "fetch_stores",
     "load_medusa_env",
     "read_order_book",
