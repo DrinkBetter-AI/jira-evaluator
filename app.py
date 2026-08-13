@@ -4940,8 +4940,20 @@ class CloudRead(NamedTuple):
     tables: tuple[str, ...] = ()
 
 
-@st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
-def _cloud_costs_cached(days: int) -> CloudRead:
+# The bill moves once a day at best and its last day is yesterday, so a quarter
+# of an hour buys no freshness and pays two whole-table scans of the export for
+# it - the coverage probe has no date to filter on, and `DATE(usage_start_time)`
+# does not prune the export's ingestion-time partitions either. Held on the ads
+# panel's cycle instead, keyed on the date so it rolls over when the export does.
+CLOUD_TTL_SECONDS = 6 * 3600
+# The widest window the panel offers, which is the only one read: `window`
+# slices narrower ones out of the frame in pandas, so a click on the radio no
+# longer sends BigQuery after a subset of rows already in hand.
+CLOUD_WINDOW_DAYS = max(cost_client.LOOKBACK_WINDOWS)
+
+
+@st.cache_data(ttl=CLOUD_TTL_SECONDS, show_spinner=False)
+def _cloud_costs_cached(days: int, today: _dt.date) -> CloudRead:
     """Google Cloud's billing export, and what the export covers.
 
     Read to the export's own last day rather than to today: it is written in
@@ -5003,7 +5015,7 @@ def _render_cloud(days: int) -> None:
 
     try:
         with st.spinner("Reading what Google Cloud charged..."):
-            read = _cloud_costs_cached(days)
+            read = _cloud_costs_cached(CLOUD_WINDOW_DAYS, _dt.date.today())
     except cost_client.CostConfigError as exc:
         st.warning(str(exc))
         return

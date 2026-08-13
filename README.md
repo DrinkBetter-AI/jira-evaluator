@@ -581,7 +581,12 @@ went from ~30s to ~12s by removing waiting, not work:
   and Google's transfer writes it once a day, so re-reading every fifteen minutes
   bought no freshness and paid a round of BigQuery jobs for it. The spend is held
   six hours and the account list a day, both keyed on the date so they roll over
-  when the transfer does rather than mid-morning.
+  when the transfer does rather than mid-morning. *Cloud costs* is the same case
+  and held the same way: the export is written in arrears, its last day is
+  yesterday, and each read costs two scans of the whole export — the coverage
+  probe has no day to filter on, and `DATE(usage_start_time)` prunes no
+  ingestion-time partition. The widest window is the only one read, so the
+  radio's narrower options are cut from the frame in hand.
 - **The ads panel reads one window, not the one selected.** `daily_stats` already
   fetches twice the days it is asked for so the previous period can be compared,
   so the widest option contains every narrower one and the 7/30 radio slices the
@@ -622,6 +627,7 @@ Everything is read live and cached briefly; nothing is precomputed or exported.
 | Sprint statuses, priorities, user directory | Jira API | 10 minutes; the project list, an hour |
 | *Orders, Revenue & AOV*, *Best Sellers & Merchants* | the CRM's own Postgres tables | up to 15 minutes |
 | *Ads Spend & Return* | Google's Ads-to-BigQuery transfer | **a day**, by design |
+| *Cloud costs* | Google Cloud's billing export | up to 6 hours; the export is written in arrears and ends yesterday |
 | *Price competitiveness* | Merchant Center's Merchant API | up to 6 hours; Google recomputes benchmarks daily |
 | *Product Funnel & Friction* | Amplitude Dashboard API | **a day**, by design |
 
