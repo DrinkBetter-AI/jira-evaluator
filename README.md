@@ -72,7 +72,7 @@ profile when they are not all set.
 | `GCP_BILLING_BQ_PROJECT` | no | the key's own project, else the ambient one | GCP project holding the Cloud billing export. Read independently of the Ads settings, so a bad Ads value cannot take the Cloud bill off the page; unset on Cloud Run, which runs in the project the export is in |
 | `GCP_BILLING_BQ_DATASET` | no | `billing_export` | Dataset the *standard usage cost* billing export writes to; the table inside it is found by name, and until Google writes one the *Cloud costs* section says so |
 | `GCP_BIGQUERY_READONLY_KEY` | no | — | A BigQuery service-account key as JSON, for reading the Ads and billing datasets from outside GCP; unset on Cloud Run, which authenticates as its own service account. Also the credential the Merchant Center read uses |
-| `GOOGLE_MERCHANT_ID` | no | — | Merchant Center account id (top right of merchants.google.com), for the *Price competitiveness* section. The account reading it — the key above, or Cloud Run's own service account — must be a user of that Merchant Center account with read access; without it the section says so and everything else works |
+| `GOOGLE_MERCHANT_ID` | no | — | Merchant Center account id (top right of merchants.google.com), for the *Price competitiveness* section. The account reading it — the key above, or Cloud Run's own service account — must be a user of that Merchant Center account with read access, and its GCP project must be registered against the account as a Merchant API developer; without either the section says so and everything else works |
 | `DASHBOARD_PASSWORD`          | no locally, **yes on Cloud Run** | —                                                | Shared password visitors must enter; remembered per browser for 30 days in a signed cookie; leave it unset locally (a copy in `.env` prompts on every run), unset on Cloud Run (`K_SERVICE` present) refuses to serve at all                                     |
 | `DASHBOARD_COOKIE_KEY` | no, but set it when hosted | derived from `DASHBOARD_PASSWORD` with scrypt | Independent secret signing the access cookie, so the cookie is not a verifier for guesses at the password; rotating it signs every browser out without changing the password anyone types |
 
@@ -355,8 +355,11 @@ fully paid with nothing pending.
    predicts that would do to clicks and conversions. Not read from BigQuery,
    though a Merchant Center transfer once wrote these rows there: Google
    deprecated `export_price_benchmarks`, so benchmarks reach only the Merchant
-   API now. Needs `GOOGLE_MERCHANT_ID` and a reader on the Merchant Center
-   account; refreshed at most every six hours, which is as fresh as a benchmark
+   API now — its `v1` endpoints, `v1beta` having been switched off in February
+   2026. Needs `GOOGLE_MERCHANT_ID`, a reader on the Merchant Center account,
+   and the GCP project the credential belongs to registered against that
+   account with a verified `API_DEVELOPER` user (`developerRegistration:registerGcp`);
+   refreshed at most every six hours, which is as fresh as a benchmark
    recomputed daily can be.
 13. **Ads Spend & Return** (*Business* tab) — what the orders cost to win, read from
    Google's own Ads-to-BigQuery transfer rather than the Ads API, which issues

@@ -4227,7 +4227,8 @@ def _render_price_benchmark() -> None:
         st.caption(
             f"These are the {money.upper()} prices only; the feed also quotes "
             + ", ".join(code.upper() for code in prices.other_currencies)
-            + ", which is compared separately rather than mixed in."
+            + ", which is set aside rather than compared against a benchmark in "
+            "another currency."
         )
     st.caption(
         "Google's benchmark is the median price other merchants charge for the "

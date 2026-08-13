@@ -37,13 +37,18 @@ import requests
 _MERCHANT_ENV_VAR = "GOOGLE_MERCHANT_ID"
 _KEY_ENV_VAR = "GCP_BIGQUERY_READONLY_KEY"
 
-_BASE_URL = "https://merchantapi.googleapis.com/reports/v1beta"
+# v1, not v1beta: the beta endpoint was switched off on 28 February 2026 and
+# answers every request with a 409 telling you so.
+_BASE_URL = "https://merchantapi.googleapis.com/reports/v1"
 _SCOPE = "https://www.googleapis.com/auth/content"
 _TIMEOUT_SECONDS = 90
 
 # Merchant Center account ids are numeric and about ten digits. Checked because
 # it is interpolated into the request path.
 _MERCHANT_ID_PATTERN = re.compile(r"^\d{6,16}$")
+
+# Likewise the country, which goes into a quoted literal in the report query.
+_COUNTRY_PATTERN = re.compile(r"^[A-Za-z]{2}$")
 
 # The API pages at 1,000 rows and the catalogue is tens of thousands of offers,
 # so a ceiling is needed or one refresh walks the whole feed. 25 pages is 25,000
@@ -129,6 +134,9 @@ class Insights:
     """Where Google thinks a price cut would pay for itself."""
 
     offers: pd.DataFrame
+    # As on ``Prices``: True when the read stopped at its page ceiling, so the
+    # count below is of the suggestions read rather than all of them.
+    truncated: bool = False
 
     @property
     def counted(self) -> int:
@@ -233,10 +241,15 @@ def price_gaps(config: Merchant, token: str, country: str = "US") -> Prices:
     Google publishes one only where enough other merchants sell the product, and
     a wine nobody else lists has no market price to be dearer than.
     """
+    if not _COUNTRY_PATTERN.match(country):
+        raise MerchantConfigError(
+            f"{country!r} is not a two-letter country code."
+        )
+    # ``id`` is not wanted, but v1 refuses a query on this view without it.
     query = (
-        "SELECT offer_id, title, brand, price, benchmark_price, "
+        "SELECT id, offer_id, title, brand, price, benchmark_price, "
         "report_country_code FROM price_competitiveness_product_view "
-        f"WHERE report_country_code = '{country}'"
+        f"WHERE report_country_code = '{country.upper()}'"
     )
     rows, truncated = _search(config, token, query)
     frame = pd.DataFrame(
@@ -280,12 +293,12 @@ def main_currency(frame: pd.DataFrame) -> tuple[pd.DataFrame, str, tuple[str, ..
 def price_insights(config: Merchant, token: str) -> Insights:
     """Where Google suggests a lower price, and what it predicts that would do."""
     query = (
-        "SELECT offer_id, title, price, suggested_price, "
+        "SELECT id, offer_id, title, price, suggested_price, "
         "predicted_clicks_change_fraction, "
         "predicted_conversions_change_fraction "
         "FROM price_insights_product_view"
     )
-    rows, _ = _search(config, token, query)
+    rows, truncated = _search(config, token, query)
     frame = pd.DataFrame(
         [
             {
@@ -314,7 +327,7 @@ def price_insights(config: Merchant, token: str) -> Insights:
     # Only the offers Google would actually move, and only downwards: a
     # suggestion to charge more is not what this panel is for.
     frame = frame[(frame["suggested"] > 0) & (frame["suggested"] < frame["price"])]
-    return Insights(frame.reset_index(drop=True))
+    return Insights(frame.reset_index(drop=True), truncated)
 
 
 def verdicts(prices: Prices, insights: Insights | None = None) -> list[str]:
@@ -348,10 +361,10 @@ def verdicts(prices: Prices, insights: Insights | None = None) -> list[str]:
             f"predicts {insights.clicks_gain:+.0%} clicks and "
             f"{insights.conversions_gain:+.0%} conversions if you did."
         )
-    if prices.truncated:
+    if prices.truncated or (insights is not None and insights.truncated):
         lines.append(
             "The feed has more priced products than one read carries, so these "
-            "shares describe the products read rather than all of them."
+            "figures describe the products read rather than all of them."
         )
     return lines
 
