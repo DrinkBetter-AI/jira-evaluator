@@ -1,7 +1,7 @@
 """Offline checks for the printable tab report.
 
-Kept outside the repository like the other check scripts: it exercises the
-module directly, with no Streamlit running.
+Offline like the other check scripts: it exercises the module directly, with no
+Streamlit running.
 
     python3 -m pytest tests/test_report.py -q
 """
