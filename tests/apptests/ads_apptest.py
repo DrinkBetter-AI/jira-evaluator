@@ -347,7 +347,10 @@ def texts(test: AppTest) -> str:
         + [i.value for i in test.info]
         + [w.value for w in test.warning]
     )
-    return "\n".join(str(p) for p in parts)
+    # Money sentences are escaped where they are drawn, because Streamlit reads
+    # two dollar signs on one line as inline maths; read back as the reader sees
+    # them, so the assertions below quote the sentence rather than its escaping.
+    return "\n".join(str(p) for p in parts).replace("\\$", "$")
 
 
 # The panel is always announced, so the reader can see the figures are missing
@@ -389,6 +392,10 @@ assert "Goal 1.00" in live_body, live_body[-900:]
 assert "pay for themselves" in live_body, live_body[-900:]
 assert "what Stripe charged across every merchant" in live_body, live_body[-900:]
 assert "of commission actually charged" in live_body, live_body[-900:]
+# Drawn escaped: two dollar signs on one line are inline maths to Streamlit, and
+# the heading was losing both of them off the page.
+drawn = "\n".join(str(m.value) for m in test.markdown)
+assert f"\\${earned} back for every \\$1" in drawn, drawn[-900:]
 
 frames = [df.value for df in test.dataframe]
 campaigns = next(f for f in frames if "Cost per conversion" in list(f.columns))

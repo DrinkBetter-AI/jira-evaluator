@@ -795,7 +795,11 @@ def _said(tab: str, section: str, lines: list[str]) -> None:
     """Verdict lines, drawn as bullets and kept for the printable report."""
     for line in lines:
         _report(tab).note(section, line)
-    st.markdown("\n".join(f"- {line}" for line in lines))
+    # Escaped where it is drawn, plain in the report: these lines are money
+    # sentences, and Streamlit reads a pair of dollar signs on one line as inline
+    # maths - "$3,669 earned, $39 refunded" rendered as italics with both symbols
+    # eaten. The report is HTML and wants the dollars as written.
+    st.markdown("\n".join(f"- {_unmathed(line)}" for line in lines))
 
 
 def _download_report(slot, tab: str) -> None:
@@ -4223,6 +4227,9 @@ class AdProducts(NamedTuple):
     # rather than of the campaign one beside it: the two are transferred
     # separately, and only this one says how much of a per-wine window is real.
     history_start: _dt.date | None = None
+    # Accounts whose product table could not be read while another's could, so
+    # the total below is short by whatever they spent.
+    unread_accounts: int = 0
 
 
 def _no_ad_products(read: bool = True) -> AdProducts:
@@ -4253,39 +4260,58 @@ def _ad_products_cached(
     main = counted.most_common(1)[0][0]
     others = sorted({code for code in counted if code != main})
     billing = [account for account in accounts if account.currency == main]
-    tasks: dict[str, Callable[[], Any]] = {}
-    for account in billing:
-        customer_id = account.customer_id
-        tasks[f"spend:{customer_id}"] = (
-            lambda customer_id=customer_id: ads_client.product_stats(
-                client, config, customer_id, days, today
+    read = _parallel(
+        {
+            account.customer_id: (
+                lambda customer_id=account.customer_id: _one_account_products(
+                    client, config, customer_id, days, today
+                )
             )
-        )
-        # The product table's own first day. The campaign table's, already read
-        # for the accounts, is no answer here: the Shopping report is commonly
-        # added to a transfer months later, so a quarter of spend can be a week
-        # of it set beside a quarter of orders.
-        tasks[f"loaded:{customer_id}"] = (
-            lambda customer_id=customer_id: ads_client.loaded_from(
-                client, config, customer_id, today, ads_client.PRODUCT_TABLE
-            )
-        )
-    read = _parallel(tasks)
-    frames = [read[f"spend:{account.customer_id}"] for account in billing]
-    starts = [
-        day
-        for account in billing
-        if (day := read[f"loaded:{account.customer_id}"]) is not None
-    ]
+            for account in billing
+        }
+    )
+    got = [answer for answer in read.values() if answer is not None]
+    if not got:
+        return _no_ad_products(read=False)
+    starts = [start for _, start in got if start is not None]
     return AdProducts(
-        _offers_together(frames),
+        _offers_together([frame for frame, _ in got]),
         main,
         others,
         # The latest of the accounts' first days, for the reason the campaign
         # read takes it: a total is only wholly loaded once every account in it
         # has reached back that far.
         history_start=max(starts) if starts else None,
+        unread_accounts=len(billing) - len(got),
     )
+
+
+def _one_account_products(
+    client, config, customer_id: str, days: int, today: _dt.date
+) -> tuple[pd.DataFrame, _dt.date | None] | None:
+    """One account's per-offer spend, and the first day its product table holds.
+
+    ``None`` rather than an exception when that account cannot be read. Accounts
+    are found from the campaign tables, and the Shopping product report is
+    transferred separately and often switched on months later, so a dataset can
+    hold an account with no product table at all - and raising here took the
+    spending account's whole tab down with it, which is the thing
+    ``_offers_together`` exists to prevent. Every account failing is still a
+    report that could not be read, and the caller says so.
+
+    The history is asked of the product table itself: the campaign table's first
+    day, already read for the account, says nothing about how much per-wine spend
+    is loaded.
+    """
+    try:
+        return (
+            ads_client.product_stats(client, config, customer_id, days, today),
+            ads_client.loaded_from(
+                client, config, customer_id, today, ads_client.PRODUCT_TABLE
+            ),
+        )
+    except Exception:  # noqa: BLE001 - one account's read, not the panel's
+        return None
 
 
 def _offers_together(frames: list[pd.DataFrame]) -> pd.DataFrame:
@@ -4911,6 +4937,14 @@ def _ad_window_note(ads: AdProducts, days: int = merchant_client.SALES_DAYS) -> 
 def _ad_money_notes(ads: AdProducts, money: str, merchant: str) -> None:
     """What the figures above are not: one currency, one merchant, one feed."""
     _ad_window_note(ads)
+    if ads.unread_accounts:
+        st.caption(
+            f"{ads.unread_accounts} ad account"
+            + ("" if ads.unread_accounts == 1 else "s")
+            + " in this dataset could not be read - most often a transfer that "
+            "does not carry the Shopping product report - so the spend below is "
+            "the accounts that could, and is short by whatever they spent."
+        )
     if ads.other_currencies:
         st.caption(
             "Spend is the "
@@ -6121,7 +6155,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
             f"**{_money(earned, money)} back for every {unit} of ad spend.** "
             f"Goal {goal:.2f}. {standing}{trend}",
         )
-        st.markdown(headline)
+        st.markdown(_unmathed(headline))
         st.caption(
             "Commission here is what Stripe charged across every merchant in "
             "the window, so the different rates they are on are already in it, "

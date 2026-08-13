@@ -387,7 +387,14 @@ def advice(frame: pd.DataFrame, spent: str = "usd", money: str = "") -> list[str
                 "merchant having to agree first."
             )
     unpriced = frame[frame["gap"].isna()] if "gap" in frame.columns else frame.iloc[0:0]
-    if not unpriced.empty and float(unpriced["spend"].sum()) / total > _MOSTLY_UNPRICED:
+    # Gated on the order book like every other lever here: this one points the
+    # reader at what those bottles sold, which is the one column an unread order
+    # book has left blank, so ungated it advises reading a column it withheld.
+    if (
+        sold_known(frame)
+        and not unpriced.empty
+        and float(unpriced["spend"].sum()) / total > _MOSTLY_UNPRICED
+    ):
         said.append(
             f"**Judge the {float(unpriced['spend'].sum()) / total:.0%} with no "
             "benchmark on what it sold, not on its price.** Nobody else lists "

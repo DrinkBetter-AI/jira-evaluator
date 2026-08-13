@@ -351,7 +351,10 @@ def texts(test: AppTest) -> str:
         + [i.value for i in test.info]
         + [w.value for w in test.warning]
     )
-    return "\n".join(str(p) for p in parts)
+    # Money sentences are escaped where they are drawn, because Streamlit reads
+    # two dollar signs on one line as inline maths; read back as the reader sees
+    # them, so the assertions below quote the sentence rather than its escaping.
+    return "\n".join(str(p) for p in parts).replace("\\$", "$")
 
 
 # Every state says what it can and cannot read, rather than leaving a reader to
@@ -405,6 +408,11 @@ assert "$2,975 of commission kept in 30 days" in body, body[-1500:]
 # Net of the refund, like the tile above it: $2,975 against $2,400.
 assert "Commission is up $575 (+24%)" in body, body[-1500:]
 assert "charged this account nothing to process it" in body, body[-1500:]
+# And drawn escaped, or Streamlit reads the pair of dollar signs in "$3,000
+# earned, $25 refunded" as maths and eats both of them off the page.
+drawn = "\n".join(str(m.value) for m in test.markdown)
+assert "\\$2,975 of commission kept" in drawn, drawn[-1500:]
+assert "\\$900 on OpenAI" in drawn, drawn[-1500:]
 print("\n".join(line for line in body.splitlines() if line.startswith("- **")))
 print("live: ok")
 

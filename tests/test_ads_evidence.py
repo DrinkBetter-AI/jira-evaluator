@@ -317,6 +317,28 @@ def test_advice_asks_for_the_order_book_before_anything_else_is_acted_on():
     assert "could not be read" in said[0]
 
 
+def test_a_shut_order_book_is_not_told_to_judge_wines_by_what_they_sold():
+    """Every other lever here is withheld when the sales are unread; this one
+    ends "sales are the only test they can be put to, and they are in the
+    ledger", one line above the panel saying the ledger's sales are blank."""
+    ledger = ae.ledger(
+        ads([("a", 20.0, 10), ("nobodyelse", 80.0, 30)]),
+        prices([("a", 20.0, 10.0)]),
+        unread(),
+    )
+    said = ae.advice(ledger)
+    assert len(said) == 1 and "could not be read" in said[0]
+    # And with the order book open the same ledger does give that advice.
+    told = ae.advice(
+        ae.ledger(
+            ads([("a", 20.0, 10), ("nobodyelse", 80.0, 30)]),
+            prices([("a", 20.0, 10.0)]),
+            sales([("nobodyelse", 4, 300.0)]),
+        )
+    )
+    assert any("with no benchmark on what it sold" in line for line in told)
+
+
 def test_a_merchant_is_named_beside_each_wine_where_the_catalogue_knows_one():
     ledger = ae.ledger(
         ads([("a", 1.0, 1), ("b", 1.0, 1)]),

@@ -406,6 +406,10 @@ def product_stats(
     frame = _run(client, sql, first=first, last=last)
     if frame.empty:
         return pd.DataFrame(columns=list(PRODUCT_COLUMNS))
+    # Dropped before the cast, not after: BigQuery groups NULL as a key of its
+    # own, and ``astype(str)`` would turn that row into a wine called "None" -
+    # spend with no bottle behind it, counted as a bottle Google cannot price.
+    frame = frame[frame["offer"].notna()].copy()
     frame["offer"] = frame["offer"].astype(str).str.strip()
     for column in ("spend", "clicks", "impressions", "ad_conversions"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)

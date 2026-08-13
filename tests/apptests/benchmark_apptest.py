@@ -125,12 +125,15 @@ elif MODE in ("adsblind", "adsbadconfig"):
 elif MODE == "adspartial":
     # Configured and spending, but the Shopping product table only reached back a
     # week: the same spend against a whole quarter of orders, which the tab has
-    # to say rather than let the return be read as a quarter's.
+    # to say rather than let the return be read as a quarter's. And one account
+    # of two could not be read at all, so the total is short by its spend - said
+    # rather than left to look like the whole dataset.
     dashboard._ad_products = lambda days: dashboard.AdProducts(
         ADS,
         "USD",
         [],
         history_start=dt.date.today() - dt.timedelta(days=7),
+        unread_accounts=1,
     )
 elif MODE == "adseur":
     # An account billed in euros beside a dollar one: the euro accounts are the
@@ -717,6 +720,10 @@ short = texts(run("adspartial"))
 assert "only goes back to" in short, short[-1500:]
 assert "days of it, not 90" in short, short[-1500:]
 assert "only goes back to" not in ads_body, ads_body[-1500:]
+# And an account whose product table the transfer does not carry costs its own
+# spend rather than the tab: the rest is shown, and the shortfall said.
+assert "1 ad account in this dataset could not be read" in short, short[-1500:]
+assert "could not be read - most often" not in ads_body, ads_body[-1500:]
 print("a part-loaded product report is not presented as a whole quarter: ok")
 
 # An order book that opened and matched none of the advertised wines is the same

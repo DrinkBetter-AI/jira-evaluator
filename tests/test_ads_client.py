@@ -566,6 +566,21 @@ def test_product_spend_is_read_per_offer_over_the_window_asked_for():
     assert float(frame["spend"].iloc[0]) == 12.5
 
 
+def test_spend_with_no_product_id_on_it_is_not_a_wine_called_none():
+    """BigQuery groups NULL as a key of its own, so the product read can come
+    back with a row for spend that has no offer id; cast to a string first it
+    became a bottle named "None" that Google could publish no benchmark for."""
+    client = FakeQuery(
+        pd.DataFrame(
+            [("wine-1", 12.5, 40, 900, 1.0), (None, 4.0, 3, 60, 0.0)],
+            columns=list(ac.PRODUCT_COLUMNS),
+        )
+    )
+    config = ac.AdsConfig("w266-project-329918", "google_ads", None, None)
+    frame = ac.product_stats(client, config, "8876864797", 30, now=TODAY)
+    assert list(frame["offer"]) == ["wine-1"]
+
+
 def test_no_shopping_rows_at_all_reads_as_no_products_rather_than_an_error():
     client = FakeQuery(pd.DataFrame())
     config = ac.AdsConfig("w266-project-329918", "google_ads", None, None)
