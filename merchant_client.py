@@ -83,6 +83,25 @@ DEMAND_DAYS = 30
 # a rounding error of the clicks.
 ASK_LIST = 100
 
+# How far back the order book is read for the sales beside each price. A
+# quarter rather than the month the clicks cover: a wine sells a few bottles a
+# month at best, and a month of orders would put a zero against most of the
+# catalogue and call it evidence.
+SALES_DAYS = 90
+
+# The bands the evidence is grouped into, as the top of each band and its name.
+# Cut at the same 2% that counts as the same price everywhere else, and again
+# at the 25% the verdicts already call the band a shopper does not come back
+# from.
+_BANDS = (
+    (-_SAME_PRICE, "Cheaper than the market"),
+    (_SAME_PRICE, "About the market"),
+    (DEAR_GAP, f"Up to {DEAR_GAP:.0%} dearer"),
+)
+_LAST_BAND = f"More than {DEAR_GAP:.0%} dearer"
+
+_BAND_COLUMNS = ("band", "listings", "clicks", "bottles", "per_100_clicks")
+
 
 class MerchantConfigError(RuntimeError):
     """Raised when Merchant Center is unconfigured, or refuses the credential."""
@@ -224,6 +243,119 @@ class Demand:
         joined["clicks"] = joined["clicks"].fillna(0).astype(int)
         joined["impressions"] = joined["impressions"].fillna(0).astype(int)
         return joined
+
+
+@dataclass(frozen=True)
+class Sales:
+    """What the shop actually sold of each offer, from its own order book.
+
+    The half of the argument Google cannot supply. Merchant Center reports no
+    conversions on this account, so the only record of a click that became a
+    bottle is the shop's own, and it is the record that matters to a merchant
+    being asked to come down: its wine, its sales, at its price.
+    """
+
+    offers: pd.DataFrame
+    days: int = SALES_DAYS
+    # False when the order book could not be read, which is not the same as a
+    # wine nobody bought - see ``Demand.read``.
+    read: bool = True
+
+    @property
+    def bottles(self) -> int:
+        return int(self.offers["bottles"].sum()) if len(self.offers) else 0
+
+    @property
+    def measured(self) -> bool:
+        return self.read and bool(len(self.offers)) and self.bottles > 0
+
+    def against(self, offers: pd.DataFrame) -> pd.DataFrame:
+        """``offers`` with bottles sold on it, zero where none were.
+
+        Filled rather than dropped, for the reason ``Demand.against`` fills: a
+        wine that sold nothing is the observation, not a missing row.
+        """
+        if "offer" not in offers.columns:
+            return offers
+        if self.offers.empty:
+            return offers.assign(bottles=0, sold_revenue=0.0)
+        columns = self.offers[["offer", "bottles", "revenue"]].rename(
+            columns={"revenue": "sold_revenue"}
+        )
+        joined = offers.merge(
+            columns.drop_duplicates(subset="offer"), on="offer", how="left"
+        )
+        joined["bottles"] = joined["bottles"].fillna(0).astype(int)
+        joined["sold_revenue"] = joined["sold_revenue"].fillna(0.0)
+        return joined
+
+
+def price_bands(prices: Prices, demand: Demand, sales: Sales) -> pd.DataFrame:
+    """How each price band did, from cheaper than the market to well above it.
+
+    The evidence a merchant asks for, and the only form of it this data can
+    honestly carry. Per-wine conversion rates cannot: a bottle bought on two
+    clicks would read as a wine that converts every other shopper. Grouped into
+    bands the counts are large enough to mean something, and bottles are counted
+    per hundred clicks rather than in total so a band with more listings in it
+    does not win by being bigger.
+
+    It is a comparison, not an experiment: a wine priced under the market may
+    also be a wine people want, and nothing here separates the two.
+    """
+    if not prices.counted:
+        return pd.DataFrame(columns=list(_BAND_COLUMNS))
+    frame = sales.against(demand.against(prices.offers))
+    edges = [-float("inf")] + [edge for edge, _ in _BANDS] + [float("inf")]
+    labels = [name for _, name in _BANDS] + [_LAST_BAND]
+    frame = frame.assign(
+        band=pd.cut(frame["gap"], bins=edges, labels=labels, right=True)
+    )
+    grouped = (
+        frame.groupby("band", observed=False)
+        .agg(
+            listings=("offer", "size"),
+            clicks=("clicks", "sum"),
+            bottles=("bottles", "sum"),
+        )
+        .reset_index()
+    )
+    # Per hundred clicks, and blank rather than zero where nobody clicked: a
+    # band Google never showed has no rate, and printing 0 would read as a band
+    # shoppers saw and refused.
+    grouped["per_100_clicks"] = (
+        100 * grouped["bottles"] / grouped["clicks"].where(grouped["clicks"] > 0)
+    )
+    return grouped[list(_BAND_COLUMNS)]
+
+
+def sales_verdicts(prices: Prices, demand: Demand, sales: Sales) -> list[str]:
+    """Whether the shop's own sales say a keener price sells more of it."""
+    if not (sales.measured and demand.measured and prices.counted):
+        return []
+    bands = price_bands(prices, demand, sales)
+    cheap = bands[bands["band"] == _BANDS[0][1]]
+    dear = bands[bands["band"].isin([name for _, name in _BANDS[2:]] + [_LAST_BAND])]
+    cheap_clicks = int(cheap["clicks"].sum())
+    dear_clicks = int(dear["clicks"].sum())
+    if not (cheap_clicks and dear_clicks):
+        return []
+    cheap_rate = 100 * int(cheap["bottles"].sum()) / cheap_clicks
+    dear_rate = 100 * int(dear["bottles"].sum()) / dear_clicks
+    if not dear_rate:
+        return []
+    lines = [
+        f"**Wines priced under the market sold {cheap_rate:.0f} bottles per 100 "
+        f"clicks over the last {sales.days} days; wines priced above it sold "
+        f"{dear_rate:.0f}.** Same shop, same shoppers, "
+        f"{cheap_rate / dear_rate:.1f}x the sales for the same attention."
+    ]
+    lines.append(
+        "That is a comparison rather than an experiment - a keenly priced wine "
+        "may also be a wine people want - but it is the shop's own order book, "
+        "which is the number a merchant will argue with."
+    )
+    return lines
 
 
 def load_merchant_env() -> Merchant | None:
@@ -635,6 +767,8 @@ __all__ = [
     "Merchant",
     "MerchantConfigError",
     "Prices",
+    "SALES_DAYS",
+    "Sales",
     "access_token",
     "after_cut",
     "as_of",
@@ -643,8 +777,10 @@ __all__ = [
     "beats_market",
     "load_merchant_env",
     "main_currency",
+    "price_bands",
     "price_gaps",
     "price_insights",
     "product_demand",
+    "sales_verdicts",
     "verdicts",
 ]

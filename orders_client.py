@@ -347,6 +347,40 @@ order by p.created_at
 """
 )
 
+# What the shop actually sold of each Google offer, which is the one thing the
+# benchmark panel cannot ask Google for: Merchant Center reports clicks and, on
+# this account, no conversions at all. The catalogue ties the two together -
+# `product.external_id` is the offer id in the feed, `product.handle` is what an
+# order line carries - so a bottle sold can be put beside the price it was sold
+# at against the market.
+_OFFER_SALES_SQL = (
+    _ORDER_BOOK_CTE
+    + f"""
+select pr.external_id                             as offer,
+       min(oli.product_handle)                    as handle,
+       sum(oi.quantity)                           as bottles,
+       sum(oi.quantity * coalesce(oi.unit_price, oli.unit_price)) as revenue
+from priced p
+join {SCHEMA}.order_item oi
+  on oi.order_id = p.id
+ and oi.version = p.version
+ and oi.deleted_at is null
+join {SCHEMA}.order_line_item oli
+  on oli.id = oi.item_id
+ and oli.deleted_at is null
+-- The same wine listed by two merchants is two products with two handles and
+-- one offer id, and the feed prices it once, so the bottles are summed to the
+-- offer the way the price is quoted for it.
+join {SCHEMA}.product pr
+  on pr.handle = oli.product_handle
+ and pr.deleted_at is null
+ and pr.external_id is not null
+ and pr.external_id <> ''
+where p.payment_status = any(%(paid)s)
+group by pr.external_id
+"""
+)
+
 _STORES_SQL = f"""
 select name,
        metadata->>'store_prefix' as prefix
@@ -511,6 +545,40 @@ def fetch_stores(config: DbConfig) -> dict[str, str]:
     return {**_prefix_aliases(), **prefixes}
 
 
+def fetch_offer_sales(
+    config: DbConfig,
+    days: int,
+    now: _dt.datetime | None = None,
+) -> pd.DataFrame:
+    """Bottles sold and revenue taken per Google offer over ``days`` days.
+
+    Paid orders only, on the same definition the rest of the shop's figures
+    use, so a basket that was never paid for is not evidence that a price
+    worked.
+    """
+    read_at = now or _dt.datetime.now(_dt.timezone.utc)
+    params = {
+        "since": read_at - _dt.timedelta(days=days),
+        "paid": sorted(PAID_PAYMENT_STATUSES),
+    }
+    try:
+        with closing(_connect(config)) as connection:
+            frame = _frame(connection, _OFFER_SALES_SQL, params)
+    except psycopg2.Error as exc:
+        raise MedusaConfigError(
+            f"The order database at {config.label} refused the sales read: "
+            f"{str(exc).strip()}"
+        ) from exc
+    if frame.empty:
+        return pd.DataFrame(columns=["offer", "handle", "bottles", "revenue"])
+    frame["offer"] = frame["offer"].astype(str).str.strip()
+    frame["handle"] = frame["handle"].astype(str).str.strip().str.lower()
+    frame["bottles"] = pd.to_numeric(frame["bottles"], errors="coerce").fillna(0)
+    frame["revenue"] = pd.to_numeric(frame["revenue"], errors="coerce").fillna(0.0)
+    frame["bottles"] = frame["bottles"].astype(int)
+    return frame[frame["offer"] != ""].reset_index(drop=True)
+
+
 def fetch_offer_handles(
     config: DbConfig, offers: list[str]
 ) -> dict[str, tuple[str, ...]]:
@@ -553,6 +621,7 @@ __all__ = [
     "OrderBook",
     "PAID_PAYMENT_STATUSES",
     "fetch_offer_handles",
+    "fetch_offer_sales",
     "fetch_stores",
     "load_medusa_env",
     "read_order_book",

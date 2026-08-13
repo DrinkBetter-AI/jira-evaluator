@@ -359,8 +359,29 @@ fully paid with nothing pending.
    so conversions read zero on every row and an order count would be invented.
    **Cheaper than the market** is the same read the other way up, the wines
    already under the benchmark and being clicked on, which need nobody's
-   agreement and only the ad budget. **Dearest bottles** is the plain ranking by
-   gap, demand or no demand.
+   agreement and only the ad budget. **What price did to sales** is the evidence
+   to send a merchant that is being asked to come down: the catalogue grouped
+   into four bands against the market — cheaper, about the same, up to 25%
+   dearer, more than that — and for each the wines in it, the clicks Shopping
+   gave it, the bottles the shop's own order book sold over the last 90 days and
+   the bottles per 100 clicks, which is the only one of those that survives the
+   bands being different sizes. On the live feed that reads 29 bottles per 100
+   clicks under the market against 8 above it. The bottles come from the CRM's
+   paid orders joined to Google's offer id through the product's `external_id`,
+   because Merchant Center reports no conversions on this feed at all — an
+   absence of tracking, not of sales — and Google Ads' own product conversions
+   are too thin to give any one wine a rate. It is a comparison and not an
+   experiment, and it says so: a keenly priced wine may also be a wine people
+   want. A wine nobody clicked has no rate rather than a nought, and a CRM that
+   cannot be reached loses the tab and the column rather than reporting that
+   nothing sold. Each of these tables downloads as the columns on the screen and
+   no others. **Dearest bottles** is the plain ranking by gap, demand or no
+   demand.
+   Above all four, a **merchant** picker cuts the whole panel — tiles, verdicts,
+   tables and the files they download — to the wines one merchant lists, which
+   is what gets sent to that merchant; the wines are matched to merchants through
+   the CRM's store prefixes, so a merchant with no benchmarked wine says so
+   rather than reading as a merchant with nothing to fix.
    Products no other merchant sells have no benchmark and are left out rather
    than counted as competitive, and a price within two pence of the benchmark is
    the same price rather than a problem. Prices in a second currency are set
