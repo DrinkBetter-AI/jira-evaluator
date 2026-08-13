@@ -68,7 +68,13 @@ def _arc(start: float, sweep: float) -> str:
 
 
 def pie_svg(bands: list[Band]) -> str:
-    """The range split by how it is priced, as a ring of coloured slices."""
+    """The compared wines split by how they are priced, as a coloured ring.
+
+    Not the whole catalogue: Google publishes a benchmark only where enough
+    other shops sell the same bottle, and the rest never reach this page. The
+    footer says so, because a merchant reading percentages of their range will
+    otherwise take them for percentages of all of it.
+    """
     total = sum(band.listings for band in bands)
     if total <= 0:
         return ""
@@ -88,6 +94,10 @@ def pie_svg(bands: list[Band]) -> str:
         f'<svg viewBox="0 0 {2 * _CENTRE} {2 * _CENTRE}" width="240" height="240" '
         'role="img" aria-label="Your wines by price against the market">'
         + "".join(slices)
+        # The hole makes it the ring the dashboard draws, and keeps four wedges
+        # from meeting in a point that reads as a fifth colour.
+        + f'<circle cx="{_CENTRE}" cy="{_CENTRE}" r="{_RADIUS * 0.4:.0f}" '
+        'fill="#ffffff"></circle>'
         + "</svg>"
     )
 
@@ -233,13 +243,14 @@ _PAGE = """<!doctype html>
 </header>
 {headline}
 <section>
-  <h2>Your range, by how it is priced</h2>
+  <h2>Your compared wines, by how they are priced</h2>
   <div class="split">{pie}{legend}</div>
 </section>
 {bars}
 <footer>
-  Every wine you list is compared with what other shops charge for the same
-  bottle, as Google reports it across all of them.
+  These are the wines Google could compare: for each of them it reports what
+  other shops charge for the same bottle. Wines no other shop sells have
+  nothing to be compared with, and are not in the picture above.
   Shoppers are the last {demand_days} days of Google Shopping visits to your
   wines; bottles are what you sold in the last {sales_days} days.
   This compares your own wines with each other rather than being a trial, so a
