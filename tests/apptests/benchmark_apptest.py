@@ -111,6 +111,10 @@ ADS = pd.DataFrame(
 
 if MODE == "noads":
     dashboard._ad_products = lambda days: dashboard._no_ad_products()
+elif MODE == "adsquiet":
+    # Configured, read, and nothing spent: a different emptiness from the above,
+    # and telling this reader to set environment variables would be a lie.
+    dashboard._ad_products = lambda days: dashboard.AdProducts(ADS.iloc[0:0], "USD", [])
 elif MODE == "adseur":
     # An account billed in euros beside a dollar one: the euro accounts are the
     # majority here, so the dollar one is the one set aside.
@@ -118,7 +122,9 @@ elif MODE == "adseur":
 else:
     dashboard._ad_products = lambda days: dashboard.AdProducts(ADS, "USD", [])
 
-if MODE in ("sold", "merchant", "nomatch", "noads", "adseur"):
+dashboard._ads_configured = lambda: MODE != "noads"
+
+if MODE in ("sold", "merchant", "nomatch", "noads", "adsquiet", "adseur"):
     dashboard.orders_client.load_medusa_env = lambda: dashboard.orders_client.DbConfig(
         "host", "db", "user", "secret", 5432
     )
@@ -609,7 +615,8 @@ assert {m.label: m.value for m in live.metric}["On wines that sold nothing"] == 
     "\u2014"
 ), [(m.label, m.value) for m in live.metric]
 assert "of the ad spend went to" not in body, body[-1500:]
-assert "what each of these wines sold is unknown rather than none" in body, body[-1500:]
+assert "what each one sold is unknown rather than none" in body, body[-1500:]
+assert "Read the shop's own orders before acting" in body, body[-1500:]
 # The ledger still stands as a spend ledger, with the bottles column withheld.
 unsold = [f.value for f in live.dataframe if "Ad spend" in f.value.columns]
 assert unsold, [list(f.value.columns) for f in live.dataframe]
@@ -632,8 +639,32 @@ print("ad spend is shown in the currency Google billed, or set aside: ok")
 
 # No ads dataset is not an empty account: the tab says how to point it at one.
 noads = texts(run("noads"))
-assert "GOOGLE_ADS_BQ_PROJECT" in noads, noads[-900:]
+assert "the transfer will need the Shopping product stats table" in noads, noads[-900:]
 assert "of the ad spend went to" not in noads, noads[-900:]
 print("a dashboard with no ads dataset says so rather than showing $0: ok")
+
+# And an account that is configured and simply spent nothing is not told to
+# configure itself.
+quiet = texts(run("adsquiet"))
+assert "no wine took ad money" in quiet, quiet[-900:]
+assert "the transfer will need the Shopping product stats table" not in quiet, quiet[
+    -900:
+]
+print("a configured account that spent nothing is not told to set it up: ok")
+
+# An order book that opened and matched none of the advertised wines is the same
+# falsehood as a shut one: what they sold is unknown, not nil.
+missed = texts(run("nomatch"))
+assert "of the ad spend went to" not in missed, missed[-1500:]
+assert "unknown rather than none" in missed, missed[-1500:]
+assert "wines to stop paying for first" not in missed, missed[-1500:]
+print("an order book that matched no advertised wine withholds the claim too: ok")
+
+# The panel ends by saying what to change, and says it about the campaign rather
+# than about Merchant Center, where a delisting also costs the free listing.
+todo = texts(run("sold"))
+assert "What to do about it" in todo, todo[-1500:]
+assert "In the campaign, not in Merchant Center" in todo, todo[-1500:]
+print("the tab closes with what to change, sized from its own figures: ok")
 
 print("all price-competitiveness scenarios passed")

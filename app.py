@@ -4279,6 +4279,20 @@ def _ad_products(days: int) -> AdProducts:
         return _no_ad_products()
 
 
+def _ads_configured() -> bool:
+    """Whether the dashboard has been pointed at an Ads dataset at all.
+
+    An empty tab has two causes worth telling apart: nobody configured Google
+    Ads, or it is configured and these wines took no money. Reading environment
+    variables out at somebody who has already set them is the panel being wrong
+    about itself.
+    """
+    try:
+        return ads_client.load_ads_env() is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _offer_sales() -> merchant_client.Sales:
     """What the shop sold, or an unread ``Sales`` when the CRM is unreachable."""
     try:
@@ -4845,19 +4859,16 @@ def _render_ad_money(
     """
     frame, ads = _ad_ledger(read, named, merchant)
     if frame.empty:
-        st.caption(
-            "Per-wine ad spend comes from Google Ads' Shopping product report in "
-            "BigQuery. Set GOOGLE_ADS_BQ_PROJECT and GOOGLE_ADS_BQ_DATASET, and "
-            "the transfer will need the Shopping product stats table."
-        )
+        _no_ad_spend(merchant)
         return
     spent = ads.currency or money
     if not ads_evidence.sold_known(frame):
         st.caption(
-            "The order book could not be read, so what each of these wines sold "
-            "is unknown rather than none: the spend and the clicks below stand, "
-            "and every figure about what the money bought is left out rather "
-            "than shown as nil."
+            "The shop's own sales could not be put beside these wines - either "
+            "the order book could not be read, or it holds none of these offer "
+            "ids - so what each one sold is unknown rather than none: the spend "
+            "and the clicks below stand, and every figure about what the money "
+            "bought is left out rather than shown as nil."
         )
     split = ads_evidence.spend_split(frame)
     tiles = st.columns(3)
@@ -4923,6 +4934,49 @@ def _render_ad_money(
         "orders - so a return here is the return on advertising a wine, not the "
         "sales advertising created."
     )
+    _ad_advice(frame)
+
+
+def _ad_advice(frame: pd.DataFrame) -> None:
+    """What to change on Monday, under everything that argues for it.
+
+    Last, and deliberately: a recommendation above its evidence is an opinion,
+    and the reader of this panel runs the campaign it is about.
+    """
+    said = ads_evidence.advice(frame)
+    if not said:
+        return
+    st.markdown("#### What to do about it")
+    for index, line in enumerate(said, start=1):
+        st.markdown(f"{index}. {line}")
+
+
+def _no_ad_spend(merchant: str) -> None:
+    """Why an ads tab is empty, which is not always that Ads is unconfigured.
+
+    Three different emptinesses used to share one caption telling the reader to
+    set environment variables: a merchant whose wines took no money would be
+    told to configure an account that is already configured and spending.
+    """
+    if not _ads_configured():
+        st.caption(
+            "Per-wine ad spend comes from Google Ads' Shopping product report in "
+            "BigQuery. Set GOOGLE_ADS_BQ_PROJECT and GOOGLE_ADS_BQ_DATASET, and "
+            "the transfer will need the Shopping product stats table."
+        )
+    elif merchant != _EVERY_MERCHANT:
+        st.caption(
+            f"None of {merchant}'s benchmarked wines took ad money in the last "
+            f"{merchant_client.SALES_DAYS} days. Every merchant shows the whole "
+            "account, including the wines Google publishes no benchmark for."
+        )
+    else:
+        st.caption(
+            f"Google Ads is set up and no wine took ad money in the last "
+            f"{merchant_client.SALES_DAYS} days. If the account is spending, its "
+            "BigQuery transfer is probably not carrying the Shopping product "
+            "stats table."
+        )
 
 
 # How many rows a folded-up claim shows before it becomes a file.
@@ -5008,10 +5062,7 @@ def _render_most_clicked(
     """
     frame, ads = _ad_ledger(read, named, merchant)
     if frame.empty:
-        st.caption(
-            "Clicks per wine come from Google Ads' Shopping product report; the "
-            "tab beside this one says how to point the dashboard at it."
-        )
+        _no_ad_spend(merchant)
         return
     wanted = ads_evidence.most_clicked(frame, _MOST_CLICKED)
     if wanted.empty:

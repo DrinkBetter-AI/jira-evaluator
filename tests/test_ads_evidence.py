@@ -194,11 +194,56 @@ def test_each_claim_names_the_wines_it_is_about_rather_than_its_position():
     ledger = ae.ledger(
         ads([("priced", 10.0, 10), ("unknown", 90.0, 40)]),
         prices([("priced", 20.0, 10.0)]),
-        sales([]),
+        sales([("unknown", 1, 10.0)]),
     )
     tags = [tag for tag, _ in ae.verdicts(ledger)]
     assert ae.BY_PRICE not in tags
     assert tags == [ae.WASTED, ae.NO_BENCHMARK]
+
+
+def test_an_order_book_that_matched_none_of_these_wines_is_unread_too():
+    """The same falsehood by another route: the order book opens, none of its
+    offer ids is one Google advertised, so every wine joins to a zero and the
+    panel would announce the whole budget wasted on the strength of that join.
+    """
+    ledger = ae.ledger(
+        ads([("a", 25.0, 10), ("b", 75.0, 30)]),
+        prices([("a", 20.0, 10.0), ("b", 10.0, 10.0)]),
+        sales([("some-other-wine", 4, 90.0)]),
+    )
+    assert not ae.sold_known(ledger)
+    assert float(ledger["spend"].sum()) == 100.0
+    assert ledger["bottles"].isna().all()
+    assert ae.spend_split(ledger).empty
+    assert ae.waste(ledger).empty
+    assert ae.WASTED not in [tag for tag, _ in ae.verdicts(ledger)]
+    assert "sold nothing" not in " ".join(ae.advice(ledger))
+
+
+def test_the_advice_is_sized_from_this_ledger_rather_than_recited():
+    ledger = ae.ledger(
+        ads([("sold", 25.0, 10), ("expensive", 75.0, 30)]),
+        prices([("sold", 7.0, 10.0), ("expensive", 20.0, 10.0)]),
+        sales([("sold", 10, 500.0)]),
+    )
+    said = ae.advice(ledger)
+    assert "$25 of the $100" in said[0]
+    # The exclusion is asked for in the campaign and never in Merchant Center,
+    # where delisting would cost the free listing as well.
+    stopping = next(line for line in said if "Exclude" in line)
+    assert "$75" in stopping and "In the campaign, not in Merchant Center" in stopping
+    assert ae.advice(ae.ledger(pd.DataFrame(), prices([]), sales([]))) == []
+
+
+def test_advice_asks_for_the_order_book_before_anything_else_is_acted_on():
+    ledger = ae.ledger(
+        ads([("a", 25.0, 10), ("b", 75.0, 30)]),
+        prices([("a", 20.0, 10.0), ("b", 10.0, 10.0)]),
+        unread(),
+    )
+    said = ae.advice(ledger)
+    assert len(said) == 1
+    assert "could not be read" in said[0]
 
 
 def test_a_merchant_is_named_beside_each_wine_where_the_catalogue_knows_one():

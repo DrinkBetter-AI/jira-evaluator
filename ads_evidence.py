@@ -84,11 +84,13 @@ def ledger(
     frame = sales.against(ads.merge(wines, on="offer", how="left"))
     if "sold_revenue" not in frame.columns:
         frame = frame.assign(bottles=0, sold_revenue=0.0)
-    if not sales.read:
-        # Unread, not unsold. ``Sales.against`` fills a wine with no sale with a
-        # zero, which is right for a bottle nobody bought and wrong for a
-        # database that was down: left as zeroes it would have this panel
-        # announce that every advertised bottle was a waste of money.
+    if not sales.read or not sales.measured_against(ads[["offer"]]):
+        # Unread, or read and matched not one advertised offer: neither of those
+        # is unsold. ``Sales.against`` fills a wine with no sale with a zero,
+        # which is right for a bottle nobody bought and wrong for a database
+        # that was down or a set of offer ids the order book has never heard of -
+        # left as zeroes either would have this panel announce that every
+        # advertised bottle was wasted money, on our own failed join.
         frame = frame.assign(bottles=pd.NA, sold_revenue=pd.NA)
     frame["merchant"] = frame["offer"].map(
         lambda offer: merchant_client.MERCHANT_SEPARATOR.join((named or {}).get(offer, ()))
@@ -274,3 +276,80 @@ def verdicts(frame: pd.DataFrame) -> list[tuple[str, str]]:
             )
         )
     return claims
+
+
+def advice(frame: pd.DataFrame) -> list[str]:
+    """What to do about all of it, largest lever first.
+
+    Evidence is not a decision, and the person who reads this runs the campaign:
+    he will fairly ask what he is meant to change on Monday. Each line is sized
+    from this ledger rather than from advertising lore, so a lever worth nothing
+    on this account is left out instead of being recommended because it usually
+    matters somewhere.
+    """
+    if frame.empty or float(frame["spend"].sum()) <= 0:
+        return []
+    total = float(frame["spend"].sum())
+    said: list[str] = []
+    split = spend_split(frame)
+    sold = split[split["outcome"] == SOLD]
+    nothing = split[split["outcome"] == NOTHING]
+    if not sold.empty and not nothing.empty and float(sold["spend"].iloc[0]) > 0:
+        said.append(
+            f"**Put the budget behind the {int(sold['wines'].iloc[0]):,} wines "
+            f"that sold, and away from the {int(nothing['wines'].iloc[0]):,} "
+            f"that did not.** The sellers took ${float(sold['spend'].iloc[0]):,.0f} "
+            f"of the ${total:,.0f} and stood beside "
+            f"${float(sold['revenue'].iloc[0]):,.0f} of revenue; the rest took "
+            f"${float(nothing['spend'].iloc[0]):,.0f} and stood beside nothing. "
+            "This is the only lever here worth a project - bids and listing "
+            "groups that favour proven bottles move more money than any pruning "
+            "below."
+        )
+    stop = waste(frame)
+    if not stop.empty:
+        said.append(
+            f"**Exclude the {len(stop):,} clicked, expensive, unsold wines from "
+            f"the campaign - ${float(stop['spend'].sum()):,.0f} over "
+            f"{merchant_client.SALES_DAYS} days.** In the campaign, not in "
+            "Merchant Center: delisting an offer loses its free Shopping listing "
+            "too, while Shopping charges per click, so an exclusion saves the "
+            "money from the day it is made."
+        )
+    bands = by_band(frame)
+    rated = bands[bands["per_dollar"].notna()]
+    if len(rated) > 1:
+        best = rated.loc[rated["per_dollar"].idxmax()]
+        worst = rated.loc[rated["per_dollar"].idxmin()]
+        if float(worst["per_dollar"]) > 0:
+            said.append(
+                "**Reprice rather than only re-bid.** A dollar on wines "
+                f"{str(best['band']).lower()} came back "
+                f"{float(best['per_dollar']) / float(worst['per_dollar']):.0f}x "
+                f"what it did on wines {str(worst['band']).lower()}, so price is "
+                "doing more to the return than bidding is. The sale-price tab "
+                "makes a supplemental feed that tests exactly that without a "
+                "merchant having to agree first."
+            )
+    unpriced = frame[frame["gap"].isna()] if "gap" in frame.columns else frame.iloc[0:0]
+    if not unpriced.empty and float(unpriced["spend"].sum()) / total > _MOSTLY_UNPRICED:
+        said.append(
+            f"**Judge the {float(unpriced['spend'].sum()) / total:.0%} with no "
+            "benchmark on what it sold, not on its price.** Nobody else lists "
+            "those bottles, so there is no market price to be above: sales are "
+            "the only test they can be put to, and they are in the ledger."
+        )
+    if not sold_known(frame):
+        said.append(
+            "**Read the shop's own orders before acting on any of this.** "
+            "Google's conversion tracking records a fraction of the shop's "
+            "orders, so a wine that looks unsold to the campaign may well have "
+            "sold; the sales here are the shop's own, and today they could not "
+            "be read."
+        )
+    return said
+
+
+# How much of the spend has to be on unbenchmarked bottles before saying so is
+# advice rather than a footnote.
+_MOSTLY_UNPRICED = 0.2
