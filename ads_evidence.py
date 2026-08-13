@@ -180,7 +180,10 @@ def most_clicked(frame: pd.DataFrame, limit: int = 25) -> pd.DataFrame:
     """
     if frame.empty:
         return frame
-    return frame.nlargest(limit, "clicks")
+    # A wine nobody clicked is not one of the most clicked, however few there
+    # are: padding the table out with zeroes would have the caption above it
+    # calling unwanted bottles the ones shoppers chose.
+    return frame[frame["clicks"] > 0].nlargest(limit, "clicks")
 
 
 def sale_price_feed(
@@ -236,7 +239,10 @@ def verdicts(frame: pd.DataFrame) -> list[tuple[str, str]]:
     split = spend_split(frame)
     nothing = split[split["outcome"] == NOTHING]
     claims: list[tuple[str, str]] = []
-    if not nothing.empty:
+    # ``spend_split`` always draws both outcomes, so a window in which every
+    # advertised wine sold arrives here as a row of zeroes: claiming 0% of the
+    # spend went to 0 wines is the panel talking about nothing.
+    if not nothing.empty and int(nothing["wines"].iloc[0]) > 0:
         wasted = float(nothing["spend"].iloc[0])
         wines = int(nothing["wines"].iloc[0])
         claims.append(
@@ -294,7 +300,12 @@ def advice(frame: pd.DataFrame) -> list[str]:
     split = spend_split(frame)
     sold = split[split["outcome"] == SOLD]
     nothing = split[split["outcome"] == NOTHING]
-    if not sold.empty and not nothing.empty and float(sold["spend"].iloc[0]) > 0:
+    if (
+        not sold.empty
+        and not nothing.empty
+        and float(sold["spend"].iloc[0]) > 0
+        and int(nothing["wines"].iloc[0]) > 0
+    ):
         said.append(
             f"**Put the budget behind the {int(sold['wines'].iloc[0]):,} wines "
             f"that sold, and away from the {int(nothing['wines'].iloc[0]):,} "

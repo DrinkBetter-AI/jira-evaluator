@@ -148,6 +148,28 @@ def test_most_clicked_is_by_clicks_rather_than_by_spend():
     assert list(ae.most_clicked(ledger, 1)["offer"]) == ["popular"]
 
 
+def test_a_wine_nobody_clicked_is_not_in_the_most_clicked_table():
+    """Ordering by clicks still puts a nought at the top of a short list."""
+    ledger = ae.ledger(
+        ads([("popular", 2.0, 9), ("unclicked", 50.0, 0)]),
+        prices([("popular", 10.0, 10.0), ("unclicked", 10.0, 10.0)]),
+        sales([]),
+    )
+    assert list(ae.most_clicked(ledger)["offer"]) == ["popular"]
+
+
+def test_a_window_where_every_wine_sold_claims_nothing_about_unsold_ones():
+    """A share of nought going to no wines at all is not a finding."""
+    ledger = ae.ledger(
+        ads([("a", 25.0, 10), ("b", 75.0, 30)]),
+        prices([("a", 10.0, 10.0), ("b", 10.0, 10.0)]),
+        sales([("a", 1, 10.0), ("b", 2, 20.0)]),
+    )
+    assert ae.WASTED not in [tag for tag, _ in ae.verdicts(ledger)]
+    said = " ".join(ae.advice(ledger))
+    assert "sold nothing" not in said and "0 wines" not in said
+
+
 def test_the_claims_name_the_share_that_sold_nothing():
     ledger = ae.ledger(
         ads([("a", 25.0, 10), ("b", 75.0, 30)]),

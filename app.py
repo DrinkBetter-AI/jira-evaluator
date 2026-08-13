@@ -4205,10 +4205,15 @@ class AdProducts(NamedTuple):
     # Accounts left out because they bill in some other currency, named so the
     # reader knows the total is not the whole dataset.
     other_currencies: list[str]
+    # False when the report could not be read at all, which is not an account
+    # that spent nothing - the same distinction ``Sales.read`` keeps.
+    read: bool = True
 
 
-def _no_ad_products() -> AdProducts:
-    return AdProducts(pd.DataFrame(columns=list(ads_client.PRODUCT_COLUMNS)), "", [])
+def _no_ad_products(read: bool = True) -> AdProducts:
+    return AdProducts(
+        pd.DataFrame(columns=list(ads_client.PRODUCT_COLUMNS)), "", [], read
+    )
 
 
 @st.cache_data(ttl=_AD_PRODUCTS_TTL_SECONDS, show_spinner=False)
@@ -4276,7 +4281,10 @@ def _ad_products(days: int) -> AdProducts:
             config.project, config.dataset, days, _dt.date.today()
         )
     except Exception:  # noqa: BLE001
-        return _no_ad_products()
+        # A refused credential, an absent Shopping table or a BigQuery nobody
+        # can reach is not an account that spent nothing, and this tab exists to
+        # argue about spend: say it could not be read.
+        return _no_ad_products(read=False)
 
 
 def _ads_configured() -> bool:
@@ -4776,7 +4784,12 @@ def _ad_claim(
     Every sentence this panel makes is opened by clicking it: the argument it is
     part of is with the person who runs the campaign, and a summary he cannot
     drill into is a summary he is right to distrust.
+
+    Kept for the printable report as well as drawn: the tiles this claim
+    explains already go into it, and figures are read furthest from their
+    caption once they are on paper.
     """
+    _report(TAB_BUSINESS).note("Ad spend per wine", claim)
     st.markdown(claim)
     if wines.empty:
         return
@@ -4859,7 +4872,7 @@ def _render_ad_money(
     """
     frame, ads = _ad_ledger(read, named, merchant)
     if frame.empty:
-        _no_ad_spend(merchant)
+        _no_ad_spend(ads, merchant)
         return
     spent = ads.currency or money
     if not ads_evidence.sold_known(frame):
@@ -4948,17 +4961,26 @@ def _ad_advice(frame: pd.DataFrame) -> None:
         return
     st.markdown("#### What to do about it")
     for index, line in enumerate(said, start=1):
+        _report(TAB_BUSINESS).note("Ad spend per wine", f"{index}. {line}")
         st.markdown(f"{index}. {line}")
 
 
-def _no_ad_spend(merchant: str) -> None:
+def _no_ad_spend(ads: AdProducts, merchant: str) -> None:
     """Why an ads tab is empty, which is not always that Ads is unconfigured.
 
-    Three different emptinesses used to share one caption telling the reader to
+    Four different emptinesses used to share one caption telling the reader to
     set environment variables: a merchant whose wines took no money would be
-    told to configure an account that is already configured and spending.
+    told to configure an account that is already configured and spending, and a
+    report that could not be read would be reported as an account at rest.
     """
-    if not _ads_configured():
+    if not ads.read:
+        st.caption(
+            "Google Ads' Shopping product report could not be read, so what each "
+            "wine cost is unknown rather than nil. The dataset is configured; "
+            "either the transfer is not carrying the Shopping product stats "
+            "table, or the credential cannot see it."
+        )
+    elif not _ads_configured():
         st.caption(
             "Per-wine ad spend comes from Google Ads' Shopping product report in "
             "BigQuery. Set GOOGLE_ADS_BQ_PROJECT and GOOGLE_ADS_BQ_DATASET, and "
@@ -5062,7 +5084,7 @@ def _render_most_clicked(
     """
     frame, ads = _ad_ledger(read, named, merchant)
     if frame.empty:
-        _no_ad_spend(merchant)
+        _no_ad_spend(ads, merchant)
         return
     wanted = ads_evidence.most_clicked(frame, _MOST_CLICKED)
     if wanted.empty:

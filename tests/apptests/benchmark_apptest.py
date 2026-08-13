@@ -115,6 +115,10 @@ elif MODE == "adsquiet":
     # Configured, read, and nothing spent: a different emptiness from the above,
     # and telling this reader to set environment variables would be a lie.
     dashboard._ad_products = lambda days: dashboard.AdProducts(ADS.iloc[0:0], "USD", [])
+elif MODE == "adsblind":
+    # Configured, but the report itself could not be read: what each wine cost
+    # is unknown rather than nil, and neither of the other two captions is true.
+    dashboard._ad_products = lambda days: dashboard._no_ad_products(read=False)
 elif MODE == "adseur":
     # An account billed in euros beside a dollar one: the euro accounts are the
     # majority here, so the dollar one is the one set aside.
@@ -124,7 +128,15 @@ else:
 
 dashboard._ads_configured = lambda: MODE != "noads"
 
-if MODE in ("sold", "merchant", "nomatch", "noads", "adsquiet", "adseur"):
+if MODE in (
+    "sold",
+    "merchant",
+    "nomatch",
+    "noads",
+    "adsquiet",
+    "adsblind",
+    "adseur",
+):
     dashboard.orders_client.load_medusa_env = lambda: dashboard.orders_client.DbConfig(
         "host", "db", "user", "secret", 5432
     )
@@ -652,6 +664,16 @@ assert "the transfer will need the Shopping product stats table" not in quiet, q
 ]
 print("a configured account that spent nothing is not told to set it up: ok")
 
+# And a report that could not be read is neither of those: an account at rest is
+# the one claim this tab must not make on a failure to read it.
+blind = texts(run("adsblind"))
+assert "could not be read" in blind, blind[-900:]
+assert "no wine took ad money" not in blind, blind[-900:]
+assert "the transfer will need the Shopping product stats table" not in blind, blind[
+    -900:
+]
+print("a product report that could not be read is not an account at rest: ok")
+
 # An order book that opened and matched none of the advertised wines is the same
 # falsehood as a shut one: what they sold is unknown, not nil.
 missed = texts(run("nomatch"))
@@ -666,5 +688,16 @@ todo = texts(run("sold"))
 assert "What to do about it" in todo, todo[-1500:]
 assert "In the campaign, not in Merchant Center" in todo, todo[-1500:]
 print("the tab closes with what to change, sized from its own figures: ok")
+
+# The printable report carries the argument, not only the three tiles: a page
+# printed for a meeting with the claims left out is a page of bare numbers.
+printed = (
+    run("sold")
+    .session_state[dashboard.REPORTS_KEY][dashboard.TAB_BUSINESS]
+    .html()
+)
+assert "of the ad spend went to" in printed, printed[-2000:]
+assert "In the campaign, not in Merchant Center" in printed, printed[-2000:]
+print("the printable report carries the ad claims and the advice: ok")
 
 print("all price-competitiveness scenarios passed")
