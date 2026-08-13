@@ -1,0 +1,36 @@
+# Every pull request runs the dashboard's own checks. No credentials are needed
+# and none are given: each source - Jira, the CRM's order book, Merchant Center,
+# Google Ads, Amplitude, Stripe, OpenAI - is answered by a stub, so a run here
+# tests the code and never the live shop.
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # The fast ones first, so a broken reader fails in seconds rather than
+      # after the app has been rendered twenty times.
+      - name: Readers and rules
+        run: python -m pytest -q -m "not slow"
+
+      - name: The pages themselves
+        run: python -m pytest -q -m slow
