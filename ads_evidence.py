@@ -52,6 +52,18 @@ WASTED = "sold-nothing"
 BY_PRICE = "by-price"
 NO_BENCHMARK = "no-benchmark"
 
+# Google bills an ad account in its own currency and the shop's feed prices in
+# its own, so a sentence about both carries two symbols rather than one assumed.
+# Written out here because these sentences are also the printable report, where
+# there is no caption above them to fall back on.
+_SYMBOLS = {"usd": "$", "eur": "\u20ac", "gbp": "\u00a3"}
+
+
+def _sum(amount: float, currency: str) -> str:
+    """A round money figure, labelled with the currency it is actually in."""
+    symbol = _SYMBOLS.get(currency.lower(), "")
+    return f"{symbol}{amount:,.0f}" + (f" {currency.upper()}" if not symbol else "")
+
 
 def sold_known(frame: pd.DataFrame) -> bool:
     """Whether this ledger knows what each wine sold, or merely has no figure.
@@ -221,7 +233,9 @@ def sale_price_feed(
     return feed.sort_values("spend", ascending=False).reset_index(drop=True)
 
 
-def verdicts(frame: pd.DataFrame) -> list[tuple[str, str]]:
+def verdicts(
+    frame: pd.DataFrame, spent: str = "usd", money: str = ""
+) -> list[tuple[str, str]]:
     """What the ledger says, in the order an argument about it would go.
 
     Each claim is a line the panel puts a table under, so it can be checked
@@ -236,6 +250,7 @@ def verdicts(frame: pd.DataFrame) -> list[tuple[str, str]]:
     total = float(frame["spend"].sum())
     if total <= 0:
         return []
+    money = money or spent
     split = spend_split(frame)
     nothing = split[split["outcome"] == NOTHING]
     claims: list[tuple[str, str]] = []
@@ -250,7 +265,7 @@ def verdicts(frame: pd.DataFrame) -> list[tuple[str, str]]:
                 WASTED,
                 f"**{wasted / total:.0%} of the ad spend went to {wines:,} "
                 f"wine{'' if wines == 1 else 's'} that sold nothing** - "
-                f"${wasted:,.0f} of ${total:,.0f}.",
+                f"{_sum(wasted, spent)} of {_sum(total, spent)}.",
             )
         )
     bands = by_band(frame)
@@ -262,9 +277,10 @@ def verdicts(frame: pd.DataFrame) -> list[tuple[str, str]]:
             claims.append(
                 (
                     BY_PRICE,
-                    f"**A dollar spent on wines {str(best['band']).lower()} "
-                    f"returned ${float(best['per_dollar']):,.0f}, against "
-                    f"${float(worst['per_dollar']):,.0f} on wines "
+                    f"**{_sum(1, spent)} spent on wines "
+                    f"{str(best['band']).lower()} returned "
+                    f"{_sum(float(best['per_dollar']), money)}, against "
+                    f"{_sum(float(worst['per_dollar']), money)} on wines "
                     f"{str(worst['band']).lower()}.** Revenue is every sale of "
                     "those wines in the window, not sales the ads can be shown "
                     "to have caused.",
@@ -284,7 +300,7 @@ def verdicts(frame: pd.DataFrame) -> list[tuple[str, str]]:
     return claims
 
 
-def advice(frame: pd.DataFrame) -> list[str]:
+def advice(frame: pd.DataFrame, spent: str = "usd", money: str = "") -> list[str]:
     """What to do about all of it, largest lever first.
 
     Evidence is not a decision, and the person who reads this runs the campaign:
@@ -296,6 +312,7 @@ def advice(frame: pd.DataFrame) -> list[str]:
     if frame.empty or float(frame["spend"].sum()) <= 0:
         return []
     total = float(frame["spend"].sum())
+    money = money or spent
     said: list[str] = []
     split = spend_split(frame)
     sold = split[split["outcome"] == SOLD]
@@ -309,10 +326,12 @@ def advice(frame: pd.DataFrame) -> list[str]:
         said.append(
             f"**Put the budget behind the {int(sold['wines'].iloc[0]):,} wines "
             f"that sold, and away from the {int(nothing['wines'].iloc[0]):,} "
-            f"that did not.** The sellers took ${float(sold['spend'].iloc[0]):,.0f} "
-            f"of the ${total:,.0f} and stood beside "
-            f"${float(sold['revenue'].iloc[0]):,.0f} of revenue; the rest took "
-            f"${float(nothing['spend'].iloc[0]):,.0f} and stood beside nothing. "
+            "that did not.** The sellers took "
+            f"{_sum(float(sold['spend'].iloc[0]), spent)} of the "
+            f"{_sum(total, spent)} and stood beside "
+            f"{_sum(float(sold['revenue'].iloc[0]), money)} of revenue; the rest "
+            f"took {_sum(float(nothing['spend'].iloc[0]), spent)} and stood "
+            "beside nothing. "
             "This is the only lever here worth a project - bids and listing "
             "groups that favour proven bottles move more money than any pruning "
             "below."
@@ -321,7 +340,7 @@ def advice(frame: pd.DataFrame) -> list[str]:
     if not stop.empty:
         said.append(
             f"**Exclude the {len(stop):,} clicked, expensive, unsold wines from "
-            f"the campaign - ${float(stop['spend'].sum()):,.0f} over "
+            f"the campaign - {_sum(float(stop['spend'].sum()), spent)} over "
             f"{merchant_client.SALES_DAYS} days.** In the campaign, not in "
             "Merchant Center: delisting an offer loses its free Shopping listing "
             "too, while Shopping charges per click, so an exclusion saves the "
@@ -334,7 +353,7 @@ def advice(frame: pd.DataFrame) -> list[str]:
         worst = rated.loc[rated["per_dollar"].idxmin()]
         if float(worst["per_dollar"]) > 0:
             said.append(
-                "**Reprice rather than only re-bid.** A dollar on wines "
+                f"**Reprice rather than only re-bid.** {_sum(1, spent)} on wines "
                 f"{str(best['band']).lower()} came back "
                 f"{float(best['per_dollar']) / float(worst['per_dollar']):.0f}x "
                 f"what it did on wines {str(worst['band']).lower()}, so price is "

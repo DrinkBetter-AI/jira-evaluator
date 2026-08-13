@@ -4248,21 +4248,31 @@ def _ad_products_cached(
             for account in billing
         }
     )
-    together = pd.concat(list(frames.values()), ignore_index=True)
-    if together.empty:
-        return AdProducts(
-            pd.DataFrame(columns=list(ads_client.PRODUCT_COLUMNS)), main, others
-        )
-    # One row per offer even where two accounts advertised the same bottle: the
-    # panel's subject is the wine, and the same wine twice would halve its
-    # apparent return.
-    return AdProducts(
-        together.groupby("offer", as_index=False)
+    return AdProducts(_offers_together(list(frames.values())), main, others)
+
+
+def _offers_together(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """Several accounts' product rows as one row per offer.
+
+    One row per offer even where two accounts advertised the same bottle: the
+    panel's subject is the wine, and the same wine twice would halve its apparent
+    return.
+
+    Only the accounts that have rows go into the concatenation. An empty frame's
+    columns are all object dtype, and concatenating one promotes clicks and
+    impressions to object, where a numeric aggregation drops them and the ledger
+    loses two of the columns it is built from - one account at rest breaking the
+    tab of the account that is spending.
+    """
+    spending = [frame for frame in frames if not frame.empty]
+    if not spending:
+        return pd.DataFrame(columns=list(ads_client.PRODUCT_COLUMNS))
+    return (
+        pd.concat(spending, ignore_index=True)
+        .groupby("offer", as_index=False)
         .sum(numeric_only=True)
         .sort_values("spend", ascending=False)
-        .reset_index(drop=True),
-        main,
-        others,
+        .reset_index(drop=True)
     )
 
 
@@ -4910,7 +4920,7 @@ def _render_ad_money(
         f"{len(frame):,}",
     )
     _ad_pictures(frame, spent)
-    for tag, claim in ads_evidence.verdicts(frame):
+    for tag, claim in ads_evidence.verdicts(frame, spent, money):
         wines, label = _ad_claim_wines(frame, tag)
         _ad_claim(label, claim, wines, money, tag, spent)
     stop = ads_evidence.waste(frame)
@@ -4947,16 +4957,16 @@ def _render_ad_money(
         "orders - so a return here is the return on advertising a wine, not the "
         "sales advertising created."
     )
-    _ad_advice(frame)
+    _ad_advice(frame, spent, money)
 
 
-def _ad_advice(frame: pd.DataFrame) -> None:
+def _ad_advice(frame: pd.DataFrame, spent: str, money: str) -> None:
     """What to change on Monday, under everything that argues for it.
 
     Last, and deliberately: a recommendation above its evidence is an opinion,
     and the reader of this panel runs the campaign it is about.
     """
-    said = ads_evidence.advice(frame)
+    said = ads_evidence.advice(frame, spent, money)
     if not said:
         return
     st.markdown("#### What to do about it")
@@ -5038,9 +5048,13 @@ def _ad_pictures(frame: pd.DataFrame, money: str) -> None:
             )
             ring.update_traces(
                 textinfo="percent",
-                hovertemplate="%{label}: %{value:$,.0f} across %{customdata[0]:,} "
-                "wines<extra></extra>",
-                customdata=split[["wines"]].to_numpy(),
+                # Formatted here rather than by Plotly's ``$`` format, which
+                # would label a euro-billed account's spend in dollars.
+                hovertemplate="%{label}: %{customdata[1]} across "
+                "%{customdata[0]:,} wines<extra></extra>",
+                customdata=split.assign(
+                    shown=split["spend"].map(lambda value: _money(value, money))
+                )[["wines", "shown"]].to_numpy(),
             )
             ring.update_layout(margin=dict(t=54, b=0, l=0, r=0), legend_title_text="")
             st.plotly_chart(ring, width="stretch")

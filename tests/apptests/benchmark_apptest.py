@@ -647,6 +647,12 @@ euro_metrics = {m.label: m.value for m in euros.metric}
 assert euro_metrics["Spend 90d"].startswith("\u20ac"), euro_metrics
 assert "left out rather than added to them" in texts(euros), texts(euros)[-1500:]
 assert "not the same money" in texts(euros), texts(euros)[-1500:]
+# And the sentences under the tiles, which are also the printable report, quote
+# the currency Google billed rather than a dollar sign nobody was charged in.
+euro_said = texts(euros)
+assert "of the ad spend went to" in euro_said, euro_said[-1500:]
+assert " of \u20ac" in euro_said, euro_said[-1500:]
+assert " of $" not in euro_said, euro_said[-1500:]
 print("ad spend is shown in the currency Google billed, or set aside: ok")
 
 # No ads dataset is not an empty account: the tab says how to point it at one.

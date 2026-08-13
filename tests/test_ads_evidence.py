@@ -257,6 +257,25 @@ def test_the_advice_is_sized_from_this_ledger_rather_than_recited():
     assert ae.advice(ae.ledger(pd.DataFrame(), prices([]), sales([]))) == []
 
 
+def test_spend_billed_in_euros_is_never_written_with_a_dollar_sign():
+    """The tiles carry the billed currency; these sentences are the same figures,
+    and they are what the printable report keeps once the captions are gone."""
+    ledger = ae.ledger(
+        ads([("sold", 25.0, 10), ("expensive", 75.0, 30)]),
+        prices([("sold", 7.0, 10.0), ("expensive", 20.0, 10.0)]),
+        sales([("sold", 10, 500.0)]),
+    )
+    said = " ".join(
+        [claim for _, claim in ae.verdicts(ledger, "eur", "usd")]
+        + ae.advice(ledger, "eur", "usd")
+    )
+    assert "\u20ac75 of \u20ac100" in said
+    # Revenue is the shop's own currency, and is not relabelled as the ad
+    # account's either.
+    assert "$500 of revenue" in said
+    assert "$75" not in said and "$100" not in said
+
+
 def test_advice_asks_for_the_order_book_before_anything_else_is_acted_on():
     ledger = ae.ledger(
         ads([("a", 25.0, 10), ("b", 75.0, 30)]),
