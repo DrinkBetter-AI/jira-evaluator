@@ -351,6 +351,46 @@ click) and confirm every value is one of Yes/No/Maybe. The board is wide — zoo
 - Reruns after a knob change or a checkbox tick can take 10-20s on a ~700 ticket instance; wait
   for the greyed-out overlay to clear before screenshotting, or you will capture the old table.
 
+## Testing the Business tab's "Price competitiveness" panel (Merchant Center + order book)
+
+- The panel needs **two** live reads and degrades silently if either is missing:
+  - `GOOGLE_MERCHANT_ID` (numeric account id, plus `GOOGLE_MERCHANT_COUNTRY`, e.g. `US`) with the
+    `GCP_BIGQUERY_READONLY_KEY` service account authorised on that Merchant Center account. Without
+    it `merchant_client.load_merchant_env()` returns `None` and the whole section is one caption.
+  - a readable Medusa order book (`MEDUSA_DB_*` / `POSTGRES_PASSWORD`). Prod Postgres sits on a
+    private VPC address; an SSH tunnel script (e.g. `source /home/ubuntu/medusa_tunnel.sh`, which
+    forwards `localhost:15432` and exports `MEDUSA_DB_*`) is the usual way in. **Keep it read-only.**
+    Without it there is no `Merchant` selectbox at all, no `Sold 90d` column, and the evidence tab
+    is a caption — easy to misread as a broken feature rather than honest degradation.
+- Run from a **clean detached worktree** (`git worktree add /home/ubuntu/pr45-clean <sha>`) when the
+  shared checkout has uncommitted edits; live figures are meaningless if the code under test drifts.
+- Recompute expectations offline from the *same* read: `cfg = merchant_client.load_merchant_env()`,
+  `tok = access_token(cfg)`, `price_gaps(cfg, tok, cfg.country)`, `product_demand(...)` (rows live on
+  `.offers`, not `.rows`), plus `orders_client.fetch_offer_sales(config, 90)`, then call
+  `price_bands` / `sales_verdicts` / `bargains` / `ask_list` directly. Live click counts drift by a
+  few between snapshots — assert on bottles/verdict ratios and treat small click deltas as expected.
+- Discriminating assertions that catch real bugs:
+  - the ask list is ranked by **demand × gap**, so its first row must *not* be the `Dearest bottles`
+    first row (which is ranked on gap alone);
+  - the cut slider must move the sentence **and** the table (`At -10%` → `At -30%`, new cut prices);
+  - a band with no clicks shows an em dash, not `0`, in bottles per 100 clicks;
+  - an *unread* order book ("could not be read") must read differently from a *matched-nothing* one
+    ("No bottles in the order book match these listings");
+  - a merchant with no benchmarked wines must show only "None of X's wines has a benchmark…", not
+    the `GOOGLE_MERCHANT_COUNTRY` advice (that caption must be gated on the pre-filter feed count).
+- Merchant identities are `tuple[str, ...]` per offer; names containing `", "` (e.g.
+  `Black Bear Wines and Spirits`) must appear as one dropdown option and only be joined at display
+  time. Switching merchant repeatedly (A → B → Every merchant) is the cheapest stale-state test:
+  tiles, all four tabs and every CSV must move together and return to whole-feed values.
+- Downloads land in `~/Downloads` as `price-ask-list-<date>.csv`, `cheaper-than-market-<date>.csv`,
+  `price-and-sales-<date>.csv`; assert the header holds exactly the displayed columns (no working-out
+  columns) and the row count matches the screen.
+- `Download report` writes `business-<date>.html`; open it with a `file:///` URL and grep the text for
+  the tiles and the verdict sentences — the sales verdict only appears when the order book is readable.
+- Offline coverage for what live data cannot reach is `python3 /home/ubuntu/benchmark_apptest.py`
+  (modes `sold`, `merchant`, `nomatch`, `unread`); it must print
+  `all price-competitiveness scenarios passed`. Run it **last**, against the final commit.
+
 ## Gotchas
 
 - The Streamlit page has no browser chrome if the window is in fullscreen; press `F11` before using
@@ -375,3 +415,9 @@ click) and confirm every value is one of Yes/No/Maybe. The board is wide — zoo
 
 None for the synthetic path. For live-Jira testing you would need `JIRA_BASE_URL`, `JIRA_EMAIL`
 and `JIRA_API_TOKEN` (or the YAML credentials file); these were not available in this environment.
+
+For the Business tab's Price competitiveness panel: `GOOGLE_MERCHANT_ID`, `GOOGLE_MERCHANT_COUNTRY`
+and `GCP_BIGQUERY_READONLY_KEY` (Merchant Center feed), plus `MEDUSA_DB_PASSWORD` /
+`MEDUSA_DB_HOST` / `MEDUSA_DB_PORT` / `MEDUSA_DB_USER` / `MEDUSA_DB_NAME` (or `POSTGRES_PASSWORD`)
+and, if the database is only reachable through a bastion, an SSH key for the tunnel. Read-only
+credentials are sufficient and are the only ones that should be used.
