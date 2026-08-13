@@ -4425,7 +4425,9 @@ def _render_ask_list(
             "wine further down it can read lower here than it was."
         )
     shown = _with_merchants(read.sales.against(priced), named)
-    columns = _visible(shown, _ASK_COLUMNS, demand.measured, read.sales.read)
+    columns = _visible(
+        shown, _ASK_COLUMNS, demand.measured, read.sales.measured_against(priced)
+    )
     table = _formatted(shown, money)[columns]
     if "google_cut" in table.columns:
         table["google_cut"] = shown["google_cut"].map(
@@ -4464,9 +4466,13 @@ def _render_ask_list(
         "bottle. Google suggests is Google's own recommendation where it has "
         "one, which it publishes for a few hundred products rather than all of "
         "them. No figure here predicts extra orders: the feed carries no "
-        "conversion tracking, so an order count would be invented. Sold is what "
-        f"the shop actually sold of that wine in the last "
-        f"{merchant_client.SALES_DAYS} days, from its own order book."
+        "conversion tracking, so an order count would be invented."
+        + (
+            " Sold is what the shop actually sold of that wine in the last "
+            f"{merchant_client.SALES_DAYS} days, from its own order book."
+            if "bottles" in columns
+            else ""
+        )
     )
 
 
@@ -4489,7 +4495,7 @@ def _render_bargains(
         shown,
         ("title", "merchant", "clicks", "bottles", "price", "benchmark", "gap"),
         read.demand.measured,
-        read.sales.read,
+        read.sales.measured_against(wines),
     )
     st.dataframe(
         _formatted(shown, money)[columns].rename(
@@ -4541,10 +4547,12 @@ def _render_evidence(read: BenchmarkRead) -> None:
             "unknown rather than nothing."
         )
         return
-    if not sales.measured:
+    if not sales.measured_against(read.prices.offers):
         # A join that matched nothing and a shop that sold nothing leave the
         # same empty frame, and printing a zero against every band would be the
         # panel telling a merchant its wines do not sell on our own bad match.
+        # Judged on the wines on screen, so a merchant filter that matched none
+        # of them says so rather than borrowing the whole shop's bottles.
         st.caption(
             "No bottles in the order book match these listings, so there is "
             "nothing to set beside the prices - which is not the same as "
@@ -4682,7 +4690,10 @@ def _render_price_benchmark() -> None:
         f"{prices.counted:,}",
     )
 
-    if not prices.counted:
+    # Against the whole read, not the merchant's slice of it: an empty filter
+    # is already explained above, and telling the reader to change the feed's
+    # country for it would send them after a setting that is not the matter.
+    if not read.prices.counted:
         st.caption(
             f"Read for {config.country}, the country the feed is taken to "
             "target. Benchmarks are published per country, so set "

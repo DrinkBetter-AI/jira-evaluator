@@ -269,6 +269,22 @@ class Sales:
     def measured(self) -> bool:
         return self.read and bool(len(self.offers)) and self.bottles > 0
 
+    def measured_against(self, offers: pd.DataFrame) -> bool:
+        """Whether any of *these* offers sold anything.
+
+        The shop as a whole selling wine says nothing about the wines on
+        screen: filter the panel to one merchant whose handles never matched
+        the catalogue and every row joins to zero, which would be the panel
+        telling that merchant its wines do not sell on the strength of our own
+        failed join.
+        """
+        if not self.measured:
+            return False
+        joined = self.against(offers)
+        if "bottles" not in joined.columns:
+            return False
+        return int(joined["bottles"].sum()) > 0
+
     def against(self, offers: pd.DataFrame) -> pd.DataFrame:
         """``offers`` with bottles sold on it, zero where none were.
 
@@ -331,7 +347,9 @@ def price_bands(prices: Prices, demand: Demand, sales: Sales) -> pd.DataFrame:
 
 def sales_verdicts(prices: Prices, demand: Demand, sales: Sales) -> list[str]:
     """Whether the shop's own sales say a keener price sells more of it."""
-    if not (sales.measured and demand.measured and prices.counted):
+    if not prices.counted:
+        return []
+    if not (sales.measured_against(prices.offers) and demand.measured):
         return []
     bands = price_bands(prices, demand, sales)
     cheap = bands[bands["band"] == _BANDS[0][1]]
