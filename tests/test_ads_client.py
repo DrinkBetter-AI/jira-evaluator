@@ -702,3 +702,38 @@ def test_a_commission_share_no_agreement_could_be_falls_back_to_the_rate():
     assert ac.kept_share(500.0, 100.0, 0.12) == 0.12
     assert ac.kept_share(-5.0, 100.0, 0.12) == 0.12
     assert ac.kept_share(500.0, 0.0, 0.12) == 0.12
+    # And half an order book against a whole ledger doubles the share into
+    # something an agreement still could not be: 8.4% becomes 16.9%, which is
+    # above the rate every merchant is charged at most, so the rate stands.
+    assert ac.kept_share(3588.94, 42504.86 / 2, 0.12) == 0.12
+
+
+def test_a_floor_that_is_not_under_the_ceiling_is_not_quoted_as_one():
+    # Google can claim more value than the shop captured - over-attribution,
+    # orders since cancelled, value with tax in it - and the sentence beside the
+    # figure says the truth is between the two. Where it is not, say nothing.
+    frame = stats([(1, YESTERDAY, 100.0, 500, 4.0, 5000.0)])
+    spend = ac.window(frame, 7, now=TODAY)
+    said = " ".join(
+        ac.verdicts(spend, two_campaigns(), ac.Sales(orders=4, revenue=1000.0), "USD")
+    )
+    assert "At most $1.20 of commission for every $1 of ad spend" in said
+    assert "On the sales Google itself claims" not in said
+
+
+def test_a_commission_of_nothing_does_not_leave_a_floor_above_its_ceiling():
+    # A window Stripe charged nothing in still has a measured commission, and a
+    # ceiling of zero: the attributed figure cannot be the lower of the two.
+    frame = stats([(1, YESTERDAY, 100.0, 500, 4.0, 900.0)])
+    spend = ac.window(frame, 7, now=TODAY)
+    said = " ".join(
+        ac.verdicts(
+            spend,
+            two_campaigns(),
+            ac.Sales(orders=4, revenue=1000.0),
+            "USD",
+            commission=ac.Commission(now=0.0, before=120.0, measured=True),
+        )
+    )
+    assert "At most $0.00 of commission for every $1 of ad spend" in said
+    assert "On the sales Google itself claims" not in said

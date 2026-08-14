@@ -6162,10 +6162,13 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
             if commission is not None and sales and comparable
             else keep,
         )
+        # Withheld unless it really is the lower of the two: Google claiming more
+        # value than the shop captured, or a measured commission of nothing,
+        # would put this above the ceiling it is quoted as sitting under.
         attributed = (
             f" On the sales Google itself claims it is {_money(floor, money)} "
             f"per {unit}."
-            if spend.conversion_value
+            if spend.conversion_value and floor < earned
             else ""
         )
         trend = (

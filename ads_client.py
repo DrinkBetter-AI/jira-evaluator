@@ -740,11 +740,16 @@ def kept_share(commission: float, revenue: float, fallback: float) -> float:
     days, so a partly loaded order book or a window heavy with refunds can put
     the quotient outside anything a commission agreement could be. Where it is,
     the configured rate is the honest answer rather than a derived one.
+
+    The configured rate is the ceiling on the derived one, not just a fallback:
+    it is the most any merchant agreement charges, so a quotient above it is the
+    order book having loaded fewer sales than Stripe charged on rather than a
+    marketplace that suddenly kept more.
     """
     if not revenue:
         return fallback
     share = commission / revenue
-    return share if 0 < share <= 1 else fallback
+    return share if 0 < share <= fallback else fallback
 
 
 def attributed_return(conversion_value: float, cost: float, rate: float) -> float:
@@ -815,8 +820,13 @@ def verdicts(
                 "most flattering."
             )
         )
-        if spend.conversion_value:
-            floor = attributed_return(spend.conversion_value, spend.cost, keep)
+        # Only where it really is under the ceiling. Google can claim more value
+        # than the shop captured - over-attribution, cancelled orders, value with
+        # tax in it - and a measured commission of nothing puts the ceiling at
+        # zero, either of which would print a floor above its own ceiling and
+        # call it the lower of the two.
+        floor = attributed_return(spend.conversion_value, spend.cost, keep)
+        if spend.conversion_value and floor < now:
             lines.append(
                 f"**On the sales Google itself claims, {money(floor)} per "
                 f"{unit}** - {money(spend.conversion_value)} of conversion value "
