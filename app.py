@@ -6190,6 +6190,33 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
             "Connect a Stripe key with Application Fees read access and this "
             "becomes what was actually charged, per merchant agreement."
         )
+    elif (
+        commission is None
+        and not (sales and comparable)
+        and spend.cost
+        and spend.conversion_value
+    ):
+        # No ceiling could be read - no Stripe ledger and no comparable takings
+        # - but the attributed return needs only the ad account's own figures,
+        # which are in its own currency by definition. A ceiling that was read
+        # and came to zero is a different story and keeps the block above.
+        floor = ads_client.attributed_return(spend.conversion_value, spend.cost)
+        headline = (
+            f"### On the sales Google itself claims, {_money(floor, money)} "
+            f"back for every {unit} of ad spend\n\n"
+            f"**Goal {ads_client.BREAK_EVEN_RETURN:.2f}.** The tag sends the "
+            "marketplace's cut of each order, so this is commission already. "
+            "Only Google's own attribution is counted here; no all-channel "
+            "ceiling could be read beside it."
+        )
+        _report(TAB_BUSINESS).note(
+            ads,
+            f"**On the sales Google itself claims, {_money(floor, money)} back "
+            f"for every {unit} of ad spend.** Goal "
+            f"{ads_client.BREAK_EVEN_RETURN:.2f}. Only Google's own attribution "
+            "is counted; no all-channel ceiling could be read beside it.",
+        )
+        st.markdown(_unmathed(headline))
 
     if spend.partial:
         st.warning(

@@ -789,9 +789,15 @@ def verdicts(
         return _money(amount, currency)
 
     keep = commission_rate() if rate is None else rate
+    # The tag on the site sends a fixed share of each order whatever Stripe
+    # later kept, so the yardstick the tag is judged against is the configured
+    # rate - held here before the measured blended share replaces `keep`, or
+    # the same data would warn with Stripe down and stay silent with it up.
+    configured = keep
     unit = _money(1, currency).replace("1.00", "1")
     counted = commission is not None and commission.measured
-    if counted or (sales is not None and sales.revenue):
+    ceiling = counted or (sales is not None and sales.revenue)
+    if ceiling:
         # First, because it is the only line here that is income rather than
         # turnover: the revenue belongs to the merchants and this is our share.
         # Put as a ceiling and never as a return the ads earned. Both the
@@ -847,6 +853,20 @@ def verdicts(
                 f"**That ceiling is {word}** on the previous {spend.days} days, "
                 f"which returned {money(before)} per {unit}."
             )
+    elif spend.conversion_value:
+        # The floor needs nothing but the ad account's own figures, so a window
+        # with no readable ledger and no comparable takings still gets the one
+        # return that can be computed - named as the only line, not a floor,
+        # since there is no ceiling for it to sit under.
+        lines.append(
+            f"**On the sales Google itself claims, "
+            f"{money(attributed_return(spend.conversion_value, spend.cost))} per "
+            f"{unit}** - {money(spend.conversion_value)} of conversion value "
+            f"against {money(spend.cost)} spent. The tag sends the "
+            "marketplace's cut of each order rather than the order, so this is "
+            "commission already. Only Google's own attribution is counted "
+            "here; no all-channel ceiling could be read beside it."
+        )
 
     if sales is not None and sales.orders:
         per_order = spend.cost / sales.orders
@@ -901,7 +921,7 @@ def verdicts(
         # yardstick is the commission on an average basket - and a value at a
         # fraction of even that is a tag sending the wrong figure.
         theirs = spend.conversion_value / spend.conversions
-        ours = sales.revenue / sales.orders * keep
+        ours = sales.revenue / sales.orders * configured
         if theirs < ours * _VALUE_TAG_TOLERANCE:
             lines.append(
                 f"**Google is told each sale is worth {money(theirs)} where the "

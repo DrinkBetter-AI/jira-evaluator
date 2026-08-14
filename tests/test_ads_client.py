@@ -716,6 +716,41 @@ def test_an_account_counting_more_than_purchases_is_not_blamed_on_the_tag():
     assert "the value arriving is a fraction of the real one" not in said
 
 
+def test_the_tag_yardstick_does_not_move_with_stripe_being_readable():
+    # The tag sends a fixed share of each order whatever Stripe later kept, so
+    # the warning must judge it against the configured rate either way - or
+    # the same data would warn with Stripe down and stay silent with it up.
+    frame = stats([(1, YESTERDAY, 3831.79, 18526, 115.0, 230.0)])
+    spend = ac.window(frame, 7, now=TODAY)
+    sales = ac.Sales(orders=178, revenue=42504.86)
+    with_stripe = " ".join(
+        ac.verdicts(
+            spend,
+            two_campaigns(),
+            sales,
+            "USD",
+            commission=ac.Commission(now=3656.18, before=0.0, measured=True),
+        )
+    )
+    without = " ".join(ac.verdicts(spend, two_campaigns(), sales, "USD"))
+    marker = "shop's own commission per order averages $29"
+    assert marker in with_stripe
+    assert marker in without
+
+
+def test_the_attributed_line_stands_alone_where_no_ceiling_could_be_read():
+    # No Stripe ledger and no comparable takings - the caller zeroes revenue on
+    # a currency mismatch - but the attributed return is entirely the ad
+    # account's own figures, so it is quoted rather than dropped, named as the
+    # only line rather than a floor under a ceiling that is not there.
+    frame = stats([(1, YESTERDAY, 100.0, 500, 4.0, 50.0)])
+    spend = ac.window(frame, 7, now=TODAY)
+    said = " ".join(ac.verdicts(spend, two_campaigns(), None, "USD"))
+    assert "On the sales Google itself claims, $0.50 per $1" in said
+    assert "no all-channel ceiling could be read beside it" in said
+    assert "That is the floor" not in said
+
+
 def test_a_commission_share_no_agreement_could_be_falls_back_to_the_rate():
     # Stripe's ledger and the order book are separate feeds: a part-loaded order
     # book can leave commission larger than the revenue it was charged on, and a
