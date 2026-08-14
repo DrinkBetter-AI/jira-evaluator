@@ -146,12 +146,8 @@ _MERCHANT_IDS = {
 }
 
 
-def merchant_id(slug: str, session: requests.Session | None = None) -> int | None:
-    """The numeric id behind a Vivino shop page, or None for a page without one."""
-    known = _MERCHANT_IDS.get(slug)
-    if known:
-        return known
-    http = session or requests.Session()
+def _scraped_id(slug: str, http: requests.Session) -> int | None:
+    """The merchant id read off the shop page itself, or None if it has none."""
     try:
         page = http.get(
             f"{_SITE}/en/merchants/{slug}", headers=_HEADERS, timeout=_TIMEOUT
@@ -161,6 +157,14 @@ def merchant_id(slug: str, session: requests.Session | None = None) -> int | Non
         raise VivinoError(f"Vivino's shop page for {slug} could not be read: {exc}")
     match = re.search(r"merchant_id[^0-9]{0,10}(\d+)", page.text)
     return int(match.group(1)) if match else None
+
+
+def merchant_id(slug: str, session: requests.Session | None = None) -> int | None:
+    """The numeric id behind a Vivino shop page, or None for a page without one."""
+    known = _MERCHANT_IDS.get(slug)
+    if known:
+        return known
+    return _scraped_id(slug, session or requests.Session())
 
 
 def _page(
@@ -202,7 +206,20 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
             f"Vivino's page for {slug} no longer carries a merchant id, so "
             "their listings could not be read."
         )
+    shop = _read_shop(slug, merchant, http)
+    if not shop.listed and slug in _MERCHANT_IDS:
+        # An empty feed under an id served from the table could mean Vivino
+        # renumbered the merchant; the page settles it when it can be read.
+        try:
+            fresh = _scraped_id(slug, http)
+        except VivinoError:
+            return shop
+        if fresh and fresh != merchant:
+            return _read_shop(slug, fresh, http)
+    return shop
 
+
+def _read_shop(slug: str, merchant: int, http: requests.Session) -> Shop:
     rows: dict[int, tuple[str, int, float]] = {}
     packed: set[int] = set()
     listed = 0

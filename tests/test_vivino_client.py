@@ -453,6 +453,28 @@ def test_a_shop_already_known_is_not_asked_for_its_page_again():
     assert list(read.listings["name"]) == ["Wine A 2020"]
 
 
+def test_an_empty_read_under_a_known_id_checks_the_page_for_a_renumbering():
+    # A stale id in the table reads back an empty feed; the shop page names
+    # the merchant's current id, and the read follows it rather than telling
+    # the user the shop is empty.
+    class RenumberedSession(FakeSession):
+        def get(self, url, **kwargs):
+            if "merchants/" in url:
+                return FakeReply("merchant_id&quot;:999")
+            if kwargs["params"]["merchant_id"] != 999:
+                return FakeReply({"explore_vintage": {"records_matched": 0, "matches": []}})
+            return super().get(url, **kwargs)
+
+    session = RenumberedSession(
+        {
+            (0.0, 1): {"records_matched": 1, "matches": [match("Wine A 2020", 2020, 9.0)]},
+            (9.0, 1): {"records_matched": 1, "matches": []},
+        }
+    )
+    read = vv.fetch_shop("yiannis-wine-shop", session)
+    assert list(read.listings["name"]) == ["Wine A 2020"]
+
+
 def test_a_feed_that_refuses_outright_raises_rather_than_reporting_nothing():
     class RefusingSession(FakeSession):
         def get(self, url, **kwargs):
