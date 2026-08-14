@@ -238,8 +238,11 @@ else:
             # The second campaign spends and converts nothing: money with nothing
             # to show for it, which is the line the panel exists to print.
             # Google credits fewer conversions than the shop has orders, which
-            # is the gap the panel is meant to notice.
-            rows.append((1, day, 13.49, 118, 1.0, 200.0))
+            # is the gap the panel is meant to notice. The value is the
+            # marketplace's cut of the sale, not the sale: the site's tag
+            # deliberately sends the commission, so a $200 basket arrives
+            # as $25 of conversion value.
+            rows.append((1, day, 13.49, 118, 1.0, 25.0))
             rows.append((2, day, 66.58, 458, 0.0, 0.0))
         frame = pd.DataFrame(
             rows,

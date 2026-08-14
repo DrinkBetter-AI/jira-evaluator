@@ -107,6 +107,9 @@ class Spend:
     # counts view-throughs, and can fractionally credit one sale to several ads.
     # Reported beside CRM orders rather than instead of them.
     conversions: float
+    # Commission, not turnover: the site's tag deliberately reports the
+    # marketplace's ten-percent cut of each order as the conversion value, so
+    # this is already the shop's own money and takes no further haircut.
     conversion_value: float
     prev_cost: float
     prev_conversions: float
@@ -725,11 +728,11 @@ def earned_return(commission: float, cost: float) -> float:
 # attribution - but a large one means one of the two is not measuring the shop.
 ATTRIBUTION_TOLERANCE = 0.25
 
-# How far below the shop's own average basket Google's average conversion value
-# may sit before the tag on the site is the likelier explanation. Attribution
-# loses whole sales, not most of the money inside each one, so a Google basket at
-# a fraction of the real one is a value the site is sending wrong - and a campaign
-# bidding to maximise value is steering by it.
+# How far below the shop's own average commission per order Google's average
+# conversion value may sit before the tag is the likelier explanation. The tag
+# deliberately sends the marketplace's cut of each order rather than the order
+# itself, so the yardstick is the commission on a basket, not the basket - and
+# attribution loses whole sales, not most of the money inside each one.
 _VALUE_TAG_TOLERANCE = 0.5
 
 
@@ -752,14 +755,17 @@ def kept_share(commission: float, revenue: float, fallback: float) -> float:
     return share if 0 < share <= fallback else fallback
 
 
-def attributed_return(conversion_value: float, cost: float, rate: float) -> float:
+def attributed_return(conversion_value: float, cost: float) -> float:
     """Commission per unit of spend on the sales Google itself claims credit for.
 
-    The floor under the ceiling: the window's whole takings over ad spend counts
-    every sale however it arrived, while this counts only the ones Google's own
-    attribution recorded against a click.
+    Already commission: the site's tag deliberately reports the marketplace's
+    ten-percent cut of each order as the conversion value, not the order
+    itself, so this figure takes no further haircut. The floor under the
+    ceiling: the window's whole takings over ad spend counts every sale however
+    it arrived, while this counts only the ones Google's own attribution
+    recorded against a click.
     """
-    return round(conversion_value * rate / cost, 2) if cost else 0.0
+    return round(conversion_value / cost, 2) if cost else 0.0
 
 
 def verdicts(
@@ -825,14 +831,15 @@ def verdicts(
         # tax in it - and a measured commission of nothing puts the ceiling at
         # zero, either of which would print a floor above its own ceiling and
         # call it the lower of the two.
-        floor = attributed_return(spend.conversion_value, spend.cost, keep)
+        floor = attributed_return(spend.conversion_value, spend.cost)
         if spend.conversion_value and floor < now:
             lines.append(
                 f"**On the sales Google itself claims, {money(floor)} per "
-                f"{unit}** - {money(spend.conversion_value)} of conversion value "
-                f"at {keep:.0%} against the same {money(spend.cost)}. That is "
-                "the floor and the line above is the ceiling; the truth is "
-                "between the two."
+                f"{unit}** - {money(spend.conversion_value)} of conversion "
+                f"value against the same {money(spend.cost)}. The tag sends "
+                "the marketplace's cut of each order rather than the order, "
+                "so this is commission already. That is the floor and the "
+                "line above is the ceiling; the truth is between the two."
             )
         if before:
             word = "up" if now > before else "down" if now < before else "flat"
@@ -888,20 +895,22 @@ def verdicts(
         # account claims more conversions than the shop saw orders.
         and spend.conversions <= sales.orders
     ):
-        # Two baskets for the same shop: a purchase as Google was told about it,
-        # and a purchase as the order book records it. Only the site's own tag
-        # decides the first, so a fraction of the second is a tag sending the
-        # wrong figure - and every value-based bid is set on it.
+        # Two commissions for the same shop: the cut as Google was told about
+        # it, and the cut the order book implies. The tag deliberately sends
+        # the marketplace's share of each order rather than the order, so the
+        # yardstick is the commission on an average basket - and a value at a
+        # fraction of even that is a tag sending the wrong figure.
         theirs = spend.conversion_value / spend.conversions
-        ours = sales.revenue / sales.orders
+        ours = sales.revenue / sales.orders * keep
         if theirs < ours * _VALUE_TAG_TOLERANCE:
             lines.append(
                 f"**Google is told each sale is worth {money(theirs)} where the "
-                f"shop's own basket averages {money(ours)}** - the conversion "
-                "value the site sends is wrong, so campaigns bidding to maximise "
-                "value are steering by a figure a fraction of the real one. Worth "
-                "fixing before any budget decision, because it also makes the "
-                "attributed floor above look worse than it is."
+                f"shop's own commission per order averages {money(ours)}** - "
+                "the tag sends the marketplace's cut of each order, and even "
+                "against that yardstick the value arriving is a fraction of "
+                "the real one. Worth fixing before any budget decision, "
+                "because it also makes the attributed floor above look worse "
+                "than it is."
             )
 
     if sales is not None and sales.orders and spend.conversions:

@@ -6151,17 +6151,10 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         # The same sum over the sales Google's own attribution recorded, which is
         # the floor under that ceiling. Quoted beside it rather than instead of
         # it: one counts sales the ads had nothing to do with, the other misses
-        # sales they did win, and the answer is somewhere between the two.
-        floor = ads_client.attributed_return(
-            spend.conversion_value,
-            spend.cost,
-            # Only where both sides are the same money: takings in one currency
-            # over commission in another is not a share of anything, and every
-            # other revenue-derived figure here is withheld on the same test.
-            ads_client.kept_share(commission.now, sales.revenue, keep)
-            if commission is not None and sales and comparable
-            else keep,
-        )
+        # sales they did win, and the answer is somewhere between the two. The
+        # conversion value is commission already - the site's tag deliberately
+        # sends the marketplace's cut of each order - so no rate is applied.
+        floor = ads_client.attributed_return(spend.conversion_value, spend.cost)
         # Withheld unless it really is the lower of the two: Google claiming more
         # value than the shop captured, or a measured commission of nothing,
         # would put this above the ceiling it is quoted as sitting under.

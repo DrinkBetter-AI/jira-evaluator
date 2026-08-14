@@ -428,8 +428,8 @@ def test_the_commission_on_a_dollar_of_spend_is_the_figure_leadership_asked_for(
 def test_the_commission_line_leads_the_verdicts_and_names_the_shortfall():
     frame = stats(
         [
-            (1, YESTERDAY, 176.0, 500, 4.0, 900.0),
-            (1, YESTERDAY - dt.timedelta(days=7), 176.0, 500, 4.0, 900.0),
+            (1, YESTERDAY, 176.0, 500, 4.0, 108.0),
+            (1, YESTERDAY - dt.timedelta(days=7), 176.0, 500, 4.0, 108.0),
         ]
     )
     spend = ac.window(frame, 7, now=TODAY)
@@ -444,10 +444,12 @@ def test_the_commission_line_leads_the_verdicts_and_names_the_shortfall():
     assert "At most $0.84 of commission for every $1 of ad spend" in lines[0]
     assert "1,226 of revenue at 12%" in lines[0]
     assert "$0.16 short of it even at its most flattering" in lines[0]
-    # Google's own attributed sales are the floor under that ceiling: 900 of
-    # conversion value at 12% against 176 spent.
+    # Google's own attributed sales are the floor under that ceiling: 108 of
+    # conversion value - commission already, the tag sends the marketplace's
+    # cut of each order - against 176 spent.
     assert "On the sales Google itself claims, $0.61 per $1" in lines[1]
-    assert "$900 of conversion value at 12%" in lines[1]
+    assert "$108 of conversion value" in lines[1]
+    assert "commission already" in lines[1]
     # Half the revenue for the same spend last window: the trend must say so.
     assert "That ceiling is up" in lines[2]
     assert "$0.42 per $1" in lines[2]
@@ -486,8 +488,8 @@ def test_commission_actually_charged_beats_a_rate_that_fits_no_merchant():
     # something Stripe already counted. 147 of commission against 176 of spend.
     frame = stats(
         [
-            (1, YESTERDAY, 176.0, 500, 4.0, 900.0),
-            (1, YESTERDAY - dt.timedelta(days=7), 176.0, 500, 4.0, 900.0),
+            (1, YESTERDAY, 176.0, 500, 4.0, 108.0),
+            (1, YESTERDAY - dt.timedelta(days=7), 176.0, 500, 4.0, 108.0),
         ]
     )
     spend = ac.window(frame, 7, now=TODAY)
@@ -503,8 +505,8 @@ def test_commission_actually_charged_beats_a_rate_that_fits_no_merchant():
     assert "$147 of commission actually charged" in lines[0]
     # The assumed rate is not quoted once the real one has been counted.
     assert "12%" not in lines[0]
-    # And the rate the floor is worked out at is the one Stripe really kept -
-    # 147 over 1,226 is 12.0%, so 900 of conversion value gives 0.61.
+    # The floor takes no rate at all: the conversion value is commission
+    # already, so 108 over the same 176 of spend is 0.61.
     assert "On the sales Google itself claims, $0.61 per $1" in lines[1]
     assert "That ceiling is up" in lines[2]
 
@@ -645,16 +647,38 @@ def test_a_customer_id_cannot_smuggle_a_table_name_into_the_product_read():
 
 
 def test_the_attributed_floor_counts_only_what_google_claims():
-    # 2,770 of conversion value at the 8.4% Stripe really kept, against 3,832 of
-    # spend: six cents, where the whole shop's takings said $1.39.
-    assert ac.attributed_return(2769.53, 3831.79, 0.084) == pytest.approx(0.06)
-    assert ac.attributed_return(2769.53, 0.0, 0.084) == 0.0
+    # 2,770 of conversion value against 3,832 of spend: 72 cents. The value is
+    # commission already - the tag sends the marketplace's cut of each order -
+    # so it takes no further haircut on the way to a return.
+    assert ac.attributed_return(2769.53, 3831.79) == pytest.approx(0.72)
+    assert ac.attributed_return(2769.53, 0.0) == 0.0
 
 
-def test_a_google_basket_a_fraction_of_the_shop_s_own_blames_the_tag():
-    # Live figures: Google was told 115 purchases were worth 2,770 while the shop
-    # took 178 orders worth 42,505 - 24 a sale against 239. Attribution drops
-    # whole sales; it does not shrink the ones it keeps, so this is the tag.
+def test_a_google_value_a_fraction_of_the_shop_s_own_commission_blames_the_tag():
+    # The tag sends the marketplace's cut of each order, so the yardstick is
+    # the commission on an average basket. $2 a sale against a $29 average cut
+    # is a tag sending the wrong figure, not attribution dropping sales.
+    frame = stats([(1, YESTERDAY, 3831.79, 18526, 115.0, 230.0)])
+    spend = ac.window(frame, 7, now=TODAY)
+    said = " ".join(
+        ac.verdicts(
+            spend,
+            two_campaigns(),
+            ac.Sales(orders=178, revenue=42504.86),
+            "USD",
+        )
+    )
+    assert "Google is told each sale is worth $2.00" in said
+    assert "shop's own commission per order averages $29" in said
+    assert "the value arriving is a fraction of the real one" in said
+
+
+def test_the_live_margin_figures_are_in_step_and_raise_no_alarm():
+    # The real account: Google told 115 purchases were worth 2,770 while the
+    # shop took 178 orders worth 42,505. A $24 average against a $239 basket
+    # looked broken until the container was read - the tag deliberately sends
+    # the marketplace's ten-percent cut, and 24 against a 29-dollar average
+    # cut is attribution noise, not a broken tag.
     frame = stats([(1, YESTERDAY, 3831.79, 18526, 115.0, 2769.53)])
     spend = ac.window(frame, 7, now=TODAY)
     said = " ".join(
@@ -665,9 +689,7 @@ def test_a_google_basket_a_fraction_of_the_shop_s_own_blames_the_tag():
             "USD",
         )
     )
-    assert "Google is told each sale is worth $24" in said
-    assert "shop's own basket averages $239" in said
-    assert "conversion value the site sends is wrong" in said
+    assert "the value arriving is a fraction of the real one" not in said
 
 
 def test_a_google_basket_in_step_with_the_shop_s_own_says_nothing():
@@ -676,7 +698,7 @@ def test_a_google_basket_in_step_with_the_shop_s_own_says_nothing():
     said = " ".join(
         ac.verdicts(spend, two_campaigns(), ac.Sales(orders=4, revenue=1000.0), "USD")
     )
-    assert "the site sends is wrong" not in said
+    assert "the value arriving is a fraction of the real one" not in said
 
 
 def test_an_account_counting_more_than_purchases_is_not_blamed_on_the_tag():
