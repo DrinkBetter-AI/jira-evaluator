@@ -5343,9 +5343,14 @@ def _render_sale_prices(
     )
     st.download_button(
         f"Download a supplemental feed ({len(trying):,} wines)",
-        data=trying[["id", "price", "sale_price"]]
+        # Two columns and no more: a supplemental feed overrides every attribute
+        # it carries, so a ``price`` column in it would pin the catalogue price
+        # to whatever it was the day the file was downloaded - the shop could
+        # reprice the wine and Google would keep showing the old figure until
+        # somebody deleted the feed. The table above still shows the price,
+        # which is what it is for.
+        data=trying[["id", "sale_price"]]
         .assign(
-            price=trying["price"].map(lambda value: f"{value:.2f} {money or 'USD'}"),
             sale_price=trying["sale_price"].map(
                 lambda value: f"{value:.2f} {money or 'USD'}"
             ),
