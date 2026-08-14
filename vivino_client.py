@@ -78,6 +78,7 @@ class Comparison:
     listed: int
     complete: bool
     unmatched_ours: int = 0
+    ours_counted: int = 0  # our own comparable bottles, matched or not
 
     @property
     def matched(self) -> int:
@@ -277,6 +278,7 @@ def compare(ours: pd.DataFrame, shop: Shop) -> Comparison:
             listed=shop.listed,
             complete=shop.complete,
             unmatched_ours=len(ours),
+            ours_counted=len(ours),
         )
     mine = ours.copy()
     mine["key"] = [
@@ -304,6 +306,7 @@ def compare(ours: pd.DataFrame, shop: Shop) -> Comparison:
         listed=shop.listed,
         complete=shop.complete,
         unmatched_ours=int(joined["theirs"].isna().sum()),
+        ours_counted=len(joined),
     )
 
 
@@ -313,6 +316,13 @@ def verdicts(name: str, result: Comparison) -> list[str]:
         return [
             f"{name} has a Vivino shop page but no live listings today, so "
             "there is nothing of theirs to compare."
+        ]
+    if not result.ours_counted:
+        return [
+            f"{name} lists {result.listed:,} wines on Vivino, but none of "
+            "their own single-bottle prices could be read here, so there is "
+            "nothing on our side to compare - a catalogue problem, not a "
+            "pricing finding."
         ]
     if not result.matched:
         return [

@@ -341,6 +341,15 @@ def test_no_matches_across_a_stocked_shop_is_flagged_not_celebrated():
     assert any("matched" in line.lower() for line in lines)
 
 
+def test_an_unread_catalogue_is_admitted_rather_than_blamed_on_matching():
+    # Our side had nothing priced to compare, which is a catalogue problem to
+    # fix, not a finding that the merchant's two cellars share no wines.
+    result = vv.compare(ours([]), shop([("Other 2019", 2019, 9.0)], listed=400))
+    lines = vv.verdicts("Yiannis Wine Shop", result)
+    assert any("nothing on our side" in line for line in lines)
+    assert not any("should overlap" in line for line in lines)
+
+
 def test_wines_cheaper_on_vivino_lead_the_verdict():
     result = vv.compare(
         ours([("Wine A", 2020, 100.0)]),

@@ -162,7 +162,8 @@ if MODE == "vivino":
     )
     dashboard._vivino_comparison_cached = (
         lambda source, merchant, slug: vivino_client.Comparison(
-            rows=_theirs, listed=400, complete=False, unmatched_ours=3
+            rows=_theirs, listed=400, complete=False, unmatched_ours=3,
+            ours_counted=4
         )
     )
 

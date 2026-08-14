@@ -657,9 +657,16 @@ def fetch_catalog(
     ].copy()
     if single.empty:
         return pd.DataFrame(columns=["handle", "title", "year", "price"])
+    # The vintage lives in the variant title, but some products carry it only
+    # in the wine's own name; either way it is the same bottle's year.
     single["year"] = (
         single["variant"]
         .str.extract(r"\b((?:19|20)\d{2})\b", expand=False)
+        .fillna(
+            single["title"].astype(str).str.extract(
+                r"\b((?:19|20)\d{2})\b", expand=False
+            )
+        )
         .fillna(0)
         .astype(int)
     )
