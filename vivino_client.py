@@ -236,6 +236,13 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
                     price_from = max(price_from, float(amount))
                 if not amount or bottle.get("volume_ml") != 750:
                     continue
+                # A case price is quoted per bottle but earned by buying the
+                # case; only a price a shopper pays for one bottle compares
+                # with a single-bottle price here.
+                if (price.get("bottle_quantity") or 1) > 1:
+                    continue
+                if (price.get("minimum_unit_quantity") or 1) > 1:
+                    continue
                 name = str(vintage.get("name") or "").strip()
                 if not name:
                     continue

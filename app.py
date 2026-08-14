@@ -4615,6 +4615,9 @@ def _render_vivino(chosen: str, picker: bool = True) -> None:
     st.caption(
         "Same wine, same vintage, single 0.75l bottles, both prices in USD "
         "before shipping - Vivino's checkout may add shipping differently. "
+        "Vivino prices that require buying a pack - 3, 6 or 12 bottles at a "
+        "per-bottle rate - are left out: only what one bottle costs is "
+        "compared with what one bottle costs here. "
         f"Vivino read within the last day; {result.unmatched_ours:,} of the "
         "merchant's wines here found no Vivino listing by name and vintage "
         "and are left out rather than guessed at."
