@@ -4512,6 +4512,17 @@ def _render_vivino(chosen: str) -> None:
     sides publish - and honest about what could not be compared: Vivino's feed
     read short, a shop with no listings, a merchant with no known Vivino page.
     """
+    # The order database is what names the merchants, so when it cannot be
+    # read there may be no merchant picker on the page at all - that check
+    # comes first, or the reader is pointed at a picker that is not there.
+    config = orders_client.load_medusa_env()
+    if config is None:
+        st.caption(
+            "The comparison needs the shop's own catalogue prices, which come "
+            "from the order database. Set POSTGRES_PASSWORD (or "
+            "MEDUSA_DB_PASSWORD) to read them."
+        )
+        return
     if chosen == _EVERY_MERCHANT:
         st.caption(
             "Pick a merchant above: Vivino prices are one shop's against the "
@@ -4524,14 +4535,6 @@ def _render_vivino(chosen: str) -> None:
             f"No Vivino shop is on record for {chosen}. The ones known are "
             + ", ".join(sorted(vivino_client.VIVINO_SHOPS))
             + "; if they open one, add it to VIVINO_SHOPS in vivino_client.py."
-        )
-        return
-    config = orders_client.load_medusa_env()
-    if config is None:
-        st.caption(
-            "The comparison needs the shop's own catalogue prices, which come "
-            "from the order database. Set POSTGRES_PASSWORD (or "
-            "MEDUSA_DB_PASSWORD) to read them."
         )
         return
     # The read walks the shop's Vivino listings page by page and can take
