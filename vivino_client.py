@@ -155,7 +155,8 @@ _MERCHANT_IDS = {
 }
 
 
-_URL_CREDENTIAL = re.compile(r"//[^/@\s]*@")
+# Greedy to the last @ of the token, so a password holding / or @ still goes.
+_URL_CREDENTIAL = re.compile(r"//\S*@")
 
 
 def _worded(exc: Exception) -> str:
