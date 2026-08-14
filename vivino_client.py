@@ -240,8 +240,13 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
             complete = True
             break
         if not new_rows:
-            # The walk ran its pages out and served only listings already
-            # seen: everything at or above the floor is known, the shop's top.
+            if price_from > walk_from:
+                # The floor advanced on bottles that are not compared - other
+                # sizes, unpriced rows - so the shop is not finished, only
+                # this walk; the next one starts above them.
+                continue
+            # The walk ran its pages out serving only listings already seen at
+            # an unmoved floor: everything at or above it is known, the top.
             complete = drained
             break
 

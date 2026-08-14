@@ -5771,10 +5771,11 @@ def _render_price_benchmark() -> None:
                 "not anybody is looking at them. What to do about them is the "
                 "first tab, which weighs the same gap by the shoppers it lost."
             )
-    else:
+    elif named:
         # The Vivino comparison needs no Google benchmark - it reads the
         # merchant's own catalogue - so it stays reachable for a merchant
-        # none of whose wines Google can price.
+        # none of whose wines Google can price. Without a merchant picker
+        # above there is nobody to compare, so the tab stays away too.
         (vivino_tab,) = st.tabs(["Their Vivino price"])
         with vivino_tab:
             _render_vivino(chosen)

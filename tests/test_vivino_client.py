@@ -229,6 +229,39 @@ def test_the_read_walks_pages_and_then_the_price_axis():
     assert sorted(read.listings["name"]) == ["Wine A 2020", "Wine B 2020"]
 
 
+def test_a_band_of_magnums_does_not_end_the_read_or_fake_completeness():
+    # A walk can serve nothing comparable - magnums, halves - while raising
+    # the price floor; the read must climb past them to the standard bottles
+    # above, not stop there and call the shop fully read.
+    session = FakeSession(
+        {
+            (0.0, 1): {
+                "records_matched": 3,
+                "matches": [match("Wine A 2020", 2020, 50.0)],
+            },
+            (50.0, 1): {
+                "records_matched": 3,
+                "matches": [
+                    match("Wine A 2020", 2020, 50.0),
+                    match("Magnum B 2020", 2020, 90.0, volume=1500),
+                ],
+            },
+            (90.0, 1): {
+                "records_matched": 3,
+                "matches": [match("Wine C 2020", 2020, 120.0)],
+            },
+            (120.0, 1): {
+                "records_matched": 3,
+                "matches": [match("Wine C 2020", 2020, 120.0)],
+            },
+            (120.0, 2): {"records_matched": 3, "matches": []},
+        }
+    )
+    read = vv.fetch_shop("a-shop", session)
+    assert sorted(read.listings["name"]) == ["Wine A 2020", "Wine C 2020"]
+    assert read.complete
+
+
 def test_the_price_floor_holds_still_while_a_walk_turns_its_pages():
     # Raising the floor between pages would shift the result set under the
     # page number and skip listings for good; page 2 must be asked for at the
