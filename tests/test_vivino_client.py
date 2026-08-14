@@ -434,6 +434,25 @@ def test_a_page_without_a_merchant_id_is_a_failed_read_not_an_empty_shop():
         vv.fetch_shop("a-shop", FakeSession({}, merchant=None))
 
 
+def test_a_shop_already_known_is_not_asked_for_its_page_again():
+    # Vivino's shop pages refuse cloud addresses (403) more readily than the
+    # listings API, so a known merchant id must not depend on the page at all.
+    class PageRefusingSession(FakeSession):
+        def get(self, url, **kwargs):
+            if "merchants/" in url:
+                raise requests.HTTPError("403 Client Error: Forbidden")
+            return super().get(url, **kwargs)
+
+    session = PageRefusingSession(
+        {
+            (0.0, 1): {"records_matched": 1, "matches": [match("Wine A 2020", 2020, 9.0)]},
+            (9.0, 1): {"records_matched": 1, "matches": []},
+        }
+    )
+    read = vv.fetch_shop("yiannis-wine-shop", session)
+    assert list(read.listings["name"]) == ["Wine A 2020"]
+
+
 def test_a_feed_that_refuses_outright_raises_rather_than_reporting_nothing():
     class RefusingSession(FakeSession):
         def get(self, url, **kwargs):

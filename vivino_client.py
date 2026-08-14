@@ -37,6 +37,7 @@ _HEADERS = {
         "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
     ),
     "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 _TIMEOUT = 30
 # A page holds 24 listings, and the feed stops turning pages long before a
@@ -136,8 +137,20 @@ def year_of(name: str) -> int:
     return int(match.group(0)) if found and match else 0
 
 
+# The shop pages sit behind stricter bot protection than the explore API, so
+# a page fetch from a cloud address can be refused (403) while the listings
+# themselves still read fine; ids already known are not asked for again.
+_MERCHANT_IDS = {
+    "yiannis-wine-shop": 26035,
+    "capital-fine-wine": 36024,
+}
+
+
 def merchant_id(slug: str, session: requests.Session | None = None) -> int | None:
     """The numeric id behind a Vivino shop page, or None for a page without one."""
+    known = _MERCHANT_IDS.get(slug)
+    if known:
+        return known
     http = session or requests.Session()
     try:
         page = http.get(
