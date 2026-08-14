@@ -413,6 +413,10 @@ assert "charged this account nothing to process it" in body, body[-1500:]
 drawn = "\n".join(str(m.value) for m in test.markdown)
 assert "\\$2,975 of commission kept" in drawn, drawn[-1500:]
 assert "\\$900 on OpenAI" in drawn, drawn[-1500:]
+# A caption is markdown too, and two projects in one is two dollar signs.
+captions = "\n".join(str(c.value) for c in test.caption)
+by_project = next(c for c in captions.splitlines() if c.startswith("By project:"))
+assert "\\$" in by_project and "$" not in by_project.replace("\\$", ""), by_project
 print("\n".join(line for line in body.splitlines() if line.startswith("- **")))
 print("live: ok")
 

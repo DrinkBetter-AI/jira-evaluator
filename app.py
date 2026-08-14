@@ -6634,11 +6634,16 @@ def _render_ai_costs(days: int) -> None:
         billed[billed["day"] >= burn.first_day] if burn.first_day else billed.iloc[0:0]
     )
     if len(projects) > 1:
+        # Escaped like the verdicts above: a caption is markdown too, and two
+        # projects in it are two dollar signs on one line, which Streamlit reads
+        # as maths and eats.
         st.caption(
-            "By project: "
-            + ", ".join(
-                f"{row['project'] or 'unnamed'} {_money(float(row['cost']), money)}"
-                for _, row in projects.iterrows()
+            _unmathed(
+                "By project: "
+                + ", ".join(
+                    f"{row['project'] or 'unnamed'} {_money(float(row['cost']), money)}"
+                    for _, row in projects.iterrows()
+                )
             )
         )
 
