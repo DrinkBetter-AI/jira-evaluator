@@ -256,6 +256,19 @@ def test_a_case_price_quoted_per_bottle_is_not_a_single_bottle_price():
     assert read.complete
 
 
+def test_no_match_names_the_pack_prices_rather_than_blaming_the_overlap():
+    # A shop quoted entirely per bottle of a case has nothing comparable, and
+    # the verdict must say so instead of claiming the cellars fail to overlap.
+    ours = pd.DataFrame({"title": ["Wine A 2020"], "year": [2020], "price": [20.0]})
+    result = vv.compare(
+        ours,
+        vv.Shop(slug="a-shop", listings=pd.DataFrame(), listed=40, complete=True, packs=40),
+    )
+    (line,) = vv.verdicts("A Shop", result)
+    assert "40 of them are priced per bottle" in line
+    assert "should overlap" not in line
+
+
 def test_a_blank_year_field_falls_back_to_the_vintage_in_the_name():
     # Some listings leave the vintage field empty though the name carries the
     # year; the bottle must still match the shop's own by name and vintage.

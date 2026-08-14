@@ -364,6 +364,14 @@ def verdicts(name: str, result: Comparison) -> list[str]:
             "pricing finding."
         ]
     if not result.matched:
+        if result.packs:
+            return [
+                f"{name} lists {result.listed:,} wines on Vivino, but "
+                f"{result.packs:,} of them are priced per bottle of a 3, 6 "
+                "or 12 bottle pack, and none of the rest matched a wine of "
+                "theirs here by name and vintage - so there is no "
+                "single-bottle price of theirs to compare."
+            ]
         return [
             f"None of {name}'s {result.listed:,} Vivino listings matched a "
             "wine of theirs here by name and vintage, which is worth a look "
