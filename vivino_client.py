@@ -72,6 +72,7 @@ class Shop:
     listings: pd.DataFrame  # name, year, price, key
     listed: int  # what Vivino says the shop holds, matched or not
     complete: bool  # False when the request budget ran out first
+    packs: int = 0  # wines offered only per bottle of a 3/6/12 pack
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ class Comparison:
     complete: bool
     unmatched_ours: int = 0
     ours_counted: int = 0  # our own comparable bottles, matched or not
+    packs: int = 0  # Vivino wines left out because their price needs a pack
 
     @property
     def matched(self) -> int:
@@ -189,6 +191,7 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
         )
 
     rows: dict[int, tuple[str, int, float]] = {}
+    packed: set[int] = set()
     listed = 0
     price_from = 0.0
     requests_made = 0
@@ -239,9 +242,11 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
                 # A case price is quoted per bottle but earned by buying the
                 # case; only a price a shopper pays for one bottle compares
                 # with a single-bottle price here.
-                if (price.get("bottle_quantity") or 1) > 1:
-                    continue
-                if (price.get("minimum_unit_quantity") or 1) > 1:
+                if (
+                    (price.get("bottle_quantity") or 1) > 1
+                    or (price.get("minimum_unit_quantity") or 1) > 1
+                ):
+                    packed.add(int(vintage.get("id") or 0) or hash(str(vintage.get("name"))))
                     continue
                 name = str(vintage.get("name") or "").strip()
                 if not name:
@@ -284,7 +289,13 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
         frame = (
             frame.sort_values("price").drop_duplicates("key").reset_index(drop=True)
         )
-    return Shop(slug=slug, listings=frame, listed=listed, complete=complete)
+    return Shop(
+        slug=slug,
+        listings=frame,
+        listed=listed,
+        complete=complete,
+        packs=len(packed),
+    )
 
 
 def _empty() -> pd.DataFrame:
@@ -305,6 +316,7 @@ def compare(ours: pd.DataFrame, shop: Shop) -> Comparison:
             complete=shop.complete,
             unmatched_ours=len(ours),
             ours_counted=len(ours),
+            packs=shop.packs,
         )
     mine = ours.copy()
     mine["key"] = [
@@ -333,6 +345,7 @@ def compare(ours: pd.DataFrame, shop: Shop) -> Comparison:
         complete=shop.complete,
         unmatched_ours=int(joined["theirs"].isna().sum()),
         ours_counted=len(joined),
+        packs=shop.packs,
     )
 
 

@@ -252,6 +252,7 @@ def test_a_case_price_quoted_per_bottle_is_not_a_single_bottle_price():
     )
     read = vv.fetch_shop("a-shop", session)
     assert list(read.listings["name"]) == ["Wine C 2020"]
+    assert read.packs == 2
     assert read.complete
 
 
