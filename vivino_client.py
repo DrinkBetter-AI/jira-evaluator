@@ -139,7 +139,10 @@ def year_of(name: str) -> int:
 
 # The shop pages sit behind stricter bot protection than the explore API, so
 # a page fetch from a cloud address can be refused (403) while the listings
-# themselves still read fine; ids already known are not asked for again.
+# themselves still read fine. The page is still asked first - it names the
+# shop's current id - and this table answers only when the page cannot be
+# read. Ids come off the live pages; when a shop joins VIVINO_SHOPS, read its
+# page in a browser and record the merchant_id found in the page's data.
 _MERCHANT_IDS = {
     "yiannis-wine-shop": 26035,
     "capital-fine-wine": 36024,
