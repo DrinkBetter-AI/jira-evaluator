@@ -718,8 +718,8 @@ def test_an_account_counting_more_than_purchases_is_not_blamed_on_the_tag():
 
 def test_the_tag_yardstick_does_not_move_with_stripe_being_readable():
     # The tag sends a fixed share of each order whatever Stripe later kept, so
-    # the warning must judge it against the configured rate either way - or
-    # the same data would warn with Stripe down and stay silent with it up.
+    # the warning judges it against the configured rate whether or not a
+    # measured ledger is in hand - the same data must warn either way.
     frame = stats([(1, YESTERDAY, 3831.79, 18526, 115.0, 230.0)])
     spend = ac.window(frame, 7, now=TODAY)
     sales = ac.Sales(orders=178, revenue=42504.86)
@@ -749,20 +749,6 @@ def test_the_attributed_line_stands_alone_where_no_ceiling_could_be_read():
     assert "On the sales Google itself claims, $0.50 per $1" in said
     assert "no all-channel ceiling could be read beside it" in said
     assert "That is the floor" not in said
-
-
-def test_a_commission_share_no_agreement_could_be_falls_back_to_the_rate():
-    # Stripe's ledger and the order book are separate feeds: a part-loaded order
-    # book can leave commission larger than the revenue it was charged on, and a
-    # share above 1 is not a share. The configured rate is the honest answer.
-    assert ac.kept_share(3588.94, 42504.86, 0.12) == pytest.approx(0.0844, abs=1e-4)
-    assert ac.kept_share(500.0, 100.0, 0.12) == 0.12
-    assert ac.kept_share(-5.0, 100.0, 0.12) == 0.12
-    assert ac.kept_share(500.0, 0.0, 0.12) == 0.12
-    # And half an order book against a whole ledger doubles the share into
-    # something an agreement still could not be: 8.4% becomes 16.9%, which is
-    # above the rate every merchant is charged at most, so the rate stands.
-    assert ac.kept_share(3588.94, 42504.86 / 2, 0.12) == 0.12
 
 
 def test_a_floor_that_is_not_under_the_ceiling_is_not_quoted_as_one():

@@ -6192,14 +6192,15 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         )
     elif (
         commission is None
-        and not (sales and comparable)
+        and not (sales and comparable and sales.revenue)
         and spend.cost
         and spend.conversion_value
     ):
-        # No ceiling could be read - no Stripe ledger and no comparable takings
-        # - but the attributed return needs only the ad account's own figures,
-        # which are in its own currency by definition. A ceiling that was read
-        # and came to zero is a different story and keeps the block above.
+        # No ceiling could be computed - no Stripe ledger, and either no
+        # comparable takings or none captured in the window - but the
+        # attributed return needs only the ad account's own figures, which are
+        # in its own currency by definition. A measured commission that came
+        # to zero is a different story and keeps the block above.
         floor = ads_client.attributed_return(spend.conversion_value, spend.cost)
         headline = (
             f"### On the sales Google itself claims, {_money(floor, money)} "

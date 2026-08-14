@@ -736,25 +736,6 @@ ATTRIBUTION_TOLERANCE = 0.25
 _VALUE_TAG_TOLERANCE = 0.5
 
 
-def kept_share(commission: float, revenue: float, fallback: float) -> float:
-    """The share of takings the marketplace really kept, or the configured rate.
-
-    Stripe's ledger and the order book are separate feeds read over the same
-    days, so a partly loaded order book or a window heavy with refunds can put
-    the quotient outside anything a commission agreement could be. Where it is,
-    the configured rate is the honest answer rather than a derived one.
-
-    The configured rate is the ceiling on the derived one, not just a fallback:
-    it is the most any merchant agreement charges, so a quotient above it is the
-    order book having loaded fewer sales than Stripe charged on rather than a
-    marketplace that suddenly kept more.
-    """
-    if not revenue:
-        return fallback
-    share = commission / revenue
-    return share if 0 < share <= fallback else fallback
-
-
 def attributed_return(conversion_value: float, cost: float) -> float:
     """Commission per unit of spend on the sales Google itself claims credit for.
 
@@ -789,11 +770,6 @@ def verdicts(
         return _money(amount, currency)
 
     keep = commission_rate() if rate is None else rate
-    # The tag on the site sends a fixed share of each order whatever Stripe
-    # later kept, so the yardstick the tag is judged against is the configured
-    # rate - held here before the measured blended share replaces `keep`, or
-    # the same data would warn with Stripe down and stay silent with it up.
-    configured = keep
     unit = _money(1, currency).replace("1.00", "1")
     counted = commission is not None and commission.measured
     ceiling = counted or (sales is not None and sales.revenue)
@@ -809,11 +785,6 @@ def verdicts(
             now = earned_return(commission.now, spend.cost)
             before = earned_return(commission.before, spend.prev_cost)
             basis = f"{money(commission.now)} of commission actually charged"
-            # The share the marketplace really kept, rather than the assumed one:
-            # merchants sit on different agreements, so the blended rate is
-            # whatever Stripe's fees came to over the sales it charged them on.
-            if sales is not None and sales.revenue:
-                keep = kept_share(commission.now, sales.revenue, keep)
         else:
             now = commission_return(sales.revenue, spend.cost, keep)
             before = commission_return(sales.prev_revenue, spend.prev_cost, keep)
@@ -921,7 +892,11 @@ def verdicts(
         # yardstick is the commission on an average basket - and a value at a
         # fraction of even that is a tag sending the wrong figure.
         theirs = spend.conversion_value / spend.conversions
-        ours = sales.revenue / sales.orders * configured
+        # Against the configured rate rather than a share derived from Stripe:
+        # the tag sends a fixed cut of each order whatever Stripe later kept,
+        # and a yardstick that moved with Stripe's ledger would warn with
+        # Stripe down and stay silent with it up on the same data.
+        ours = sales.revenue / sales.orders * keep
         if theirs < ours * _VALUE_TAG_TOLERANCE:
             lines.append(
                 f"**Google is told each sale is worth {money(theirs)} where the "
@@ -1033,7 +1008,6 @@ __all__ = [
     "default_project",
     "daily_stats",
     "earned_return",
-    "kept_share",
     "load_ads_env",
     "paused_spenders",
     "verdicts",
