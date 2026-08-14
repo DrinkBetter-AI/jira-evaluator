@@ -44,7 +44,7 @@ _TIMEOUT = 30
 # the pages stop, start again from the highest price seen. The request budget
 # is the honest ceiling - a shop bigger than it is reported as partly read.
 _PAGE_SIZE = 24
-_MAX_REQUESTS = 900
+_MAX_REQUESTS = 2200
 _PAUSE_SECONDS = 0.15
 # The wall-clock ceiling, held under the deployment's 1800s request limit: a
 # slow feed ends the read with what it has rather than outliving the server's
@@ -72,6 +72,7 @@ class Shop:
     listings: pd.DataFrame  # name, year, price, key
     listed: int  # what Vivino says the shop holds, matched or not
     complete: bool  # False when the request budget ran out first
+    packs: int = 0  # wines offered only per bottle of a 3/6/12 pack
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,7 @@ class Comparison:
     complete: bool
     unmatched_ours: int = 0
     ours_counted: int = 0  # our own comparable bottles, matched or not
+    packs: int = 0  # Vivino wines left out because their price needs a pack
 
     @property
     def matched(self) -> int:
@@ -189,6 +191,7 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
         )
 
     rows: dict[int, tuple[str, int, float]] = {}
+    packed: set[int] = set()
     listed = 0
     price_from = 0.0
     requests_made = 0
@@ -216,7 +219,9 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
             try:
                 found = _page(http, merchant, walk_from, page_number)
             except requests.RequestException as exc:
-                if not rows:
+                # A read that saw pack prices has learned something worth
+                # showing even with no comparable bottle yet in hand.
+                if not rows and not packed:
                     raise VivinoError(f"Vivino refused the {slug} listings: {exc}")
                 failed = True
                 break
@@ -240,6 +245,15 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
                 if not name:
                     continue
                 key = int(vintage.get("id") or 0) or hash((name, amount))
+                # A case price is quoted per bottle but earned by buying the
+                # case; only a price a shopper pays for one bottle compares
+                # with a single-bottle price here.
+                if (
+                    (price.get("bottle_quantity") or 1) > 1
+                    or (price.get("minimum_unit_quantity") or 1) > 1
+                ):
+                    packed.add(key)
+                    continue
                 if key not in rows:
                     # Some listings carry the vintage only in the wine's name,
                     # leaving the year field blank; it is the same bottle.
@@ -277,7 +291,15 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
         frame = (
             frame.sort_values("price").drop_duplicates("key").reset_index(drop=True)
         )
-    return Shop(slug=slug, listings=frame, listed=listed, complete=complete)
+    return Shop(
+        slug=slug,
+        listings=frame,
+        listed=listed,
+        complete=complete,
+        # A wine listed both singly and by the case is compared, not left
+        # out, so only vintages with no single-bottle row count as packs.
+        packs=len(packed - rows.keys()),
+    )
 
 
 def _empty() -> pd.DataFrame:
@@ -298,6 +320,7 @@ def compare(ours: pd.DataFrame, shop: Shop) -> Comparison:
             complete=shop.complete,
             unmatched_ours=len(ours),
             ours_counted=len(ours),
+            packs=shop.packs,
         )
     mine = ours.copy()
     mine["key"] = [
@@ -326,11 +349,16 @@ def compare(ours: pd.DataFrame, shop: Shop) -> Comparison:
         complete=shop.complete,
         unmatched_ours=int(joined["theirs"].isna().sum()),
         ours_counted=len(joined),
+        packs=shop.packs,
     )
 
 
 def verdicts(name: str, result: Comparison) -> list[str]:
     """The comparison in sentences somebody can put to the merchant."""
+    partial = (
+        "Vivino's feed stopped before the whole shop was read, so these "
+        "counts are of the listings that were - more overlap may exist."
+    )
     if not result.listed:
         return [
             f"{name} has a Vivino shop page but no live listings today, so "
@@ -344,11 +372,23 @@ def verdicts(name: str, result: Comparison) -> list[str]:
             "pricing finding."
         ]
     if not result.matched:
-        return [
-            f"None of {name}'s {result.listed:,} Vivino listings matched a "
-            "wine of theirs here by name and vintage, which is worth a look "
-            "in itself: the same cellar should overlap."
-        ]
+        if result.packs:
+            lines = [
+                f"{name} lists {result.listed:,} wines on Vivino, but "
+                f"{result.packs:,} of them are priced per bottle of a 3, 6 "
+                "or 12 bottle pack, and none of the rest matched a wine of "
+                "theirs here by name and vintage - so there is no "
+                "single-bottle price of theirs to compare."
+            ]
+        else:
+            lines = [
+                f"None of {name}'s {result.listed:,} Vivino listings matched "
+                "a wine of theirs here by name and vintage, which is worth a "
+                "look in itself: the same cellar should overlap."
+            ]
+        if not result.complete:
+            lines.append(partial)
+        return lines
     lines = []
     cheaper = result.cheaper_there
     if len(cheaper):
@@ -370,10 +410,7 @@ def verdicts(name: str, result: Comparison) -> list[str]:
         f"the same and {result.dearer_there:,} are more expensive on Vivino."
     )
     if not result.complete:
-        lines.append(
-            "Vivino's feed stopped before the whole shop was read, so these "
-            "counts are of the listings that were - more overlap may exist."
-        )
+        lines.append(partial)
     return lines
 
 

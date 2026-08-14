@@ -185,10 +185,14 @@ class FakeSession:
         return FakeReply({"explore_vintage": self.pages.get(key, {"matches": []})})
 
 
-def match(name: str, year: int, price: float, volume=750, vintage_id=None):
+def match(name: str, year: int, price: float, volume=750, vintage_id=None, quantity=1):
     return {
         "vintage": {"id": vintage_id or hash((name, year)) % 10**6, "name": name, "year": year},
-        "price": {"amount": price, "bottle_type": {"volume_ml": volume}},
+        "price": {
+            "amount": price,
+            "bottle_type": {"volume_ml": volume},
+            "bottle_quantity": quantity,
+        },
     }
 
 
@@ -227,6 +231,72 @@ def test_the_read_walks_pages_and_then_the_price_axis():
     )
     read = vv.fetch_shop("a-shop", session)
     assert sorted(read.listings["name"]) == ["Wine A 2020", "Wine B 2020"]
+
+
+def test_a_case_price_quoted_per_bottle_is_not_a_single_bottle_price():
+    # A merchant can quote Vivino $9 a bottle for a 12-bottle case; comparing
+    # that against a single bottle's price here is apples and oranges, so
+    # only prices a shopper pays for one bottle are kept.
+    session = FakeSession(
+        {
+            (0.0, 1): {
+                "records_matched": 3,
+                "matches": [
+                    match("Wine A 2020", 2020, 9.0, quantity=12),
+                    match("Wine B 2020", 2020, 12.0, quantity=6),
+                    match("Wine C 2020", 2020, 17.0),
+                ],
+            },
+            (17.0, 1): {"records_matched": 3, "matches": []},
+        }
+    )
+    read = vv.fetch_shop("a-shop", session)
+    assert list(read.listings["name"]) == ["Wine C 2020"]
+    assert read.packs == 2
+    assert read.complete
+
+
+def test_a_wine_sold_both_singly_and_by_the_case_is_compared_not_left_out():
+    session = FakeSession(
+        {
+            (0.0, 1): {
+                "records_matched": 2,
+                "matches": [
+                    match("Wine A 2020", 2020, 9.0, vintage_id=7, quantity=12),
+                    match("Wine A 2020", 2020, 17.0, vintage_id=7),
+                ],
+            },
+            (17.0, 1): {"records_matched": 2, "matches": []},
+        }
+    )
+    read = vv.fetch_shop("a-shop", session)
+    assert list(read.listings["price"]) == [17.0]
+    assert read.packs == 0
+
+
+def test_no_match_names_the_pack_prices_rather_than_blaming_the_overlap():
+    # A shop quoted entirely per bottle of a case has nothing comparable, and
+    # the verdict must say so instead of claiming the cellars fail to overlap.
+    ours = pd.DataFrame({"title": ["Wine A 2020"], "year": [2020], "price": [20.0]})
+    result = vv.compare(
+        ours,
+        vv.Shop(slug="a-shop", listings=pd.DataFrame(), listed=40, complete=True, packs=40),
+    )
+    (line,) = vv.verdicts("A Shop", result)
+    assert "40 of them are priced per bottle" in line
+    assert "should overlap" not in line
+
+
+def test_a_partial_no_match_read_admits_the_shop_was_not_fully_read():
+    # A read that failed after seeing only pack prices must not present the
+    # missing overlap as a finding about the whole shop.
+    ours = pd.DataFrame({"title": ["Wine A 2020"], "year": [2020], "price": [20.0]})
+    result = vv.compare(
+        ours,
+        vv.Shop(slug="a-shop", listings=pd.DataFrame(), listed=40, complete=False, packs=12),
+    )
+    lines = vv.verdicts("A Shop", result)
+    assert any("stopped before the whole shop was read" in line for line in lines)
 
 
 def test_a_blank_year_field_falls_back_to_the_vintage_in_the_name():
