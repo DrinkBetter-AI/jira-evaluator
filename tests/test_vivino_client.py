@@ -229,6 +229,22 @@ def test_the_read_walks_pages_and_then_the_price_axis():
     assert sorted(read.listings["name"]) == ["Wine A 2020", "Wine B 2020"]
 
 
+def test_a_blank_year_field_falls_back_to_the_vintage_in_the_name():
+    # Some listings leave the vintage field empty though the name carries the
+    # year; the bottle must still match the shop's own by name and vintage.
+    session = FakeSession(
+        {
+            (0.0, 1): {
+                "records_matched": 1,
+                "matches": [match("Opus One 2019", None, 60.0)],
+            },
+            (60.0, 1): {"records_matched": 1, "matches": []},
+        }
+    )
+    read = vv.fetch_shop("a-shop", session)
+    assert list(read.listings["year"]) == [2019]
+
+
 def test_a_spent_time_budget_keeps_what_was_read_and_admits_the_rest(monkeypatch):
     # A slow feed must end the read with the listings in hand, marked partial,
     # rather than run past the server's request limit and lose everything.

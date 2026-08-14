@@ -241,7 +241,10 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
                     continue
                 key = int(vintage.get("id") or 0) or hash((name, amount))
                 if key not in rows:
-                    rows[key] = (name, vintage_year(vintage.get("year")), float(amount))
+                    # Some listings carry the vintage only in the wine's name,
+                    # leaving the year field blank; it is the same bottle.
+                    year = vintage_year(vintage.get("year")) or year_of(name)
+                    rows[key] = (name, year, float(amount))
                     new_rows += 1
             page_number += 1
             time.sleep(_PAUSE_SECONDS)
