@@ -385,6 +385,34 @@ group by pr.external_id
 """
 )
 
+# A merchant's live single-bottle catalogue with the price a shopper pays
+# today, for putting beside what the same merchant charges elsewhere. One
+# price row per variant is the base price: quantity-tier and price-list rows
+# are discounts on top of it, not the sticker.
+_CATALOG_SQL = f"""
+select p.handle,
+       p.title,
+       pv.title            as variant,
+       pr.amount           as price,
+       pr.currency_code    as currency
+from {SCHEMA}.product p
+join {SCHEMA}.product_variant pv
+  on pv.product_id = p.id
+ and pv.deleted_at is null
+join {SCHEMA}.product_variant_price_set vps
+  on vps.variant_id = pv.id
+ and vps.deleted_at is null
+join {SCHEMA}.price pr
+  on pr.price_set_id = vps.price_set_id
+ and pr.deleted_at is null
+ and pr.price_list_id is null
+ and coalesce(pr.min_quantity, 1) <= 1
+ and coalesce(pr.rules_count, 0) = 0
+where p.deleted_at is null
+  and p.status = 'published'
+  and p.handle like %(prefix)s
+"""
+
 _STORES_SQL = f"""
 select name,
        metadata->>'store_prefix' as prefix
@@ -583,6 +611,79 @@ def fetch_offer_sales(
     return frame[frame["offer"] != ""].reset_index(drop=True)
 
 
+def fetch_catalog(
+    config: DbConfig, prefix: str, others: tuple[str, ...] = ()
+) -> pd.DataFrame:
+    """A merchant's published single 0.75l bottles with today's price.
+
+    ``prefix`` is the merchant's handle prefix from :func:`fetch_stores`; the
+    result carries ``handle``, ``title``, ``year`` and ``price`` in USD, one
+    row per wine, which is the shape a price comparison joins on. ``others``
+    is every other store's prefix: a handle that also starts with a longer
+    one of those belongs to that store, the same longest-prefix rule the
+    order attribution uses, and is left out.
+    """
+    wanted = str(prefix or "").strip().lower()
+    if not wanted:
+        return pd.DataFrame(columns=["handle", "title", "year", "price"])
+    longer = tuple(
+        f"{str(other).strip().lower()}-"
+        for other in others
+        if str(other).strip().lower().startswith(wanted)
+        and str(other).strip().lower() != wanted
+    )
+    try:
+        with closing(_connect(config)) as connection:
+            # LIKE wildcards in a store's prefix are characters, not patterns.
+            literal = wanted.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+            frame = _frame(connection, _CATALOG_SQL, {"prefix": f"{literal}-%"})
+    except psycopg2.Error as exc:
+        raise MedusaConfigError(
+            f"The order database at {config.label} refused the catalogue read: "
+            f"{str(exc).strip()}"
+        ) from exc
+    if frame.empty:
+        return pd.DataFrame(columns=["handle", "title", "year", "price"])
+    if longer:
+        frame = frame[~frame["handle"].astype(str).str.startswith(longer)]
+        if frame.empty:
+            return pd.DataFrame(columns=["handle", "title", "year", "price"])
+    frame["variant"] = frame["variant"].astype(str)
+    frame["currency"] = frame["currency"].astype(str).str.lower()
+    # The variant title carries the size and the vintage - "... 2019 750 ml" -
+    # and a magnum or a case is a different product, not a different price.
+    single = frame[
+        frame["variant"].str.endswith("750 ml") & (frame["currency"] == "usd")
+    ].copy()
+    if single.empty:
+        return pd.DataFrame(columns=["handle", "title", "year", "price"])
+    # The vintage lives in the variant title, but some products carry it only
+    # in the wine's own name; either way it is the same bottle's year.
+    single["year"] = (
+        single["variant"]
+        .str.extract(r"\b((?:19|20)\d{2})\b", expand=False)
+        .fillna(
+            single["title"].astype(str).str.extract(
+                r"\b((?:19|20)\d{2})\b", expand=False
+            )
+        )
+        .fillna(0)
+        .astype(int)
+    )
+    single["price"] = pd.to_numeric(single["price"], errors="coerce")
+    single = single[single["price"] > 0]
+    # Two live price rows for one variant is a reprice mid-flight; the
+    # cheapest is what the shopper pays today. Deduped per variant, because
+    # a second 750 ml variant under the same handle is another vintage, not
+    # a second price for the same bottle.
+    single = (
+        single.sort_values("price")
+        .drop_duplicates(["handle", "variant"])
+        .reset_index(drop=True)
+    )
+    return single[["handle", "title", "year", "price"]]
+
+
 def fetch_offer_handles(
     config: DbConfig, offers: list[str]
 ) -> dict[str, tuple[str, ...]]:
@@ -624,6 +725,7 @@ __all__ = [
     "MedusaConfigError",
     "OrderBook",
     "PAID_PAYMENT_STATUSES",
+    "fetch_catalog",
     "fetch_offer_handles",
     "fetch_offer_sales",
     "fetch_stores",

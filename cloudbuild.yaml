@@ -73,6 +73,10 @@ steps:
       - default
       - --vpc-egress
       - private-ranges-only
+      # A Vivino shop read holds one websocket request open for up to ten
+      # minutes; the platform default of 300s would drop it halfway through.
+      - --timeout
+      - "1800"
       - --quiet
 
 images:

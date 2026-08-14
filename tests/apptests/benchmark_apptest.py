@@ -144,9 +144,33 @@ else:
 
 dashboard._ads_configured = lambda: MODE not in ("noads", "adsbadconfig")
 
+if MODE == "vivino":
+    # The merchant is one with a Vivino shop on record, and the comparison
+    # itself is canned: the tab's job here is the gate, the verdicts and the
+    # table, not Vivino's network manners.
+    LISTED = {
+        "a": ("Yiannis Wine Shop",),
+        "b": ("Yiannis Wine Shop",),
+        "c": ("Yiannis Wine Shop",),
+        "d": ("Yiannis Wine Shop",),
+    }
+    import vivino_client
+
+    _theirs = pd.DataFrame(
+        [{"wine": "Atalon Cabernet Sauvignon", "year": 2019,
+          "ours": 84.99, "theirs": 44.99, "gap": (44.99 - 84.99) / 84.99}]
+    )
+    dashboard._vivino_comparison_cached = (
+        lambda source, merchant, slug: vivino_client.Comparison(
+            rows=_theirs, listed=400, complete=False, unmatched_ours=3,
+            ours_counted=4
+        )
+    )
+
 if MODE in (
     "sold",
     "merchant",
+    "vivino",
     "nomatch",
     "noads",
     "adsquiet",
@@ -538,6 +562,44 @@ assert theirs == ["Download a page for Yiannis"], [
     b.label for b in mine.download_button
 ]
 print("the page to send is named for the merchant it is about: ok")
+
+# The Vivino tab: unfetched until asked, honest about a merchant without a
+# shop there, and led by the wines they price cheaper on Vivino.
+picked_body = texts(mine)
+assert "No Vivino shop is on record for Yiannis" in picked_body, picked_body[-900:]
+whole_body = texts(sold_run)
+assert "Pick a merchant above" in whole_body, whole_body[-900:]
+print("the Vivino tab asks for one merchant and admits an unknown shop: ok")
+
+vivino_run = run("vivino")
+vivino_mine = vivino_run.selectbox[0].select("Yiannis Wine Shop").run()
+assert not vivino_mine.exception, [e.value for e in vivino_mine.exception]
+# Nothing is read from Vivino until the reader asks: a minutes-long pull must
+# not start because a merchant was picked for a different tab.
+gate = [b for b in vivino_mine.button if b.key == "vivino_read"]
+assert gate, [b.key for b in vivino_mine.button]
+assert "Vivino" not in " ".join(
+    " ".join(map(str, f.value.columns)) for f in vivino_mine.dataframe
+)
+read_now = gate[0].click().run()
+assert not read_now.exception, [e.value for e in read_now.exception]
+vivino_body = texts(read_now)
+assert "cheaper on Vivino" in vivino_body, vivino_body[-1200:]
+assert "Atalon Cabernet Sauvignon" in vivino_body, vivino_body[-1200:]
+# A feed that stopped early is a caveat on the page, not a silent shortfall.
+assert "stopped before" in vivino_body, vivino_body[-1200:]
+vivino_tables = [
+    f.value for f in read_now.dataframe if "Price on Vivino" in f.value.columns
+]
+assert vivino_tables, [list(f.value.columns) for f in read_now.dataframe]
+assert "$44.99" in set(vivino_tables[0]["Price on Vivino"]), (
+    vivino_tables[0].to_string()
+)
+downloads = [b.label for b in read_now.download_button if "Vivino" in b.label]
+assert downloads == ["Download Yiannis Wine Shop's Vivino comparison (CSV)"], (
+    [b.label for b in read_now.download_button]
+)
+print("the Vivino comparison reads on request and shows both prices: ok")
 
 # An order book that opened and matched nothing is not a shop that sold nothing.
 nothing = texts(run("nomatch"))
