@@ -439,22 +439,32 @@ def test_the_commission_line_leads_the_verdicts_and_names_the_shortfall():
         ac.Sales(orders=9, revenue=1226.0, prev_revenue=613.0),
         "USD",
     )
-    assert "$0.84 of commission back for every $1 of ad spend" in lines[0]
+    # A ceiling, not a return: the 1,226 is every sale in the window, whatever
+    # brought it, so the sentence may not say the ads earned it.
+    assert "At most $0.84 of commission for every $1 of ad spend" in lines[0]
     assert "1,226 of revenue at 12%" in lines[0]
-    assert "short by $0.16 on every $1" in lines[0]
+    assert "$0.16 short of it even at its most flattering" in lines[0]
+    # Google's own attributed sales are the floor under that ceiling: 900 of
+    # conversion value at 12% against 176 spent.
+    assert "On the sales Google itself claims, $0.61 per $1" in lines[1]
+    assert "$900 of conversion value at 12%" in lines[1]
     # Half the revenue for the same spend last window: the trend must say so.
-    assert "That return is up" in lines[1]
-    assert "$0.42 per $1" in lines[1]
+    assert "That ceiling is up" in lines[2]
+    assert "$0.42 per $1" in lines[2]
 
 
-def test_a_return_at_break_even_is_not_reported_as_a_shortfall():
+def test_a_ceiling_above_break_even_is_still_only_a_ceiling():
+    # The old wording said "the ads pay for themselves" here, which reads as a
+    # return the ads earned when the numerator is the whole shop's takings.
     frame = stats([(1, YESTERDAY, 100.0, 500, 4.0, 900.0)])
     spend = ac.window(frame, 7, now=TODAY)
     said = " ".join(
         ac.verdicts(spend, two_campaigns(), ac.Sales(orders=9, revenue=10000.0), "USD")
     )
-    assert "pay for themselves" in said
-    assert "short by" not in said
+    assert "an ad pays for itself at 1.00" in said
+    assert "above it at its most flattering" in said
+    assert "the ads pay for themselves." not in said
+    assert "short of it" not in said
 
 
 def test_the_commission_rate_is_read_from_the_environment_in_any_of_three_forms(
@@ -489,11 +499,14 @@ def test_commission_actually_charged_beats_a_rate_that_fits_no_merchant():
         "USD",
         commission=charged,
     )
-    assert "$0.84 of commission back for every $1 of ad spend" in lines[0]
+    assert "At most $0.84 of commission for every $1 of ad spend" in lines[0]
     assert "$147 of commission actually charged" in lines[0]
     # The assumed rate is not quoted once the real one has been counted.
     assert "12%" not in lines[0]
-    assert "That return is up" in lines[1]
+    # And the rate the floor is worked out at is the one Stripe really kept -
+    # 147 over 1,226 is 12.0%, so 900 of conversion value gives 0.61.
+    assert "On the sales Google itself claims, $0.61 per $1" in lines[1]
+    assert "That ceiling is up" in lines[2]
 
 
 def test_commission_charged_is_read_even_where_the_crm_has_no_revenue():
@@ -508,8 +521,8 @@ def test_commission_charged_is_read_even_where_the_crm_has_no_revenue():
         "USD",
         commission=ac.Commission(now=120.0, before=0.0, measured=True),
     )
-    assert "$1.20 of commission back for every $1 of ad spend" in lines[0]
-    assert "pay for themselves" in lines[0]
+    assert "At most $1.20 of commission for every $1 of ad spend" in lines[0]
+    assert "$0.20 above it at its most flattering" in lines[0]
 
 
 def test_a_commission_return_divides_only_when_there_was_spend():
@@ -629,3 +642,38 @@ def test_a_customer_id_cannot_smuggle_a_table_name_into_the_product_read():
     config = ac.AdsConfig("w266-project-329918", "google_ads", None, None)
     with pytest.raises(ac.AdsConfigError):
         ac.product_stats(client, config, "8876864797` UNION ALL SELECT", 30, now=TODAY)
+
+
+def test_the_attributed_floor_counts_only_what_google_claims():
+    # 2,770 of conversion value at the 8.4% Stripe really kept, against 3,832 of
+    # spend: six cents, where the whole shop's takings said $1.39.
+    assert ac.attributed_return(2769.53, 3831.79, 0.084) == pytest.approx(0.06)
+    assert ac.attributed_return(2769.53, 0.0, 0.084) == 0.0
+
+
+def test_a_google_basket_a_fraction_of_the_shop_s_own_blames_the_tag():
+    # Live figures: Google was told 115 purchases were worth 2,770 while the shop
+    # took 178 orders worth 42,505 - 24 a sale against 239. Attribution drops
+    # whole sales; it does not shrink the ones it keeps, so this is the tag.
+    frame = stats([(1, YESTERDAY, 3831.79, 18526, 115.0, 2769.53)])
+    spend = ac.window(frame, 7, now=TODAY)
+    said = " ".join(
+        ac.verdicts(
+            spend,
+            two_campaigns(),
+            ac.Sales(orders=178, revenue=42504.86),
+            "USD",
+        )
+    )
+    assert "Google is told each sale is worth $24" in said
+    assert "shop's own basket averages $239" in said
+    assert "conversion value the site sends is wrong" in said
+
+
+def test_a_google_basket_in_step_with_the_shop_s_own_says_nothing():
+    frame = stats([(1, YESTERDAY, 100.0, 500, 4.0, 900.0)])
+    spend = ac.window(frame, 7, now=TODAY)
+    said = " ".join(
+        ac.verdicts(spend, two_campaigns(), ac.Sales(orders=4, revenue=1000.0), "USD")
+    )
+    assert "the site sends is wrong" not in said

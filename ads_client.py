@@ -725,6 +725,23 @@ def earned_return(commission: float, cost: float) -> float:
 # attribution - but a large one means one of the two is not measuring the shop.
 ATTRIBUTION_TOLERANCE = 0.25
 
+# How far below the shop's own average basket Google's average conversion value
+# may sit before the tag on the site is the likelier explanation. Attribution
+# loses whole sales, not most of the money inside each one, so a Google basket at
+# a fraction of the real one is a value the site is sending wrong - and a campaign
+# bidding to maximise value is steering by it.
+_VALUE_TAG_TOLERANCE = 0.5
+
+
+def attributed_return(conversion_value: float, cost: float, rate: float) -> float:
+    """Commission per unit of spend on the sales Google itself claims credit for.
+
+    The floor under the ceiling: the window's whole takings over ad spend counts
+    every sale however it arrived, while this counts only the ones Google's own
+    attribution recorded against a click.
+    """
+    return round(conversion_value * rate / cost, 2) if cost else 0.0
+
 
 def verdicts(
     spend: Spend,
@@ -752,30 +769,51 @@ def verdicts(
     if counted or (sales is not None and sales.revenue):
         # First, because it is the only line here that is income rather than
         # turnover: the revenue belongs to the merchants and this is our share.
+        # Put as a ceiling and never as a return the ads earned. Both the
+        # commission Stripe charged and the CRM's takings cover every sale in the
+        # window, ad or no ad, so either over ad spend answers "what did the shop
+        # take per ad dollar" rather than "what did the ads bring back". The
+        # attributed floor is the line below it.
         if counted:
             now = earned_return(commission.now, spend.cost)
             before = earned_return(commission.before, spend.prev_cost)
             basis = f"{money(commission.now)} of commission actually charged"
+            # The share the marketplace really kept, rather than the assumed one:
+            # merchants sit on different agreements, so the blended rate is
+            # whatever Stripe's fees came to over the sales it charged them on.
+            if sales is not None and sales.revenue:
+                keep = commission.now / sales.revenue
         else:
             now = commission_return(sales.revenue, spend.cost, keep)
             before = commission_return(sales.prev_revenue, spend.prev_cost, keep)
             basis = f"{money(sales.revenue)} of revenue at {keep:.0%}"
         lines.append(
-            f"**{money(now)} of commission back for every {unit} of ad "
-            f"spend** - {basis} "
-            f"against {money(spend.cost)} spent. Break even is "
-            f"{BREAK_EVEN_RETURN:.2f}, so the ads "
+            f"**At most {money(now)} of commission for every {unit} of ad "
+            f"spend** - {basis} against {money(spend.cost)} spent. Every sale in "
+            "the window counts here, including the ones the ads had nothing to "
+            f"do with, so read it as a ceiling: an ad pays for itself at "
+            f"{BREAK_EVEN_RETURN:.2f}, and this is "
             + (
-                "pay for themselves."
+                f"{money(now - BREAK_EVEN_RETURN)} above it at its most "
+                "flattering."
                 if now >= BREAK_EVEN_RETURN
-                else f"are short by {money(BREAK_EVEN_RETURN - now)} on every "
-                f"{unit} spent, before anybody's time, packaging or card fees."
+                else f"{money(BREAK_EVEN_RETURN - now)} short of it even at its "
+                "most flattering."
             )
         )
+        if spend.conversion_value:
+            floor = attributed_return(spend.conversion_value, spend.cost, keep)
+            lines.append(
+                f"**On the sales Google itself claims, {money(floor)} per "
+                f"{unit}** - {money(spend.conversion_value)} of conversion value "
+                f"at {keep:.0%} against the same {money(spend.cost)}. That is "
+                "the floor and the line above is the ceiling; the truth is "
+                "between the two."
+            )
         if before:
             word = "up" if now > before else "down" if now < before else "flat"
             lines.append(
-                f"**That return is {word}** on the previous {spend.days} days, "
+                f"**That ceiling is {word}** on the previous {spend.days} days, "
                 f"which returned {money(before)} per {unit}."
             )
 
@@ -812,6 +850,29 @@ def verdicts(
             "all in these days**, which is either a very bad window or a break "
             "in the order feed."
         )
+
+    if (
+        sales is not None
+        and sales.orders
+        and sales.revenue
+        and spend.conversions
+        and spend.conversion_value
+    ):
+        # Two baskets for the same shop: a purchase as Google was told about it,
+        # and a purchase as the order book records it. Only the site's own tag
+        # decides the first, so a fraction of the second is a tag sending the
+        # wrong figure - and every value-based bid is set on it.
+        theirs = spend.conversion_value / spend.conversions
+        ours = sales.revenue / sales.orders
+        if theirs < ours * _VALUE_TAG_TOLERANCE:
+            lines.append(
+                f"**Google is told each sale is worth {money(theirs)} where the "
+                f"shop's own basket averages {money(ours)}** - the conversion "
+                "value the site sends is wrong, so campaigns bidding to maximise "
+                "value are steering by a figure a fraction of the real one. Worth "
+                "fixing before any budget decision, because it also makes the "
+                "attributed floor above look worse than it is."
+            )
 
     if sales is not None and sales.orders and spend.conversions:
         gap = abs(spend.conversions - sales.orders) / sales.orders
