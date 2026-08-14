@@ -456,6 +456,20 @@ def test_a_failure_through_the_proxy_never_names_its_credential():
     assert "10.0.0.5" in str(caught.value)
 
 
+def test_a_password_holding_a_slash_is_scrubbed_all_the_same(monkeypatch):
+    monkeypatch.setenv("VIVINO_PROXY", "http://user:se/cret@10.0.0.5:8899")
+
+    class RefusingSession(FakeSession):
+        def get(self, url, **kwargs):
+            raise requests.ConnectionError(
+                "Cannot connect to proxy http://user:se/cret@10.0.0.5:8899"
+            )
+
+    with pytest.raises(vv.VivinoError) as caught:
+        vv.fetch_shop("unknown-shop", RefusingSession({}))
+    assert "cret" not in str(caught.value)
+
+
 def test_without_a_proxy_vivino_is_reached_directly(monkeypatch):
     monkeypatch.delenv("VIVINO_PROXY", raising=False)
     assert vv._session().proxies == {}

@@ -160,7 +160,13 @@ _URL_CREDENTIAL = re.compile(r"//[^/@\s]*@")
 
 def _worded(exc: Exception) -> str:
     """The failure in words, with any URL's embedded credential kept out."""
-    return _URL_CREDENTIAL.sub("//", str(exc))
+    text = str(exc)
+    proxy = os.environ.get(_PROXY_VAR, "").strip()
+    if proxy:
+        # The configured value is scrubbed literally too, so a password no
+        # pattern anticipates - one holding a slash, say - still never shows.
+        text = text.replace(proxy, "the proxy")
+    return _URL_CREDENTIAL.sub("//", text)
 
 
 def _session() -> requests.Session:
