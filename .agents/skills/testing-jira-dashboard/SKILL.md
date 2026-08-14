@@ -393,6 +393,10 @@ click) and confirm every value is one of Yes/No/Maybe. The board is wide — zoo
 
 ## Google Ads per-wine tabs (Where the ad money went / Most clicked / Try a sale price)
 
+These three tabs arrive with PR #50; until it is merged this section describes a branch rather
+than `develop`, where only the campaign-level "Ads Spend & Return" section exists. Everything
+below was verified live on that branch at `d579d2d`.
+
 - The Ads project resolves from the BigQuery key's own `project_id`; only `GOOGLE_ADS_BQ_DATASET`
   usually needs setting. `__TABLES__.row_count` reports 0 for `ads_ShoppingProductStats_*`, so probe
   the table with a real `COUNT(*)`/`MIN(segments_date)` rather than trusting metadata.
