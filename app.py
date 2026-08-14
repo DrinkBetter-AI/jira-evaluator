@@ -6155,8 +6155,11 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         floor = ads_client.attributed_return(
             spend.conversion_value,
             spend.cost,
-            commission.now / sales.revenue
-            if commission is not None and sales and sales.revenue
+            # Only where both sides are the same money: takings in one currency
+            # over commission in another is not a share of anything, and every
+            # other revenue-derived figure here is withheld on the same test.
+            ads_client.kept_share(commission.now, sales.revenue, keep)
+            if commission is not None and sales and comparable
             else keep,
         )
         attributed = (

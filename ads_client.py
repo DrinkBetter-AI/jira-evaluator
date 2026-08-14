@@ -733,6 +733,20 @@ ATTRIBUTION_TOLERANCE = 0.25
 _VALUE_TAG_TOLERANCE = 0.5
 
 
+def kept_share(commission: float, revenue: float, fallback: float) -> float:
+    """The share of takings the marketplace really kept, or the configured rate.
+
+    Stripe's ledger and the order book are separate feeds read over the same
+    days, so a partly loaded order book or a window heavy with refunds can put
+    the quotient outside anything a commission agreement could be. Where it is,
+    the configured rate is the honest answer rather than a derived one.
+    """
+    if not revenue:
+        return fallback
+    share = commission / revenue
+    return share if 0 < share <= 1 else fallback
+
+
 def attributed_return(conversion_value: float, cost: float, rate: float) -> float:
     """Commission per unit of spend on the sales Google itself claims credit for.
 
@@ -782,7 +796,7 @@ def verdicts(
             # merchants sit on different agreements, so the blended rate is
             # whatever Stripe's fees came to over the sales it charged them on.
             if sales is not None and sales.revenue:
-                keep = commission.now / sales.revenue
+                keep = kept_share(commission.now, sales.revenue, keep)
         else:
             now = commission_return(sales.revenue, spend.cost, keep)
             before = commission_return(sales.prev_revenue, spend.prev_cost, keep)
@@ -857,6 +871,12 @@ def verdicts(
         and sales.revenue
         and spend.conversions
         and spend.conversion_value
+        # Only where Google counts no more conversions than the shop has orders.
+        # Its conversions column adds up every action the account counts, so an
+        # account also counting sign-ups or add-to-carts at no value would show a
+        # small average per conversion with a perfectly good purchase tag; that
+        # account claims more conversions than the shop saw orders.
+        and spend.conversions <= sales.orders
     ):
         # Two baskets for the same shop: a purchase as Google was told about it,
         # and a purchase as the order book records it. Only the site's own tag

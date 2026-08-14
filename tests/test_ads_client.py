@@ -677,3 +677,28 @@ def test_a_google_basket_in_step_with_the_shop_s_own_says_nothing():
         ac.verdicts(spend, two_campaigns(), ac.Sales(orders=4, revenue=1000.0), "USD")
     )
     assert "the site sends is wrong" not in said
+
+
+def test_an_account_counting_more_than_purchases_is_not_blamed_on_the_tag():
+    # Google counting sign-ups or add-to-carts at no value also shows a small
+    # average per conversion, and gives itself away by claiming more conversions
+    # than the shop saw orders. That is a conversion action to sort out in the
+    # account, not a value the site is sending wrong.
+    frame = stats([(1, YESTERDAY, 3831.79, 18526, 400.0, 2769.53)])
+    spend = ac.window(frame, 7, now=TODAY)
+    said = " ".join(
+        ac.verdicts(
+            spend, two_campaigns(), ac.Sales(orders=178, revenue=42504.86), "USD"
+        )
+    )
+    assert "the site sends is wrong" not in said
+
+
+def test_a_commission_share_no_agreement_could_be_falls_back_to_the_rate():
+    # Stripe's ledger and the order book are separate feeds: a part-loaded order
+    # book can leave commission larger than the revenue it was charged on, and a
+    # share above 1 is not a share. The configured rate is the honest answer.
+    assert ac.kept_share(3588.94, 42504.86, 0.12) == pytest.approx(0.0844, abs=1e-4)
+    assert ac.kept_share(500.0, 100.0, 0.12) == 0.12
+    assert ac.kept_share(-5.0, 100.0, 0.12) == 0.12
+    assert ac.kept_share(500.0, 0.0, 0.12) == 0.12
