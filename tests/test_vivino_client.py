@@ -434,6 +434,20 @@ def test_a_page_without_a_merchant_id_is_a_failed_read_not_an_empty_shop():
         vv.fetch_shop("a-shop", FakeSession({}, merchant=None))
 
 
+def test_a_deployment_with_a_proxy_sends_vivino_traffic_through_it(monkeypatch):
+    monkeypatch.setenv("VIVINO_PROXY", "http://user:pw@10.0.0.5:8899")
+    session = vv._session()
+    assert session.proxies == {
+        "http": "http://user:pw@10.0.0.5:8899",
+        "https": "http://user:pw@10.0.0.5:8899",
+    }
+
+
+def test_without_a_proxy_vivino_is_reached_directly(monkeypatch):
+    monkeypatch.delenv("VIVINO_PROXY", raising=False)
+    assert vv._session().proxies == {}
+
+
 def test_a_shop_already_known_is_not_asked_for_its_page_again():
     # Vivino's shop pages refuse cloud addresses (403) more readily than the
     # listings API, so a known merchant id must not depend on the page at all.
