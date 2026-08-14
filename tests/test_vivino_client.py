@@ -229,6 +229,29 @@ def test_the_read_walks_pages_and_then_the_price_axis():
     assert sorted(read.listings["name"]) == ["Wine A 2020", "Wine B 2020"]
 
 
+def test_a_spent_time_budget_keeps_what_was_read_and_admits_the_rest(monkeypatch):
+    # A slow feed must end the read with the listings in hand, marked partial,
+    # rather than run past the server's request limit and lose everything.
+    session = FakeSession(
+        {
+            (0.0, 1): {
+                "records_matched": 2,
+                "matches": [match("Wine A 2020", 2020, 50.0)],
+            },
+            (50.0, 1): {
+                "records_matched": 2,
+                "matches": [match("Wine B 2020", 2020, 75.0)],
+            },
+        }
+    )
+    ticks = iter([0.0, 1.0, 1.0, 10.0])
+    monkeypatch.setattr(vv.time, "monotonic", lambda: next(ticks, 10.0))
+    monkeypatch.setattr(vv, "_TIME_BUDGET_SECONDS", 5)
+    read = vv.fetch_shop("a-shop", session)
+    assert list(read.listings["name"]) == ["Wine A 2020"]
+    assert not read.complete
+
+
 def test_a_band_of_magnums_does_not_end_the_read_or_fake_completeness():
     # A walk can serve nothing comparable - magnums, halves - while raising
     # the price floor; the read must climb past them to the standard bottles

@@ -46,6 +46,10 @@ _TIMEOUT = 30
 _PAGE_SIZE = 24
 _MAX_REQUESTS = 900
 _PAUSE_SECONDS = 0.15
+# The wall-clock ceiling, held under the deployment's 1800s request limit: a
+# slow feed ends the read with what it has rather than outliving the server's
+# patience and losing everything to a dropped connection.
+_TIME_BUDGET_SECONDS = 1500
 _PRICE_CEILING = 100000
 # Within this fraction of each other, the two prices are the same price: both
 # shops round differently and Vivino's feed lags a reprice by a day.
@@ -188,11 +192,18 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
     listed = 0
     price_from = 0.0
     requests_made = 0
+    started = time.monotonic()
+
+    def in_budget() -> bool:
+        return (
+            requests_made < _MAX_REQUESTS
+            and time.monotonic() - started < _TIME_BUDGET_SECONDS
+        )
     # Complete only when a walk serves nothing at or above the last price
     # seen, or nothing that was not already seen; a failure or an exhausted
     # budget is an admission, not a completion.
     complete = False
-    while requests_made < _MAX_REQUESTS:
+    while in_budget():
         page_number = 1
         new_rows = 0
         drained = False
@@ -201,7 +212,7 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
         # Held for the whole walk: raising the floor between pages would
         # shift the result set under the page number and skip listings.
         walk_from = price_from
-        while requests_made < _MAX_REQUESTS:
+        while in_budget():
             try:
                 found = _page(http, merchant, walk_from, page_number)
             except requests.RequestException as exc:
