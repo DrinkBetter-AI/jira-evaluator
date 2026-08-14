@@ -124,7 +124,7 @@ gcloud run deploy jira-dashboard \
   --no-allow-unauthenticated \
   --session-affinity --max-instances 1 \
   --network default --subnet default --vpc-egress private-ranges-only \
-  --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>" \
+  --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>,VIVINO_PROXY=<proxy-url>" \
   --set-secrets "JIRA_API_TOKEN=jira-api-token:latest,POSTGRES_PASSWORD=orders-db-password:latest"
 
 # Let the whole Workspace domain in (requires IAP or domain-restricted sharing).
@@ -148,7 +148,7 @@ gcloud run deploy jira-dashboard \
   --allow-unauthenticated \
   --session-affinity --max-instances 1 \
   --network default --subnet default --vpc-egress private-ranges-only \
-  --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>,DASHBOARD_PASSWORD=<shared-password>" \
+  --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>,DASHBOARD_PASSWORD=<shared-password>,VIVINO_PROXY=<proxy-url>" \
   --set-secrets "JIRA_API_TOKEN=jira-api-token:latest,POSTGRES_PASSWORD=orders-db-password:latest,DASHBOARD_COOKIE_KEY=dashboard-cookie-key:latest"
 ```
 
