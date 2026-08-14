@@ -187,6 +187,7 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
     # that goes nowhere twice is an admission, not a completion.
     complete = False
     stalls = 0
+    stepped = False
     while requests_made < _MAX_REQUESTS:
         page_number = 1
         new_rows = 0
@@ -227,7 +228,9 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
         if failed:
             break
         if top_reached:
-            complete = True
+            # A step past a stalled price may have skipped listings at that
+            # exact price, so a stepped read never claims to be the whole shop.
+            complete = not stepped
             break
         if new_rows:
             stalls = 0
@@ -238,6 +241,7 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
         stalls += 1
         if stalls > 1:
             break
+        stepped = True
         price_from += 0.01
 
     frame = pd.DataFrame(

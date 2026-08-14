@@ -4483,10 +4483,19 @@ def _vivino_comparison_cached(
             "The order database configuration changed while it was being read."
         )
     prefixes = orders_client.fetch_stores(config)
-    prefix = next(
-        (pref for pref, name in prefixes.items() if name == merchant), ""
+    # Live store prefixes are merged in after configured aliases, so the last
+    # match is the current one; no match at all is a naming problem to report,
+    # not a merchant with an empty cellar.
+    matching = [pref for pref, name in prefixes.items() if name == merchant]
+    if not matching:
+        raise orders_client.MedusaConfigError(
+            f"No store in the order database is named {merchant}, so their "
+            "own catalogue prices cannot be read to compare."
+        )
+    prefix = matching[-1]
+    ours = orders_client.fetch_catalog(
+        config, prefix, others=tuple(p for p in prefixes if p != prefix)
     )
-    ours = orders_client.fetch_catalog(config, prefix)
     shop = vivino_client.fetch_shop(slug)
     return vivino_client.compare(ours, shop)
 
@@ -4534,13 +4543,16 @@ def _render_vivino(chosen: str) -> None:
                 "bottles only. Kept for a day once read."
             )
             return
-        started.add(slug)
     try:
         with st.spinner(f"Reading {chosen}'s Vivino shop, page by page..."):
             result = _vivino_comparison_cached(config.label, chosen, slug)
     except (vivino_client.VivinoError, orders_client.MedusaConfigError) as exc:
+        # Not recorded as read: a failure would otherwise restart the
+        # minutes-long pull on every rerun instead of waiting for the button.
+        started.discard(slug)
         st.warning(str(exc)[:300])
         return
+    started.add(slug)
 
     for line in vivino_client.verdicts(chosen, result):
         st.markdown(line)
