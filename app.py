@@ -6138,7 +6138,11 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         f"{spend.conversions:,.0f}",
     )
 
-    if earned:
+    # The headline follows the sentences in the expander: a ceiling that was
+    # read and came to zero is still a ceiling worth printing - it says the
+    # window's sales earned nothing, not that nothing could be measured.
+    has_ceiling = commission is not None or bool(sales and comparable and sales.revenue)
+    if has_ceiling:
         goal = ads_client.BREAK_EVEN_RETURN
         gap = goal - earned
         standing = (
@@ -6190,17 +6194,11 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
             "Connect a Stripe key with Application Fees read access and this "
             "becomes what was actually charged, per merchant agreement."
         )
-    elif (
-        commission is None
-        and not (sales and comparable and sales.revenue)
-        and spend.cost
-        and spend.conversion_value
-    ):
+    elif spend.cost and spend.conversion_value:
         # No ceiling could be computed - no Stripe ledger, and either no
         # comparable takings or none captured in the window - but the
         # attributed return needs only the ad account's own figures, which are
-        # in its own currency by definition. A measured commission that came
-        # to zero is a different story and keeps the block above.
+        # in its own currency by definition.
         floor = ads_client.attributed_return(spend.conversion_value, spend.cost)
         headline = (
             f"### On the sales Google itself claims, {_money(floor, money)} "
