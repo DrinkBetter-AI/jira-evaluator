@@ -37,6 +37,7 @@ _HEADERS = {
         "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
     ),
     "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
 }
 _TIMEOUT = 30
 # A page holds 24 listings, and the feed stops turning pages long before a
@@ -136,9 +137,20 @@ def year_of(name: str) -> int:
     return int(match.group(0)) if found and match else 0
 
 
-def merchant_id(slug: str, session: requests.Session | None = None) -> int | None:
-    """The numeric id behind a Vivino shop page, or None for a page without one."""
-    http = session or requests.Session()
+# The shop pages sit behind stricter bot protection than the explore API, so
+# a page fetch from a cloud address can be refused (403) while the listings
+# themselves still read fine. The page is still asked first - it names the
+# shop's current id - and this table answers only when the page cannot be
+# read. Ids come off the live pages; when a shop joins VIVINO_SHOPS, read its
+# page in a browser and record the merchant_id found in the page's data.
+_MERCHANT_IDS = {
+    "yiannis-wine-shop": 26035,
+    "capital-fine-wine": 36024,
+}
+
+
+def _scraped_id(slug: str, http: requests.Session) -> int | None:
+    """The merchant id read off the shop page itself, or None if it has none."""
     try:
         page = http.get(
             f"{_SITE}/en/merchants/{slug}", headers=_HEADERS, timeout=_TIMEOUT
@@ -148,6 +160,23 @@ def merchant_id(slug: str, session: requests.Session | None = None) -> int | Non
         raise VivinoError(f"Vivino's shop page for {slug} could not be read: {exc}")
     match = re.search(r"merchant_id[^0-9]{0,10}(\d+)", page.text)
     return int(match.group(1)) if match else None
+
+
+def merchant_id(slug: str, session: requests.Session | None = None) -> int | None:
+    """The numeric id behind a Vivino shop page, or None for a page without one.
+
+    The page is the authority - it always names the shop's current id - so it
+    is asked first; the table only answers when the page cannot be read, so a
+    bot wall does not stop a shop whose id is already known.
+    """
+    http = session or requests.Session()
+    try:
+        scraped = _scraped_id(slug, http)
+    except VivinoError:
+        if slug not in _MERCHANT_IDS:
+            raise
+        scraped = None
+    return scraped or _MERCHANT_IDS.get(slug)
 
 
 def _page(
@@ -189,7 +218,10 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
             f"Vivino's page for {slug} no longer carries a merchant id, so "
             "their listings could not be read."
         )
+    return _read_shop(slug, merchant, http)
 
+
+def _read_shop(slug: str, merchant: int, http: requests.Session) -> Shop:
     rows: dict[int, tuple[str, int, float]] = {}
     packed: set[int] = set()
     listed = 0

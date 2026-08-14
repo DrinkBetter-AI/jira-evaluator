@@ -434,6 +434,46 @@ def test_a_page_without_a_merchant_id_is_a_failed_read_not_an_empty_shop():
         vv.fetch_shop("a-shop", FakeSession({}, merchant=None))
 
 
+def test_a_shop_already_known_is_not_asked_for_its_page_again():
+    # Vivino's shop pages refuse cloud addresses (403) more readily than the
+    # listings API, so a known merchant id must not depend on the page at all.
+    class PageRefusingSession(FakeSession):
+        def get(self, url, **kwargs):
+            if "merchants/" in url:
+                raise requests.HTTPError("403 Client Error: Forbidden")
+            return super().get(url, **kwargs)
+
+    session = PageRefusingSession(
+        {
+            (0.0, 1): {"records_matched": 1, "matches": [match("Wine A 2020", 2020, 9.0)]},
+            (9.0, 1): {"records_matched": 1, "matches": []},
+        }
+    )
+    read = vv.fetch_shop("yiannis-wine-shop", session)
+    assert list(read.listings["name"]) == ["Wine A 2020"]
+
+
+def test_a_renumbered_merchant_is_followed_when_the_page_can_be_read():
+    # The page names the shop's current id and wins over the table, so a
+    # renumbering never silently reads the wrong merchant's prices.
+    class RenumberedSession(FakeSession):
+        def get(self, url, **kwargs):
+            if "merchants/" in url:
+                return FakeReply("merchant_id&quot;:999")
+            if kwargs["params"]["merchant_id"] != 999:
+                return FakeReply({"explore_vintage": {"records_matched": 0, "matches": []}})
+            return super().get(url, **kwargs)
+
+    session = RenumberedSession(
+        {
+            (0.0, 1): {"records_matched": 1, "matches": [match("Wine A 2020", 2020, 9.0)]},
+            (9.0, 1): {"records_matched": 1, "matches": []},
+        }
+    )
+    read = vv.fetch_shop("yiannis-wine-shop", session)
+    assert list(read.listings["name"]) == ["Wine A 2020"]
+
+
 def test_a_feed_that_refuses_outright_raises_rather_than_reporting_nothing():
     class RefusingSession(FakeSession):
         def get(self, url, **kwargs):
