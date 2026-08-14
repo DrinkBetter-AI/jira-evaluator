@@ -6141,8 +6141,10 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
     # The headline follows the sentences in the expander: a ceiling that was
     # read and came to zero is still a ceiling worth printing - it says the
     # window's sales earned nothing, not that nothing could be measured.
+    # And only where money went out: a quiet window can still hold takings and
+    # a measured ledger, but a return on nothing spent is not a figure.
     has_ceiling = commission is not None or bool(sales and comparable and sales.revenue)
-    if has_ceiling:
+    if has_ceiling and spend.cost:
         goal = ads_client.BREAK_EVEN_RETURN
         gap = goal - earned
         standing = (
