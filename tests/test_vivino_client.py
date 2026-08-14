@@ -287,6 +287,18 @@ def test_no_match_names_the_pack_prices_rather_than_blaming_the_overlap():
     assert "should overlap" not in line
 
 
+def test_a_partial_no_match_read_admits_the_shop_was_not_fully_read():
+    # A read that failed after seeing only pack prices must not present the
+    # missing overlap as a finding about the whole shop.
+    ours = pd.DataFrame({"title": ["Wine A 2020"], "year": [2020], "price": [20.0]})
+    result = vv.compare(
+        ours,
+        vv.Shop(slug="a-shop", listings=pd.DataFrame(), listed=40, complete=False, packs=12),
+    )
+    lines = vv.verdicts("A Shop", result)
+    assert any("stopped before the whole shop was read" in line for line in lines)
+
+
 def test_a_blank_year_field_falls_back_to_the_vintage_in_the_name():
     # Some listings leave the vintage field empty though the name carries the
     # year; the bottle must still match the shop's own by name and vintage.

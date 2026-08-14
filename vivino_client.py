@@ -355,6 +355,10 @@ def compare(ours: pd.DataFrame, shop: Shop) -> Comparison:
 
 def verdicts(name: str, result: Comparison) -> list[str]:
     """The comparison in sentences somebody can put to the merchant."""
+    partial = (
+        "Vivino's feed stopped before the whole shop was read, so these "
+        "counts are of the listings that were - more overlap may exist."
+    )
     if not result.listed:
         return [
             f"{name} has a Vivino shop page but no live listings today, so "
@@ -369,18 +373,22 @@ def verdicts(name: str, result: Comparison) -> list[str]:
         ]
     if not result.matched:
         if result.packs:
-            return [
+            lines = [
                 f"{name} lists {result.listed:,} wines on Vivino, but "
                 f"{result.packs:,} of them are priced per bottle of a 3, 6 "
                 "or 12 bottle pack, and none of the rest matched a wine of "
                 "theirs here by name and vintage - so there is no "
                 "single-bottle price of theirs to compare."
             ]
-        return [
-            f"None of {name}'s {result.listed:,} Vivino listings matched a "
-            "wine of theirs here by name and vintage, which is worth a look "
-            "in itself: the same cellar should overlap."
-        ]
+        else:
+            lines = [
+                f"None of {name}'s {result.listed:,} Vivino listings matched "
+                "a wine of theirs here by name and vintage, which is worth a "
+                "look in itself: the same cellar should overlap."
+            ]
+        if not result.complete:
+            lines.append(partial)
+        return lines
     lines = []
     cheaper = result.cheaper_there
     if len(cheaper):
@@ -402,10 +410,7 @@ def verdicts(name: str, result: Comparison) -> list[str]:
         f"the same and {result.dearer_there:,} are more expensive on Vivino."
     )
     if not result.complete:
-        lines.append(
-            "Vivino's feed stopped before the whole shop was read, so these "
-            "counts are of the listings that were - more overlap may exist."
-        )
+        lines.append(partial)
     return lines
 
 
