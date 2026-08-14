@@ -239,6 +239,10 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
                     price_from = max(price_from, float(amount))
                 if not amount or bottle.get("volume_ml") != 750:
                     continue
+                name = str(vintage.get("name") or "").strip()
+                if not name:
+                    continue
+                key = int(vintage.get("id") or 0) or hash((name, amount))
                 # A case price is quoted per bottle but earned by buying the
                 # case; only a price a shopper pays for one bottle compares
                 # with a single-bottle price here.
@@ -246,12 +250,8 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
                     (price.get("bottle_quantity") or 1) > 1
                     or (price.get("minimum_unit_quantity") or 1) > 1
                 ):
-                    packed.add(int(vintage.get("id") or 0) or hash(str(vintage.get("name"))))
+                    packed.add(key)
                     continue
-                name = str(vintage.get("name") or "").strip()
-                if not name:
-                    continue
-                key = int(vintage.get("id") or 0) or hash((name, amount))
                 if key not in rows:
                     # Some listings carry the vintage only in the wine's name,
                     # leaving the year field blank; it is the same bottle.
@@ -294,7 +294,9 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
         listings=frame,
         listed=listed,
         complete=complete,
-        packs=len(packed),
+        # A wine listed both singly and by the case is compared, not left
+        # out, so only vintages with no single-bottle row count as packs.
+        packs=len(packed - rows.keys()),
     )
 
 

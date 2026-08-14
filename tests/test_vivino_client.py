@@ -256,6 +256,24 @@ def test_a_case_price_quoted_per_bottle_is_not_a_single_bottle_price():
     assert read.complete
 
 
+def test_a_wine_sold_both_singly_and_by_the_case_is_compared_not_left_out():
+    session = FakeSession(
+        {
+            (0.0, 1): {
+                "records_matched": 2,
+                "matches": [
+                    match("Wine A 2020", 2020, 9.0, vintage_id=7, quantity=12),
+                    match("Wine A 2020", 2020, 17.0, vintage_id=7),
+                ],
+            },
+            (17.0, 1): {"records_matched": 2, "matches": []},
+        }
+    )
+    read = vv.fetch_shop("a-shop", session)
+    assert list(read.listings["price"]) == [17.0]
+    assert read.packs == 0
+
+
 def test_no_match_names_the_pack_prices_rather_than_blaming_the_overlap():
     # A shop quoted entirely per bottle of a case has nothing comparable, and
     # the verdict must say so instead of claiming the cellars fail to overlap.
