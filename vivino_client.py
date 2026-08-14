@@ -166,7 +166,7 @@ def _worded(exc: Exception) -> str:
 def _session() -> requests.Session:
     """A session that reaches Vivino: direct, or through the deployment's proxy."""
     http = requests.Session()
-    proxy = os.environ.get(_PROXY_VAR)
+    proxy = os.environ.get(_PROXY_VAR, "").strip()
     if proxy:
         http.proxies = {"http": proxy, "https": proxy}
     return http
