@@ -219,7 +219,9 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
             try:
                 found = _page(http, merchant, walk_from, page_number)
             except requests.RequestException as exc:
-                if not rows:
+                # A read that saw pack prices has learned something worth
+                # showing even with no comparable bottle yet in hand.
+                if not rows and not packed:
                     raise VivinoError(f"Vivino refused the {slug} listings: {exc}")
                 failed = True
                 break

@@ -4612,12 +4612,18 @@ def _render_vivino(chosen: str, picker: bool = True) -> None:
         mime="text/csv",
         key="vivino_csv",
     )
+    packs_note = (
+        f"{result.packs:,} of their Vivino wines are priced only per bottle "
+        "of a pack - 3, 6 or 12 bottles bought together - and are left out: "
+        "only what one bottle costs is compared with what one bottle costs "
+        "here. "
+        if result.packs
+        else ""
+    )
     st.caption(
         "Same wine, same vintage, single 0.75l bottles, both prices in USD "
         "before shipping - Vivino's checkout may add shipping differently. "
-        f"{result.packs:,} Vivino listings priced per bottle of a pack - 3, "
-        "6 or 12 bottles bought together - are left out: only what one "
-        "bottle costs is compared with what one bottle costs here. "
+        f"{packs_note}"
         f"Vivino read within the last day; {result.unmatched_ours:,} of the "
         "merchant's wines here found no Vivino listing by name and vintage "
         "and are left out rather than guessed at."
