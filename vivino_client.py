@@ -182,7 +182,7 @@ def _scraped_id(slug: str, http: requests.Session) -> int | None:
     except requests.RequestException as exc:
         raise VivinoError(
             f"Vivino's shop page for {slug} could not be read: {_worded(exc)}"
-        )
+        ) from None
     match = re.search(r"merchant_id[^0-9]{0,10}(\d+)", page.text)
     return int(match.group(1)) if match else None
 
@@ -281,7 +281,7 @@ def _read_shop(slug: str, merchant: int, http: requests.Session) -> Shop:
                 if not rows and not packed:
                     raise VivinoError(
                         f"Vivino refused the {slug} listings: {_worded(exc)}"
-                    )
+                    ) from None
                 failed = True
                 break
             requests_made += 1
