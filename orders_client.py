@@ -407,6 +407,7 @@ join {SCHEMA}.price pr
  and pr.deleted_at is null
  and pr.price_list_id is null
  and coalesce(pr.min_quantity, 1) <= 1
+ and coalesce(pr.rules_count, 0) = 0
 where p.deleted_at is null
   and p.status = 'published'
   and p.handle like %(prefix)s
@@ -633,7 +634,9 @@ def fetch_catalog(
     )
     try:
         with closing(_connect(config)) as connection:
-            frame = _frame(connection, _CATALOG_SQL, {"prefix": f"{wanted}-%"})
+            # LIKE wildcards in a store's prefix are characters, not patterns.
+            literal = wanted.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+            frame = _frame(connection, _CATALOG_SQL, {"prefix": f"{literal}-%"})
     except psycopg2.Error as exc:
         raise MedusaConfigError(
             f"The order database at {config.label} refused the catalogue read: "
