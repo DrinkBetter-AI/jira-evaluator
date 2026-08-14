@@ -391,6 +391,41 @@ click) and confirm every value is one of Yes/No/Maybe. The board is wide — zoo
   (modes `sold`, `merchant`, `nomatch`, `unread`); it must print
   `all price-competitiveness scenarios passed`. Run it **last**, against the final commit.
 
+## Google Ads per-wine tabs (Where the ad money went / Most clicked / Try a sale price)
+
+These three tabs arrived with PR #50, now merged; everything below was verified live on it at
+`d579d2d`.
+
+- The Ads project resolves from the BigQuery key's own `project_id`; only `GOOGLE_ADS_BQ_DATASET`
+  usually needs setting. `__TABLES__.row_count` reports 0 for `ads_ShoppingProductStats_*`, so probe
+  the table with a real `COUNT(*)`/`MIN(segments_date)` rather than trusting metadata.
+- Empty/failed Ads states are **not** one state. Stand up two failing instances and contrast them on
+  one revision: a valid-but-absent dataset (e.g. `GOOGLE_ADS_BQ_DATASET=google_ads_absent`) must give
+  the "report could not be read / the dataset is configured" caption, while a name the Ads client
+  rejects (e.g. `google ads!`) must give the settings caption naming the env vars. Neither may show
+  "$0 spent", a credential/permission hunt, or a red exception box.
+- Plotly tooltip text (`hovertemplate`, `customdata`, `hovertext`) is invisible to AppTest and to the
+  page DOM: it must be hover-tested in pixels. A real defect once rendered
+  `Sold nothing: - across NaN wines` while the tile and the claim sentence beside it were correct.
+- Streamlit reads a pair of `$` on one line as inline LaTeX and eats both symbols. Money in markdown
+  must be escaped (`_unmathed()`/`_said()`); check in pixels on the ads claims, the numbered advice,
+  Burn (OpenAI, per-project caption, Google Cloud, Stripe) and the Ads Spend & Return heading and
+  expander, and grep the downloaded report for a literal `\$`.
+- Verify claim/advice/CSV predicates by recomputing them from the ledger CSV downloaded in the same
+  session, never from the captions: sold/unsold split, spend per split, revenue, the waste list
+  (`gap > 0.25`, `clicks > 0`, `bottles <= 0`), the price bands (cheaper `gap<=-0.02`, about market
+  `gap<=0.02`, up to 25% `gap<=0.25`, else more than 25%) and the best/about multiple.
+- The supplemental feed is deliberately two columns, `id,sale_price` — a Merchant Center supplemental
+  feed overrides every column it carries, so a `price` column would pin the catalogue price. Assert
+  the header exactly, one row per slider position, `sale_price == benchmark`, `gap > 0.25` and
+  `sale_price < price`, and never upload it.
+- Live figures drift between sessions (advertised-wine counts move by ones). Treat the same-session
+  CSV as authoritative and do not fail a run on a stale planned constant.
+- The live account is single-account and USD-billed: multi-account concat and non-USD currency
+  labelling cannot be exercised in the browser and belong to unit/AppTest coverage.
+- The Engineering tab needs `/home/ubuntu/.creds/vinovoss.yml`; without it that tab shows a plain
+  configuration error, which is environmental and not a Business-tab regression.
+
 ## Gotchas
 
 - The Streamlit page has no browser chrome if the window is in fullscreen; press `F11` before using
