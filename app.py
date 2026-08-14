@@ -4505,7 +4505,7 @@ def _vivino_comparison_cached(
     return vivino_client.compare(ours, shop)
 
 
-def _render_vivino(chosen: str) -> None:
+def _render_vivino(chosen: str, picker: bool = True) -> None:
     """What the chosen merchant charges on Vivino against what they charge here.
 
     Single 0.75l bottles only, matched by wine name and vintage - all both
@@ -4524,6 +4524,15 @@ def _render_vivino(chosen: str) -> None:
         )
         return
     if chosen == _EVERY_MERCHANT:
+        if not picker:
+            # No merchant chooser was drawn - the store names could not be
+            # read - so asking the reader to pick one would point at nothing.
+            st.caption(
+                "The merchants' names could not be read from the order "
+                "database just now, so there is nobody to compare with "
+                "their Vivino shop. Refresh once the database is reachable."
+            )
+            return
         st.caption(
             "Pick a merchant above: Vivino prices are one shop's against the "
             "same shop's prices here, not a market average."
@@ -5744,7 +5753,7 @@ def _render_price_benchmark() -> None:
         with feed_tab:
             _render_sale_prices(read, money, named, chosen)
         with vivino_tab:
-            _render_vivino(chosen)
+            _render_vivino(chosen, picker=bool(named))
         with dear_tab:
             st.dataframe(
                 prices.worst.head(_WORST_OFFERS)
@@ -5781,7 +5790,7 @@ def _render_price_benchmark() -> None:
         # above there is nobody to compare, so the tab stays away too.
         (vivino_tab,) = st.tabs(["Their Vivino price"])
         with vivino_tab:
-            _render_vivino(chosen)
+            _render_vivino(chosen, picker=bool(named))
 
     if prices.other_currencies:
         st.caption(
