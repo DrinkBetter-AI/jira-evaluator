@@ -8600,6 +8600,10 @@ def _clear_page_caches(page_title: str) -> None:
     )
     for cached in business if page_title == BUSINESS_PAGE_TITLE else engineering:
         cached.clear()
+    if page_title == BUSINESS_PAGE_TITLE:
+        # With the saved Vivino reads gone, the minutes-long pull must wait
+        # for its button again rather than restart on the next screen draw.
+        st.session_state.pop("vivino_started", None)
     logger.info("Cleared cached reads for the %s page", page_title)
 
 

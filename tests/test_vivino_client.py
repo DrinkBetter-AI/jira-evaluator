@@ -229,6 +229,34 @@ def test_the_read_walks_pages_and_then_the_price_axis():
     assert sorted(read.listings["name"]) == ["Wine A 2020", "Wine B 2020"]
 
 
+def test_the_price_floor_holds_still_while_a_walk_turns_its_pages():
+    # Raising the floor between pages would shift the result set under the
+    # page number and skip listings for good; page 2 must be asked for at the
+    # price the walk started from.
+    session = FakeSession(
+        {
+            (0.0, 1): {
+                "records_matched": 3,
+                "matches": [
+                    match("Wine A 2020", 2020, 10.0),
+                    match("Wine B 2020", 2020, 20.0),
+                ],
+            },
+            (0.0, 2): {
+                "records_matched": 3,
+                "matches": [match("Wine C 2020", 2020, 30.0)],
+            },
+        }
+    )
+    read = vv.fetch_shop("a-shop", session)
+    assert sorted(read.listings["name"]) == [
+        "Wine A 2020",
+        "Wine B 2020",
+        "Wine C 2020",
+    ]
+    assert read.complete
+
+
 def test_a_read_that_stepped_past_a_stalled_price_does_not_claim_the_whole_shop():
     # Every listing at $50 was already read, so the walk stalls and steps past
     # that price - which may skip listings sharing it, so even a read that then

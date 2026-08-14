@@ -193,9 +193,12 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
         new_rows = 0
         top_reached = False
         failed = False
+        # Held for the whole walk: raising the floor between pages would
+        # shift the result set under the page number and skip listings.
+        walk_from = price_from
         while requests_made < _MAX_REQUESTS:
             try:
-                found = _page(http, merchant, price_from, page_number)
+                found = _page(http, merchant, walk_from, page_number)
             except requests.RequestException as exc:
                 if not rows:
                     raise VivinoError(f"Vivino refused the {slug} listings: {exc}")
