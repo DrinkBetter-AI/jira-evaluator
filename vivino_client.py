@@ -155,6 +155,14 @@ _MERCHANT_IDS = {
 }
 
 
+_URL_CREDENTIAL = re.compile(r"//[^/@\s]*@")
+
+
+def _worded(exc: Exception) -> str:
+    """The failure in words, with any URL's embedded credential kept out."""
+    return _URL_CREDENTIAL.sub("//", str(exc))
+
+
 def _session() -> requests.Session:
     """A session that reaches Vivino: direct, or through the deployment's proxy."""
     http = requests.Session()
@@ -172,7 +180,9 @@ def _scraped_id(slug: str, http: requests.Session) -> int | None:
         )
         page.raise_for_status()
     except requests.RequestException as exc:
-        raise VivinoError(f"Vivino's shop page for {slug} could not be read: {exc}")
+        raise VivinoError(
+            f"Vivino's shop page for {slug} could not be read: {_worded(exc)}"
+        )
     match = re.search(r"merchant_id[^0-9]{0,10}(\d+)", page.text)
     return int(match.group(1)) if match else None
 
@@ -269,7 +279,9 @@ def _read_shop(slug: str, merchant: int, http: requests.Session) -> Shop:
                 # A read that saw pack prices has learned something worth
                 # showing even with no comparable bottle yet in hand.
                 if not rows and not packed:
-                    raise VivinoError(f"Vivino refused the {slug} listings: {exc}")
+                    raise VivinoError(
+                        f"Vivino refused the {slug} listings: {_worded(exc)}"
+                    )
                 failed = True
                 break
             requests_made += 1

@@ -443,6 +443,19 @@ def test_a_deployment_with_a_proxy_sends_vivino_traffic_through_it(monkeypatch):
     }
 
 
+def test_a_failure_through_the_proxy_never_names_its_credential():
+    class RefusingSession(FakeSession):
+        def get(self, url, **kwargs):
+            raise requests.ConnectionError(
+                "Cannot connect to proxy http://user:secret@10.0.0.5:8899"
+            )
+
+    with pytest.raises(vv.VivinoError) as caught:
+        vv.fetch_shop("unknown-shop", RefusingSession({}))
+    assert "secret" not in str(caught.value)
+    assert "10.0.0.5" in str(caught.value)
+
+
 def test_without_a_proxy_vivino_is_reached_directly(monkeypatch):
     monkeypatch.delenv("VIVINO_PROXY", raising=False)
     assert vv._session().proxies == {}
