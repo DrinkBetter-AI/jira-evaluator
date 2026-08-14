@@ -81,6 +81,7 @@ import cost_client
 import amplitude_client
 import merchant_client
 import merchant_letter
+import vivino_client
 import orders
 import orders_client
 from prioritization import add_priority_score, assignee_rollup
@@ -4465,6 +4466,125 @@ def _one_merchant(
     )
 
 
+# A whole shop is read from Vivino page by page, so the read is kept for a
+# day rather than repeated on every rerun; the refresh button clears it with
+# the other reads.
+_VIVINO_TTL_SECONDS = 24 * 3600
+
+
+@st.cache_data(ttl=_VIVINO_TTL_SECONDS, show_spinner=False)
+def _vivino_comparison_cached(
+    source: str, merchant: str, slug: str
+) -> vivino_client.Comparison:
+    """One merchant's Vivino prices against their prices here, matched wine by wine."""
+    config = orders_client.load_medusa_env()
+    if config is None or config.label != source:
+        raise orders_client.MedusaConfigError(
+            "The order database configuration changed while it was being read."
+        )
+    prefixes = orders_client.fetch_stores(config)
+    prefix = next(
+        (pref for pref, name in prefixes.items() if name == merchant), ""
+    )
+    ours = orders_client.fetch_catalog(config, prefix)
+    shop = vivino_client.fetch_shop(slug)
+    return vivino_client.compare(ours, shop)
+
+
+def _render_vivino(chosen: str) -> None:
+    """What the chosen merchant charges on Vivino against what they charge here.
+
+    Single 0.75l bottles only, matched by wine name and vintage - all both
+    sides publish - and honest about what could not be compared: Vivino's feed
+    read short, a shop with no listings, a merchant with no known Vivino page.
+    """
+    if chosen == _EVERY_MERCHANT:
+        st.caption(
+            "Pick a merchant above: Vivino prices are one shop's against the "
+            "same shop's prices here, not a market average."
+        )
+        return
+    slug = vivino_client.VIVINO_SHOPS.get(chosen)
+    if not slug:
+        st.caption(
+            f"No Vivino shop is on record for {chosen}. The ones known are "
+            + ", ".join(sorted(vivino_client.VIVINO_SHOPS))
+            + "; if they open one, add it to VIVINO_SHOPS in vivino_client.py."
+        )
+        return
+    config = orders_client.load_medusa_env()
+    if config is None:
+        st.caption(
+            "The comparison needs the shop's own catalogue prices, which come "
+            "from the order database. Set MEDUSA_DB_URL to read them."
+        )
+        return
+    # The read walks the shop's Vivino listings page by page and can take
+    # minutes, and every tab's body runs whether or not it is the one open -
+    # so it starts on a press, not on a merchant being picked for another tab.
+    started = st.session_state.setdefault("vivino_started", set())
+    if slug not in started:
+        if not st.button(
+            f"Read {chosen}'s Vivino shop (takes a few minutes)",
+            key="vivino_read",
+        ):
+            st.caption(
+                "Their whole Vivino shop is read page by page and matched to "
+                "their prices here by wine name and vintage, single 0.75l "
+                "bottles only. Kept for a day once read."
+            )
+            return
+        started.add(slug)
+    try:
+        with st.spinner(f"Reading {chosen}'s Vivino shop, page by page..."):
+            result = _vivino_comparison_cached(config.label, chosen, slug)
+    except (vivino_client.VivinoError, orders_client.MedusaConfigError) as exc:
+        st.warning(str(exc)[:300])
+        return
+
+    for line in vivino_client.verdicts(chosen, result):
+        st.markdown(line)
+    if not result.matched:
+        return
+
+    cheaper = result.cheaper_there
+    shown = cheaper if len(cheaper) else result.rows
+    st.dataframe(
+        shown.assign(
+            year=lambda frame: frame["year"].map(
+                lambda value: str(int(value)) if value else "NV"
+            ),
+            ours=lambda frame: frame["ours"].map(lambda value: f"${value:,.2f}"),
+            theirs=lambda frame: frame["theirs"].map(lambda value: f"${value:,.2f}"),
+            gap=lambda frame: frame["gap"].map(lambda value: f"{value:+.0%}"),
+        ).rename(
+            columns={
+                "wine": "Wine",
+                "year": "Vintage",
+                "ours": "Price here",
+                "theirs": "Price on Vivino",
+                "gap": "Vivino against here",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+    st.download_button(
+        f"Download {chosen}'s Vivino comparison (CSV)",
+        result.rows.to_csv(index=False).encode(),
+        file_name=f"vivino-vs-us-{slug}.csv",
+        mime="text/csv",
+        key="vivino_csv",
+    )
+    st.caption(
+        "Same wine, same vintage, single 0.75l bottles, both prices in USD "
+        "before shipping - Vivino's checkout may add shipping differently. "
+        f"Vivino read within the last day; {result.unmatched_ours:,} of the "
+        "merchant's wines here found no Vivino listing by name and vintage "
+        "and are left out rather than guessed at."
+    )
+
+
 def _with_merchants(
     frame: pd.DataFrame, named: dict[str, tuple[str, ...]] | None = None
 ) -> pd.DataFrame:
@@ -5571,6 +5691,7 @@ def _render_price_benchmark() -> None:
             clicked_tab,
             feed_tab,
             dear_tab,
+            vivino_tab,
         ) = st.tabs(
             [
                 f"Ask the merchants ({merchant_client.ASK_LIST})",
@@ -5580,6 +5701,7 @@ def _render_price_benchmark() -> None:
                 "Most clicked",
                 "Try a sale price",
                 "Most expensive bottles",
+                "Their Vivino price",
             ]
         )
         with ask_tab:
@@ -5594,6 +5716,8 @@ def _render_price_benchmark() -> None:
             _render_most_clicked(read, money, named, chosen)
         with feed_tab:
             _render_sale_prices(read, money, named, chosen)
+        with vivino_tab:
+            _render_vivino(chosen)
         with dear_tab:
             st.dataframe(
                 prices.worst.head(_WORST_OFFERS)
@@ -8458,6 +8582,9 @@ def _clear_page_caches(page_title: str) -> None:
         # And what those prices sold: the evidence beside them is only worth
         # refreshing if the bottles move with it.
         _offer_sales_cached,
+        # And what Vivino charges for the same wines: the whole point of a
+        # Refresh after a merchant says they have fixed a price there.
+        _vivino_comparison_cached,
     )
     for cached in business if page_title == BUSINESS_PAGE_TITLE else engineering:
         cached.clear()
