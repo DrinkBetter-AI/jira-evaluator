@@ -713,7 +713,7 @@ def test_an_account_counting_more_than_purchases_is_not_blamed_on_the_tag():
             spend, two_campaigns(), ac.Sales(orders=178, revenue=42504.86), "USD"
         )
     )
-    assert "the site sends is wrong" not in said
+    assert "the value arriving is a fraction of the real one" not in said
 
 
 def test_a_commission_share_no_agreement_could_be_falls_back_to_the_rate():
