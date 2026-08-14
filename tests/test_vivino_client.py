@@ -257,24 +257,26 @@ def test_the_price_floor_holds_still_while_a_walk_turns_its_pages():
     assert read.complete
 
 
-def test_a_read_that_stepped_past_a_stalled_price_does_not_claim_the_whole_shop():
-    # Every listing at $50 was already read, so the walk stalls and steps past
-    # that price - which may skip listings sharing it, so even a read that then
-    # reaches the top of the shop is admitted to be partial.
+def test_a_walk_that_drains_with_nothing_new_is_the_top_of_the_shop():
+    # The boundary walk re-serves only the top-priced listing already read and
+    # then runs out of pages: everything at or above the floor is known, so
+    # the read is complete rather than caveated on every real shop.
     session = FakeSession(
         {
             (0.0, 1): {
-                "records_matched": 30,
+                "records_matched": 1,
                 "matches": [match("Wine A 2020", 2020, 50.0)],
             },
             (50.0, 1): {
-                "records_matched": 30,
+                "records_matched": 1,
                 "matches": [match("Wine A 2020", 2020, 50.0)],
             },
+            (50.0, 2): {"records_matched": 1, "matches": []},
         }
     )
     read = vv.fetch_shop("a-shop", session)
-    assert not read.complete
+    assert read.complete
+    assert list(read.listings["name"]) == ["Wine A 2020"]
 
 
 def test_a_shop_with_no_listings_reads_as_empty_and_complete():
@@ -285,10 +287,9 @@ def test_a_shop_with_no_listings_reads_as_empty_and_complete():
     assert read.complete
 
 
-def test_a_page_without_a_merchant_id_is_an_empty_shop_not_an_error():
-    read = vv.fetch_shop("a-shop", FakeSession({}, merchant=None))
-    assert read.listings.empty
-    assert read.complete
+def test_a_page_without_a_merchant_id_is_a_failed_read_not_an_empty_shop():
+    with pytest.raises(vv.VivinoError):
+        vv.fetch_shop("a-shop", FakeSession({}, merchant=None))
 
 
 def test_a_feed_that_refuses_outright_raises_rather_than_reporting_nothing():

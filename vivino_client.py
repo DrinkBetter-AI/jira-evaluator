@@ -176,21 +176,25 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
     http = session or requests.Session()
     merchant = merchant_id(slug, http)
     if merchant is None:
-        return Shop(slug=slug, listings=_empty(), listed=0, complete=True)
+        # A page without a readable merchant id is a page that could not be
+        # read - a redesign, a bot wall - not a merchant with an empty shop.
+        raise VivinoError(
+            f"Vivino's page for {slug} no longer carries a merchant id, so "
+            "their listings could not be read."
+        )
 
     rows: dict[int, tuple[str, int, float]] = {}
     listed = 0
     price_from = 0.0
     requests_made = 0
-    # Complete only when a walk finds nothing at or above the last price seen,
-    # which is the top of the shop; a failure, an exhausted budget or a walk
-    # that goes nowhere twice is an admission, not a completion.
+    # Complete only when a walk serves nothing at or above the last price
+    # seen, or nothing that was not already seen; a failure or an exhausted
+    # budget is an admission, not a completion.
     complete = False
-    stalls = 0
-    stepped = False
     while requests_made < _MAX_REQUESTS:
         page_number = 1
         new_rows = 0
+        drained = False
         top_reached = False
         failed = False
         # Held for the whole walk: raising the floor between pages would
@@ -208,6 +212,7 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
             listed = max(listed, int(found.get("records_matched") or 0))
             matches = found.get("matches") or []
             if not matches:
+                drained = True
                 top_reached = page_number == 1
                 break
             for match in matches:
@@ -231,21 +236,13 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
         if failed:
             break
         if top_reached:
-            # A step past a stalled price may have skipped listings at that
-            # exact price, so a stepped read never claims to be the whole shop.
-            complete = not stepped
+            complete = True
             break
-        if new_rows:
-            stalls = 0
-            continue
-        # A walk that re-read only what it had already seen: more than a page
-        # of listings share this exact price, so step past it once - and if
-        # that also goes nowhere, stop claiming the shop was read.
-        stalls += 1
-        if stalls > 1:
+        if not new_rows:
+            # The walk ran its pages out and served only listings already
+            # seen: everything at or above the floor is known, the shop's top.
+            complete = drained
             break
-        stepped = True
-        price_from += 0.01
 
     frame = pd.DataFrame(
         [(name, year, price) for name, year, price in rows.values()],

@@ -4492,10 +4492,15 @@ def _vivino_comparison_cached(
             f"No store in the order database is named {merchant}, so their "
             "own catalogue prices cannot be read to compare."
         )
-    prefix = matching[-1]
-    ours = orders_client.fetch_catalog(
-        config, prefix, others=tuple(p for p in prefixes if p != prefix)
-    )
+    # Every prefix carrying the name is read - an alias exists exactly
+    # because the products still wear a retired prefix - and the union is
+    # their catalogue.
+    others = tuple(p for p in prefixes if p not in matching)
+    pieces = [
+        orders_client.fetch_catalog(config, prefix, others=others)
+        for prefix in matching
+    ]
+    ours = pd.concat(pieces, ignore_index=True)
     shop = vivino_client.fetch_shop(slug)
     return vivino_client.compare(ours, shop)
 
@@ -4525,7 +4530,8 @@ def _render_vivino(chosen: str) -> None:
     if config is None:
         st.caption(
             "The comparison needs the shop's own catalogue prices, which come "
-            "from the order database. Set MEDUSA_DB_URL to read them."
+            "from the order database. Set POSTGRES_PASSWORD (or "
+            "MEDUSA_DB_PASSWORD) to read them."
         )
         return
     # The read walks the shop's Vivino listings page by page and can take
@@ -4546,11 +4552,11 @@ def _render_vivino(chosen: str) -> None:
     try:
         with st.spinner(f"Reading {chosen}'s Vivino shop, page by page..."):
             result = _vivino_comparison_cached(config.label, chosen, slug)
-    except (vivino_client.VivinoError, orders_client.MedusaConfigError) as exc:
+    except Exception as exc:  # noqa: BLE001 - a bad reply stays in this tab
         # Not recorded as read: a failure would otherwise restart the
         # minutes-long pull on every rerun instead of waiting for the button.
         started.discard(slug)
-        st.warning(str(exc)[:300])
+        st.warning(f"Could not compare their Vivino prices: {str(exc)[:300]}")
         return
     started.add(slug)
 
