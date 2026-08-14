@@ -4537,8 +4537,15 @@ def _render_vivino(chosen: str) -> None:
     # The read walks the shop's Vivino listings page by page and can take
     # minutes, and every tab's body runs whether or not it is the one open -
     # so it starts on a press, not on a merchant being picked for another tab.
-    started = st.session_state.setdefault("vivino_started", set())
-    if slug not in started:
+    # The read this session already made is held here with its result, so the
+    # gate cannot outlive what it stands for: the shared cache expiring or
+    # being refreshed elsewhere never restarts the pull without the button.
+    reads = st.session_state.setdefault("vivino_reads", {})
+    held = reads.get(slug)
+    if held and time.time() - held[0] < _VIVINO_TTL_SECONDS:
+        result = held[1]
+    else:
+        reads.pop(slug, None)
         if not st.button(
             f"Read {chosen}'s Vivino shop (takes a few minutes)",
             key="vivino_read",
@@ -4549,16 +4556,15 @@ def _render_vivino(chosen: str) -> None:
                 "bottles only. Kept for a day once read."
             )
             return
-    try:
-        with st.spinner(f"Reading {chosen}'s Vivino shop, page by page..."):
-            result = _vivino_comparison_cached(config.label, chosen, slug)
-    except Exception as exc:  # noqa: BLE001 - a bad reply stays in this tab
-        # Not recorded as read: a failure would otherwise restart the
-        # minutes-long pull on every rerun instead of waiting for the button.
-        started.discard(slug)
-        st.warning(f"Could not compare their Vivino prices: {str(exc)[:300]}")
-        return
-    started.add(slug)
+        try:
+            with st.spinner(f"Reading {chosen}'s Vivino shop, page by page..."):
+                result = _vivino_comparison_cached(config.label, chosen, slug)
+        except Exception as exc:  # noqa: BLE001 - a bad reply stays in this tab
+            # Not recorded as read: a failure would otherwise restart the
+            # minutes-long pull on every rerun instead of waiting for the button.
+            st.warning(f"Could not compare their Vivino prices: {str(exc)[:300]}")
+            return
+        reads[slug] = (time.time(), result)
 
     for line in vivino_client.verdicts(chosen, result):
         st.markdown(line)
@@ -8609,7 +8615,7 @@ def _clear_page_caches(page_title: str) -> None:
     if page_title == BUSINESS_PAGE_TITLE:
         # With the saved Vivino reads gone, the minutes-long pull must wait
         # for its button again rather than restart on the next screen draw.
-        st.session_state.pop("vivino_started", None)
+        st.session_state.pop("vivino_reads", None)
     logger.info("Cleared cached reads for the %s page", page_title)
 
 
