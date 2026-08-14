@@ -1,7 +1,7 @@
 """Offline checks for the order book's window figures.
 
-Kept outside the repository for the same reason as the other check scripts: it
-exercises the module directly, with no Medusa and no Streamlit.
+Offline for the same reason as the other check scripts: it exercises the module
+directly, with no Medusa and no Streamlit.
 
     python3 -m pytest tests/test_orders_windows.py -q
 """

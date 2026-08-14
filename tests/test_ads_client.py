@@ -515,3 +515,117 @@ def test_commission_charged_is_read_even_where_the_crm_has_no_revenue():
 def test_a_commission_return_divides_only_when_there_was_spend():
     assert ac.earned_return(147.0, 176.0) == pytest.approx(0.84)
     assert ac.earned_return(147.0, 0.0) == 0.0
+
+
+class FakeQuery:
+    """A BigQuery client that records the SQL and answers with a frame."""
+
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.frame = frame
+        self.sql = ""
+        self.params: dict = {}
+
+    def query(self, sql, job_config=None):  # noqa: D401 - mimics the client
+        self.sql = sql
+        self.params = {
+            param.name: param.value for param in (job_config.query_parameters or [])
+        }
+        frame = self.frame
+
+        class Job:
+            def result(self):
+                class Rows:
+                    def to_dataframe(self):
+                        return frame
+
+                return Rows()
+
+        return Job()
+
+
+PRODUCTS = pd.DataFrame(
+    [
+        ("wine-1", 12.5, 40, 900, 1.0),
+        (" wine-2 ", 3.25, 8, 120, 0.0),
+        ("", 1.0, 2, 30, 0.0),
+    ],
+    columns=["offer", "spend", "clicks", "impressions", "ad_conversions"],
+)
+
+
+def test_product_spend_is_read_per_offer_over_the_window_asked_for():
+    client = FakeQuery(PRODUCTS)
+    config = ac.AdsConfig("w266-project-329918", "google_ads", None, None)
+    frame = ac.product_stats(client, config, "8876864797", 90, now=TODAY)
+    # Yesterday backwards, today excluded: today is a part-day and would read as
+    # spend collapsing.
+    assert client.params == {"first": dt.date(2026, 5, 8), "last": YESTERDAY}
+    assert "ads_ShoppingProductStats_8876864797" in client.sql
+    # An offer id with nothing in it joins to every wine and to none, so it goes.
+    assert list(frame["offer"]) == ["wine-1", "wine-2"]
+    assert float(frame["spend"].iloc[0]) == 12.5
+
+
+def test_spend_with_no_product_id_on_it_is_not_a_wine_called_none():
+    """BigQuery groups NULL as a key of its own, so the product read can come
+    back with a row for spend that has no offer id; cast to a string first it
+    became a bottle named "None" that Google could publish no benchmark for."""
+    client = FakeQuery(
+        pd.DataFrame(
+            [("wine-1", 12.5, 40, 900, 1.0), (None, 4.0, 3, 60, 0.0)],
+            columns=list(ac.PRODUCT_COLUMNS),
+        )
+    )
+    config = ac.AdsConfig("w266-project-329918", "google_ads", None, None)
+    frame = ac.product_stats(client, config, "8876864797", 30, now=TODAY)
+    assert list(frame["offer"]) == ["wine-1"]
+
+
+def test_no_shopping_rows_at_all_reads_as_no_products_rather_than_an_error():
+    client = FakeQuery(pd.DataFrame())
+    config = ac.AdsConfig("w266-project-329918", "google_ads", None, None)
+    frame = ac.product_stats(client, config, "8876864797", 30, now=TODAY)
+    assert frame.empty
+    assert list(frame.columns) == list(ac.PRODUCT_COLUMNS)
+
+
+class FakeRows:
+    """A client that records the SQL and answers with rows rather than a frame."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.sql = ""
+
+    def query(self, sql, job_config=None):  # noqa: D401 - mimics the client
+        self.sql = sql
+        rows = self.rows
+
+        class Job:
+            def result(self):
+                return rows
+
+        return Job()
+
+
+def test_which_table_a_history_is_asked_of_is_the_callers_to_choose():
+    """The Shopping product report is transferred separately from the campaign
+    one and is routinely switched on months later, so the campaign table's first
+    day says nothing about how much per-wine spend is loaded."""
+    client = FakeRows([{"first_day": dt.date(2026, 7, 6)}])
+    config = ac.AdsConfig("w266-project-329918", "google_ads", None, None)
+    assert ac.loaded_from(client, config, "8876864797") == dt.date(2026, 7, 6)
+    assert "ads_CampaignBasicStats_8876864797" in client.sql
+    ac.loaded_from(client, config, "8876864797", TODAY, ac.PRODUCT_TABLE)
+    assert "ads_ShoppingProductStats_8876864797" in client.sql
+
+
+def test_a_window_begins_the_day_after_it_is_long_and_never_includes_today():
+    assert ac.window_first_day(90, TODAY) == dt.date(2026, 5, 8)
+    assert ac.window_first_day(1, TODAY) == YESTERDAY
+
+
+def test_a_customer_id_cannot_smuggle_a_table_name_into_the_product_read():
+    client = FakeQuery(PRODUCTS)
+    config = ac.AdsConfig("w266-project-329918", "google_ads", None, None)
+    with pytest.raises(ac.AdsConfigError):
+        ac.product_stats(client, config, "8876864797` UNION ALL SELECT", 30, now=TODAY)

@@ -55,6 +55,10 @@ DEFAULT_DATASET = "google_ads"
 _STATS_TABLE = "ads_CampaignBasicStats"
 _CAMPAIGN_TABLE = "ads_Campaign"
 _CUSTOMER_TABLE = "ads_Customer"
+# Shopping's own grain: one row per product per day, keyed by the offer id the
+# Merchant Center feed uses, which is what lets ad spend be set beside the price
+# of the bottle it was spent on.
+_PRODUCT_TABLE = "ads_ShoppingProductStats"
 
 MICROS = 1_000_000
 
@@ -362,6 +366,60 @@ def daily_stats(
     return frame
 
 
+PRODUCT_COLUMNS = ("offer", "spend", "clicks", "impressions", "ad_conversions")
+
+# The Shopping product report, whose history is asked about separately from the
+# campaign one it is transferred beside.
+PRODUCT_TABLE = _PRODUCT_TABLE
+
+
+def product_stats(
+    client,
+    config: AdsConfig,
+    customer_id: str,
+    days: int,
+    now: _dt.date | None = None,
+) -> pd.DataFrame:
+    """What each advertised product cost and drew over the last ``days`` days.
+
+    One row per offer id, which is the same id the Merchant Center feed and the
+    catalogue's ``external_id`` carry, so the spend on a bottle can be read
+    beside its price against the market and the bottles it actually sold.
+
+    ``ad_conversions`` is Google's own attribution and is reported as such: the
+    account records a few dozen against the CRM's hundreds of orders, so it is
+    evidence about the ad, not about the shop.
+    """
+    last = (now or _dt.date.today()) - _dt.timedelta(days=1)
+    first = window_first_day(days, now)
+    sql = f"""
+        SELECT
+          segments_product_item_id AS offer,
+          SUM(metrics_cost_micros) / {MICROS} AS spend,
+          SUM(metrics_clicks) AS clicks,
+          SUM(metrics_impressions) AS impressions,
+          SUM(metrics_conversions) AS ad_conversions
+        FROM {_table(config, _PRODUCT_TABLE, customer_id)}
+        WHERE segments_date BETWEEN @first AND @last
+        GROUP BY offer
+    """
+    frame = _run(client, sql, first=first, last=last)
+    if frame.empty:
+        return pd.DataFrame(columns=list(PRODUCT_COLUMNS))
+    # Dropped before the cast, not after: BigQuery groups NULL as a key of its
+    # own, and ``astype(str)`` would turn that row into a wine called "None" -
+    # spend with no bottle behind it, counted as a bottle Google cannot price.
+    frame = frame[frame["offer"].notna()].copy()
+    frame["offer"] = frame["offer"].astype(str).str.strip()
+    for column in ("spend", "clicks", "impressions", "ad_conversions"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
+    return (
+        frame[frame["offer"] != ""]
+        .sort_values("spend", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
 def campaign_names(client, config: AdsConfig, customer_id: str) -> pd.DataFrame:
     """Each campaign's current name, status and daily budget.
 
@@ -404,8 +462,21 @@ def _run(client, sql: str, **params) -> pd.DataFrame:
     return client.query(sql, job_config=job_config).result().to_dataframe()
 
 
+def window_first_day(days: int, now: _dt.date | None = None) -> _dt.date:
+    """The first day of a ``days`` window ending yesterday.
+
+    Today is never a complete day of spend, so no window here includes it.
+    """
+    last = (now or _dt.date.today()) - _dt.timedelta(days=1)
+    return last - _dt.timedelta(days=days - 1)
+
+
 def loaded_from(
-    client, config: AdsConfig, customer_id: str, now: _dt.date | None = None
+    client,
+    config: AdsConfig,
+    customer_id: str,
+    now: _dt.date | None = None,
+    table: str = _STATS_TABLE,
 ) -> _dt.date | None:
     """The earliest day the transfer has loaded, over the whole table.
 
@@ -414,10 +485,14 @@ def loaded_from(
     the stats table has no row for a day with no activity, so the earliest row
     *within* a window says nothing about whether the window is loaded. Reads one
     column of a partitioned table, so it is the cheapest query here.
+
+    ``table`` because the transfer carries each report separately: the Shopping
+    product table is routinely added months after the campaign one, and its own
+    history is the only thing that says how much of a per-wine window is real.
     """
     sql = f"""
         SELECT MIN(segments_date) AS first_day
-        FROM {_table(config, _STATS_TABLE, customer_id)}
+        FROM {_table(config, table, customer_id)}
     """
     rows = list(client.query(sql).result())
     if not rows or rows[0]["first_day"] is None:

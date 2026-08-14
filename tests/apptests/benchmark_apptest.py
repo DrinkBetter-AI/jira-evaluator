@@ -30,6 +30,7 @@ _SALES_READ = dashboard._offer_sales_cached
 HARNESS = str(Path(__file__).resolve().parent / "_benchmark_harness.py")
 
 HARNESS_SOURCE = '''
+import datetime as dt
 import os
 import sys
 
@@ -97,7 +98,63 @@ LISTED = {
     "d": ("Blackbear", "Yiannis"),
 }
 
-if MODE in ("sold", "merchant", "nomatch"):
+# What Google charged for each of those offers over the same window. The dear
+# bottle takes the most money and sells nothing; one offer took money and is not
+# in the feed at all, which is spend a benchmark cannot speak for.
+ADS = pd.DataFrame(
+    [
+        {"offer": "a", "spend": 60.0, "clicks": 4, "impressions": 400},
+        {"offer": "b", "spend": 30.0, "clicks": 90, "impressions": 2000},
+        {"offer": "d", "spend": 10.0, "clicks": 30, "impressions": 900},
+        {"offer": "gone", "spend": 100.0, "clicks": 7, "impressions": 70},
+    ]
+).assign(ad_conversions=0.0)
+
+if MODE == "noads":
+    dashboard._ad_products = lambda days: dashboard._no_ad_products()
+elif MODE == "adsquiet":
+    # Configured, read, and nothing spent: a different emptiness from the above,
+    # and telling this reader to set environment variables would be a lie.
+    dashboard._ad_products = lambda days: dashboard.AdProducts(ADS.iloc[0:0], "USD", [])
+elif MODE in ("adsblind", "adsbadconfig"):
+    # Configured, but the report itself could not be read: what each wine cost
+    # is unknown rather than nil, and neither of the other two captions is true.
+    # A rejected setting fails the read the same way, which is why it is a mode
+    # of its own: the reader is meant to be sent to the setting, not to BigQuery.
+    dashboard._ad_products = lambda days: dashboard._no_ad_products(read=False)
+elif MODE == "adspartial":
+    # Configured and spending, but the Shopping product table only reached back a
+    # week: the same spend against a whole quarter of orders, which the tab has
+    # to say rather than let the return be read as a quarter's. And one account
+    # of two could not be read at all, so the total is short by its spend - said
+    # rather than left to look like the whole dataset.
+    dashboard._ad_products = lambda days: dashboard.AdProducts(
+        ADS,
+        "USD",
+        [],
+        history_start=dt.date.today() - dt.timedelta(days=7),
+        unread_accounts=1,
+    )
+elif MODE == "adseur":
+    # An account billed in euros beside a dollar one: the euro accounts are the
+    # majority here, so the dollar one is the one set aside.
+    dashboard._ad_products = lambda days: dashboard.AdProducts(ADS, "EUR", ["USD"])
+else:
+    dashboard._ad_products = lambda days: dashboard.AdProducts(ADS, "USD", [])
+
+dashboard._ads_configured = lambda: MODE not in ("noads", "adsbadconfig")
+
+if MODE in (
+    "sold",
+    "merchant",
+    "nomatch",
+    "noads",
+    "adsquiet",
+    "adsblind",
+    "adsbadconfig",
+    "adspartial",
+    "adseur",
+):
     dashboard.orders_client.load_medusa_env = lambda: dashboard.orders_client.DbConfig(
         "host", "db", "user", "secret", 5432
     )
@@ -236,7 +293,7 @@ print("an empty feed names the country it read: ok")
 live = run("live")
 metrics = {m.label: m.value for m in live.metric}
 print(metrics)
-assert metrics["Dearer than the market"] == "50%", metrics
+assert metrics["More expensive than the market"] == "50%", metrics
 # Two of the four sit near 2x, so the median of the four gaps is high: a median
 # rather than a mean, but a median of a tiny frame is still a big number.
 assert metrics["Typical gap"] == "+99%", metrics
@@ -402,7 +459,7 @@ evidence = sold_table_with("Against the market", "Bottles per 100 clicks")
 rates = dict(zip(evidence["Against the market"], evidence["Bottles per 100 clicks"]))
 # 10 bottles on the cheap wine's 30 clicks, 9 on the dear one's 90.
 assert rates["Cheaper than the market"] == "33", evidence.to_string()
-assert rates["More than 25% dearer"] == "10", evidence.to_string()
+assert rates["More than 25% more expensive"] == "10", evidence.to_string()
 # Nobody clicked the wine priced at the market, so it has no rate to report.
 assert rates["About the market"] == "\u2014", evidence.to_string()
 assert "sold 33 bottles per 100 clicks" in sold_body, sold_body[-1500:]
@@ -446,8 +503,25 @@ figures = {m.label: m.value for m in mine.metric}
 # the 2% that counts as the same price, one under it - so its own headline is a
 # third rather than the shop's half.
 assert figures["Priced products compared"] == "3", figures
-assert figures["Dearer than the market"] == "33%", figures
-only_mine = [f.value for f in mine.dataframe if "Merchant" in f.value.columns]
+assert figures["More expensive than the market"] == "33%", figures
+# The ads ledger is cut to the same merchant, so its spend is theirs too: the
+# offer that took the most money is somebody else's wine and is gone with them.
+mine_ads = [
+    f.value for f in mine.dataframe if "Ad spend" in f.value.columns
+]
+for frame in mine_ads:
+    assert "gone" not in set(frame["Offer"]), frame.to_string()
+assert mine_ads, [list(f.value.columns) for f in mine.dataframe]
+assert {m.label: m.value for m in mine.metric}["Spend 90d"] == "$40.00", [
+    (m.label, m.value) for m in mine.metric
+]
+print("the ad spend shown to one merchant is that merchant's own: ok")
+
+only_mine = [
+    f.value
+    for f in mine.dataframe
+    if "Merchant" in f.value.columns and "Ad spend" not in f.value.columns
+]
 assert only_mine, [list(f.value.columns) for f in mine.dataframe]
 for frame in only_mine:
     for names in frame["Merchant"]:
@@ -503,5 +577,179 @@ finally:
     dashboard.orders_client.load_medusa_env = _env
 assert list(kept["handle"]) == ["yiannis-a-cheap-wine"], kept.to_string()
 print("an add-on shipped with the wine is not counted as bottles sold: ok")
+
+# Where the ad money went, per wine: the tab exists to be argued with, so the
+# arithmetic on screen is checked against the stubbed spend rather than trusted.
+ads_body = sold_body
+# Escaped, because two dollar signs in one markdown line are read by Streamlit
+# as inline maths and both symbols disappear from the sentence.
+assert "\\$160 of \\$200" in ads_body, ads_body[-1500:]
+# $170 of the $200 went to wines with no bottles against them (a, c's absence,
+# and the offer that has left the feed).
+assert "80% of the ad spend went to 2 wines that sold nothing" in ads_body, ads_body[
+    -1500:
+]
+assert "50% of the spend went to 1 offer Google publishes no benchmark for" in (
+    ads_body
+), ads_body[-1500:]
+print("the ad spend split is stated and the unbenchmarked part disclosed: ok")
+
+ads_metrics = {m.label: m.value for m in sold_run.metric}
+assert ads_metrics["Spend 90d"] == "$200.00", ads_metrics
+assert ads_metrics["On wines that sold nothing"] == "80%", ads_metrics
+assert ads_metrics["Wines advertised"] == "4", ads_metrics
+
+# The most clicked wine is the keenly priced one, and the ledger names what each
+# wine sold beside what it cost to advertise.
+# Several tables carry these columns - each folded-up claim is one - so the most
+# clicked table is picked out by being the one ordered by clicks.
+def by_clicks():
+    for frame in sold_tables:
+        if not {"Clicks", "Ad spend", "Gap"} <= set(frame.columns):
+            continue
+        clicks = [int(value.replace(",", "")) for value in frame["Clicks"]]
+        if len(clicks) > 2 and clicks == sorted(clicks, reverse=True):
+            return frame
+    raise AssertionError([list(f.columns) for f in sold_tables])
+
+
+clicked = by_clicks()
+assert clicked["Wine"].iloc[0] == "Villa Pozzi Pinot Grigio", clicked.to_string()
+assert clicked["Ad spend"].iloc[0] == "$30.00", clicked.to_string()
+assert clicked["Bottles 90d"].iloc[0] == "9", clicked.to_string()
+# Spend on an offer the feed no longer carries is kept and shown as unpriced,
+# because dropping it would quietly shrink the total the panel is arguing about.
+gone = clicked[clicked["Offer"] == "gone"].iloc[0]
+assert (gone["Our price"], gone["Gap"]) == ("\u2014", "\u2014"), gone.to_string()
+print("the ledger keeps spend on wines the feed cannot price: ok")
+
+# The feed a supplemental upload would carry: the market price, on the wines the
+# budget is already going to, and never on a wine already priced under it.
+feed = sold_table_with("Suggested sale price")
+assert list(feed["Wine"]) == ["Atalon Cabernet Sauvignon", "Villa Pozzi Pinot Grigio"], (
+    feed.to_string()
+)
+assert feed["Suggested sale price"].iloc[0] == "$28.42", feed.to_string()
+print("the sale-price feed offers the market price on the expensive wines: ok")
+
+# The list to act on in the campaign rather than in the shop, and the only claim
+# here that needs nobody's agreement: expensive, clicked, and no bottle sold.
+assert "wines to stop paying for first" in ads_body, ads_body[-1500:]
+print("the clicked-expensive-unsold list is on the tab, not only in the module: ok")
+
+# An unread order book is the dangerous case: every wine joins to no sale, and
+# filled with zeroes that reads as the whole budget wasted. The live mode has ads
+# and no order book, so the tab must withhold every claim about what sold.
+assert "$200.00" == {m.label: m.value for m in live.metric}["Spend 90d"], [
+    (m.label, m.value) for m in live.metric
+]
+assert {m.label: m.value for m in live.metric}["On wines that sold nothing"] == (
+    "\u2014"
+), [(m.label, m.value) for m in live.metric]
+assert "of the ad spend went to" not in body, body[-1500:]
+assert "what each one sold is unknown rather than none" in body, body[-1500:]
+assert "Read the shop's own orders before acting" in body, body[-1500:]
+# The ledger still stands as a spend ledger, with the bottles column withheld.
+unsold = [f.value for f in live.dataframe if "Ad spend" in f.value.columns]
+assert unsold, [list(f.value.columns) for f in live.dataframe]
+assert set(unsold[0]["Bottles 90d"]) == {"\u2014"}, unsold[0].to_string()
+print("a shut order book withholds the sold-nothing claim rather than filling it: ok")
+
+# Whose spend a merchant sees is said rather than left to be inferred from a
+# total that does not match the shop's.
+assert "Google publishes a benchmark for" in texts(mine), texts(mine)[-1500:]
+print("a merchant's ad tab says which of their wines it covers: ok")
+
+# Google bills the account in its own currency, and euros are never added to
+# dollars nor labelled with a dollar sign.
+euros = run("adseur")
+euro_metrics = {m.label: m.value for m in euros.metric}
+assert euro_metrics["Spend 90d"].startswith("\u20ac"), euro_metrics
+assert "left out rather than added to them" in texts(euros), texts(euros)[-1500:]
+assert "not the same money" in texts(euros), texts(euros)[-1500:]
+# And the sentences under the tiles, which are also the printable report, quote
+# the currency Google billed rather than a dollar sign nobody was charged in.
+euro_said = texts(euros)
+assert "of the ad spend went to" in euro_said, euro_said[-1500:]
+assert " of \u20ac" in euro_said, euro_said[-1500:]
+assert " of $" not in euro_said, euro_said[-1500:]
+assert " of \\$" not in euro_said, euro_said[-1500:]
+print("ad spend is shown in the currency Google billed, or set aside: ok")
+
+# No ads dataset is not an empty account: the tab says how to point it at one.
+noads = texts(run("noads"))
+assert "the transfer will need the Shopping product stats table" in noads, noads[-900:]
+assert "of the ad spend went to" not in noads, noads[-900:]
+# The sale-price feed still has wines to offer without Ads, and says what its
+# order means: with every spend nought, "the costliest first" would be a ranking
+# the data cannot support.
+assert "ordered by how far each one is above the market" in noads, noads[-1500:]
+assert "the ones the ad budget is already going to" not in noads, noads[-1500:]
+print("a dashboard with no ads dataset says so rather than showing $0: ok")
+
+# And an account that is configured and simply spent nothing is not told to
+# configure itself.
+quiet = texts(run("adsquiet"))
+assert "no wine took ad money" in quiet, quiet[-900:]
+assert "the transfer will need the Shopping product stats table" not in quiet, quiet[
+    -900:
+]
+print("a configured account that spent nothing is not told to set it up: ok")
+
+# And a report that could not be read is neither of those: an account at rest is
+# the one claim this tab must not make on a failure to read it.
+blind = texts(run("adsblind"))
+assert "could not be read" in blind, blind[-900:]
+assert "no wine took ad money" not in blind, blind[-900:]
+assert "the transfer will need the Shopping product stats table" not in blind, blind[
+    -900:
+]
+print("a product report that could not be read is not an account at rest: ok")
+
+# A setting the Ads client rejects fails the read like an absent table does, and
+# is the one of the two the reader can fix: it is sent to the setting.
+mistyped = texts(run("adsbadconfig"))
+assert "check what they are set to" in mistyped, mistyped[-900:]
+assert "the credential cannot see it" not in mistyped, mistyped[-900:]
+print("a rejected Ads setting is not a BigQuery permission hunt: ok")
+
+# A product table that has only loaded part of the window is spend from a week
+# set beside a quarter of orders: the shortfall is stated, and the whole-window
+# case says nothing, since a caveat on a complete window is noise.
+short = texts(run("adspartial"))
+assert "only goes back to" in short, short[-1500:]
+assert "days of it, not 90" in short, short[-1500:]
+assert "only goes back to" not in ads_body, ads_body[-1500:]
+# And an account whose product table the transfer does not carry costs its own
+# spend rather than the tab: the rest is shown, and the shortfall said.
+assert "1 ad account in this dataset could not be read" in short, short[-1500:]
+assert "could not be read - most often" not in ads_body, ads_body[-1500:]
+print("a part-loaded product report is not presented as a whole quarter: ok")
+
+# An order book that opened and matched none of the advertised wines is the same
+# falsehood as a shut one: what they sold is unknown, not nil.
+missed = texts(run("nomatch"))
+assert "of the ad spend went to" not in missed, missed[-1500:]
+assert "unknown rather than none" in missed, missed[-1500:]
+assert "wines to stop paying for first" not in missed, missed[-1500:]
+print("an order book that matched no advertised wine withholds the claim too: ok")
+
+# The panel ends by saying what to change, and says it about the campaign rather
+# than about Merchant Center, where a delisting also costs the free listing.
+todo = texts(run("sold"))
+assert "What to do about it" in todo, todo[-1500:]
+assert "In the campaign, not in Merchant Center" in todo, todo[-1500:]
+print("the tab closes with what to change, sized from its own figures: ok")
+
+# The printable report carries the argument, not only the three tiles: a page
+# printed for a meeting with the claims left out is a page of bare numbers.
+printed = (
+    run("sold")
+    .session_state[dashboard.REPORTS_KEY][dashboard.TAB_BUSINESS]
+    .html()
+)
+assert "of the ad spend went to" in printed, printed[-2000:]
+assert "In the campaign, not in Merchant Center" in printed, printed[-2000:]
+print("the printable report carries the ad claims and the advice: ok")
 
 print("all price-competitiveness scenarios passed")

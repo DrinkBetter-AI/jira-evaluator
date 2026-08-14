@@ -673,9 +673,9 @@ def test_the_bands_count_bottles_against_the_clicks_that_saw_the_price():
     rates = dict(zip(bands["band"], bands["per_100_clicks"]))
     assert rates["Cheaper than the market"] == 30
     assert rates["About the market"] == 10
-    assert rates["Up to 25% dearer"] == 5
+    assert rates["Up to 25% more expensive"] == 5
     # Nobody bought the dearest wine, which is a nought rather than a blank.
-    assert rates["More than 25% dearer"] == 0
+    assert rates["More than 25% more expensive"] == 0
     assert list(bands["listings"]) == [1, 1, 1, 1]
 
 
@@ -688,7 +688,7 @@ def test_a_band_nobody_clicked_has_no_rate_rather_than_nought():
     )
     rates = dict(zip(bands["band"], bands["per_100_clicks"]))
     assert rates["Cheaper than the market"] == 20
-    assert pd.isna(rates["More than 25% dearer"])
+    assert pd.isna(rates["More than 25% more expensive"])
 
 
 def test_the_evidence_sentence_compares_under_the_market_with_over_it():
