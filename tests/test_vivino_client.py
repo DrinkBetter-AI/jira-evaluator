@@ -453,10 +453,9 @@ def test_a_shop_already_known_is_not_asked_for_its_page_again():
     assert list(read.listings["name"]) == ["Wine A 2020"]
 
 
-def test_an_empty_read_under_a_known_id_checks_the_page_for_a_renumbering():
-    # A stale id in the table reads back an empty feed; the shop page names
-    # the merchant's current id, and the read follows it rather than telling
-    # the user the shop is empty.
+def test_a_renumbered_merchant_is_followed_when_the_page_can_be_read():
+    # The page names the shop's current id and wins over the table, so a
+    # renumbering never silently reads the wrong merchant's prices.
     class RenumberedSession(FakeSession):
         def get(self, url, **kwargs):
             if "merchants/" in url:

@@ -160,11 +160,20 @@ def _scraped_id(slug: str, http: requests.Session) -> int | None:
 
 
 def merchant_id(slug: str, session: requests.Session | None = None) -> int | None:
-    """The numeric id behind a Vivino shop page, or None for a page without one."""
-    known = _MERCHANT_IDS.get(slug)
-    if known:
-        return known
-    return _scraped_id(slug, session or requests.Session())
+    """The numeric id behind a Vivino shop page, or None for a page without one.
+
+    The page is the authority - it always names the shop's current id - so it
+    is asked first; the table only answers when the page cannot be read, so a
+    bot wall does not stop a shop whose id is already known.
+    """
+    http = session or requests.Session()
+    try:
+        scraped = _scraped_id(slug, http)
+    except VivinoError:
+        if slug not in _MERCHANT_IDS:
+            raise
+        scraped = None
+    return scraped or _MERCHANT_IDS.get(slug)
 
 
 def _page(
@@ -206,17 +215,7 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
             f"Vivino's page for {slug} no longer carries a merchant id, so "
             "their listings could not be read."
         )
-    shop = _read_shop(slug, merchant, http)
-    if not shop.listed and slug in _MERCHANT_IDS:
-        # An empty feed under an id served from the table could mean Vivino
-        # renumbered the merchant; the page settles it when it can be read.
-        try:
-            fresh = _scraped_id(slug, http)
-        except VivinoError:
-            return shop
-        if fresh and fresh != merchant:
-            return _read_shop(slug, fresh, http)
-    return shop
+    return _read_shop(slug, merchant, http)
 
 
 def _read_shop(slug: str, merchant: int, http: requests.Session) -> Shop:
