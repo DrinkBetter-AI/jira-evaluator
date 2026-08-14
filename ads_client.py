@@ -107,6 +107,9 @@ class Spend:
     # counts view-throughs, and can fractionally credit one sale to several ads.
     # Reported beside CRM orders rather than instead of them.
     conversions: float
+    # Commission, not turnover: the site's tag deliberately reports the
+    # marketplace's ten-percent cut of each order as the conversion value, so
+    # this is already the shop's own money and takes no further haircut.
     conversion_value: float
     prev_cost: float
     prev_conversions: float
@@ -725,6 +728,26 @@ def earned_return(commission: float, cost: float) -> float:
 # attribution - but a large one means one of the two is not measuring the shop.
 ATTRIBUTION_TOLERANCE = 0.25
 
+# How far below the shop's own average commission per order Google's average
+# conversion value may sit before the tag is the likelier explanation. The tag
+# deliberately sends the marketplace's cut of each order rather than the order
+# itself, so the yardstick is the commission on a basket, not the basket - and
+# attribution loses whole sales, not most of the money inside each one.
+_VALUE_TAG_TOLERANCE = 0.5
+
+
+def attributed_return(conversion_value: float, cost: float) -> float:
+    """Commission per unit of spend on the sales Google itself claims credit for.
+
+    Already commission: the site's tag deliberately reports the marketplace's
+    ten-percent cut of each order as the conversion value, not the order
+    itself, so this figure takes no further haircut. The floor under the
+    ceiling: the window's whole takings over ad spend counts every sale however
+    it arrived, while this counts only the ones Google's own attribution
+    recorded against a click.
+    """
+    return round(conversion_value / cost, 2) if cost else 0.0
+
 
 def verdicts(
     spend: Spend,
@@ -749,9 +772,15 @@ def verdicts(
     keep = commission_rate() if rate is None else rate
     unit = _money(1, currency).replace("1.00", "1")
     counted = commission is not None and commission.measured
-    if counted or (sales is not None and sales.revenue):
+    ceiling = counted or (sales is not None and sales.revenue)
+    if ceiling:
         # First, because it is the only line here that is income rather than
         # turnover: the revenue belongs to the merchants and this is our share.
+        # Put as a ceiling and never as a return the ads earned. Both the
+        # commission Stripe charged and the CRM's takings cover every sale in the
+        # window, ad or no ad, so either over ad spend answers "what did the shop
+        # take per ad dollar" rather than "what did the ads bring back". The
+        # attributed floor is the line below it.
         if counted:
             now = earned_return(commission.now, spend.cost)
             before = earned_return(commission.before, spend.prev_cost)
@@ -761,23 +790,54 @@ def verdicts(
             before = commission_return(sales.prev_revenue, spend.prev_cost, keep)
             basis = f"{money(sales.revenue)} of revenue at {keep:.0%}"
         lines.append(
-            f"**{money(now)} of commission back for every {unit} of ad "
-            f"spend** - {basis} "
-            f"against {money(spend.cost)} spent. Break even is "
-            f"{BREAK_EVEN_RETURN:.2f}, so the ads "
+            f"**At most {money(now)} of commission for every {unit} of ad "
+            f"spend** - {basis} against {money(spend.cost)} spent. Every sale in "
+            "the window counts here, including the ones the ads had nothing to "
+            f"do with, so read it as a ceiling: an ad pays for itself at "
+            f"{BREAK_EVEN_RETURN:.2f}, and this is "
             + (
-                "pay for themselves."
+                f"{money(now - BREAK_EVEN_RETURN)} above it at its most "
+                "flattering."
                 if now >= BREAK_EVEN_RETURN
-                else f"are short by {money(BREAK_EVEN_RETURN - now)} on every "
-                f"{unit} spent, before anybody's time, packaging or card fees."
+                else f"{money(BREAK_EVEN_RETURN - now)} short of it even at its "
+                "most flattering."
             )
         )
+        # Only where it really is under the ceiling. Google can claim more value
+        # than the shop captured - over-attribution, cancelled orders, value with
+        # tax in it - and a measured commission of nothing puts the ceiling at
+        # zero, either of which would print a floor above its own ceiling and
+        # call it the lower of the two.
+        floor = attributed_return(spend.conversion_value, spend.cost)
+        if spend.conversion_value and floor < now:
+            lines.append(
+                f"**On the sales Google itself claims, {money(floor)} per "
+                f"{unit}** - {money(spend.conversion_value)} of conversion "
+                f"value against the same {money(spend.cost)}. The tag sends "
+                "the marketplace's cut of each order rather than the order, "
+                "so this is commission already. That is the floor and the "
+                "line above is the ceiling; the truth is between the two."
+            )
         if before:
             word = "up" if now > before else "down" if now < before else "flat"
             lines.append(
-                f"**That return is {word}** on the previous {spend.days} days, "
+                f"**That ceiling is {word}** on the previous {spend.days} days, "
                 f"which returned {money(before)} per {unit}."
             )
+    elif spend.conversion_value:
+        # The floor needs nothing but the ad account's own figures, so a window
+        # with no readable ledger and no comparable takings still gets the one
+        # return that can be computed - named as the only line, not a floor,
+        # since there is no ceiling for it to sit under.
+        lines.append(
+            f"**On the sales Google itself claims, "
+            f"{money(attributed_return(spend.conversion_value, spend.cost))} per "
+            f"{unit}** - {money(spend.conversion_value)} of conversion value "
+            f"against {money(spend.cost)} spent. The tag sends the "
+            "marketplace's cut of each order rather than the order, so this is "
+            "commission already. Only Google's own attribution is counted "
+            "here; no all-channel ceiling could be read beside it."
+        )
 
     if sales is not None and sales.orders:
         per_order = spend.cost / sales.orders
@@ -812,6 +872,41 @@ def verdicts(
             "all in these days**, which is either a very bad window or a break "
             "in the order feed."
         )
+
+    if (
+        sales is not None
+        and sales.orders
+        and sales.revenue
+        and spend.conversions
+        and spend.conversion_value
+        # Only where Google counts no more conversions than the shop has orders.
+        # Its conversions column adds up every action the account counts, so an
+        # account also counting sign-ups or add-to-carts at no value would show a
+        # small average per conversion with a perfectly good purchase tag; that
+        # account claims more conversions than the shop saw orders.
+        and spend.conversions <= sales.orders
+    ):
+        # Two commissions for the same shop: the cut as Google was told about
+        # it, and the cut the order book implies. The tag deliberately sends
+        # the marketplace's share of each order rather than the order, so the
+        # yardstick is the commission on an average basket - and a value at a
+        # fraction of even that is a tag sending the wrong figure.
+        theirs = spend.conversion_value / spend.conversions
+        # Against the configured rate rather than a share derived from Stripe:
+        # the tag sends a fixed cut of each order whatever Stripe later kept,
+        # and a yardstick that moved with Stripe's ledger would warn with
+        # Stripe down and stay silent with it up on the same data.
+        ours = sales.revenue / sales.orders * keep
+        if theirs < ours * _VALUE_TAG_TOLERANCE:
+            lines.append(
+                f"**Google is told each sale is worth {money(theirs)} where the "
+                f"shop's own commission per order averages {money(ours)}** - "
+                "the tag sends the marketplace's cut of each order, and even "
+                "against that yardstick the value arriving is a fraction of "
+                "the real one. Worth fixing before any budget decision, "
+                "because it also makes the attributed floor above look worse "
+                "than it is."
+            )
 
     if sales is not None and sales.orders and spend.conversions:
         gap = abs(spend.conversions - sales.orders) / sales.orders
@@ -903,6 +998,7 @@ __all__ = [
     "Sales",
     "Spend",
     "account",
+    "attributed_return",
     "build_client",
     "by_campaign",
     "campaign_names",

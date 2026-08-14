@@ -238,8 +238,11 @@ else:
             # The second campaign spends and converts nothing: money with nothing
             # to show for it, which is the line the panel exists to print.
             # Google credits fewer conversions than the shop has orders, which
-            # is the gap the panel is meant to notice.
-            rows.append((1, day, 13.49, 118, 1.0, 200.0))
+            # is the gap the panel is meant to notice. The value is the
+            # marketplace's cut of the sale, not the sale: the site's tag
+            # deliberately sends the commission, so a $200 basket arrives
+            # as $25 of conversion value.
+            rows.append((1, day, 13.49, 118, 1.0, 25.0))
             rows.append((2, day, 66.58, 458, 0.0, 0.0))
         frame = pd.DataFrame(
             rows,
@@ -384,18 +387,25 @@ assert metrics["Google's own conversions"] == "30", metrics["Google's own conver
 # ledger rather than an assumed 12% of revenue; merchants are on their own
 # rates and this counts what each of them actually paid. Asserted by shape and
 # against the sentence beneath it, because the ledger is live.
-earned = metrics["Commission per $1 spent"]
+earned = metrics["Commission per $1 spent, at most"]
 assert re.fullmatch(r"\d+\.\d\d", earned), earned
 live_body = texts(test)
-assert f"${earned} back for every $1 of ad spend" in live_body, live_body[-900:]
+# A ceiling on the page as well as in the sentences: the commission is charged on
+# every sale in the window, ads or not, so the heading may not say the ads earned
+# it, and the sales Google itself claims stand beside it as the floor.
+assert f"At most ${earned} back for every $1 of ad spend" in live_body, live_body[
+    -900:
+]
 assert "Goal 1.00" in live_body, live_body[-900:]
-assert "pay for themselves" in live_body, live_body[-900:]
+assert "On the sales Google itself claims it is $" in live_body, live_body[-900:]
+assert "at its most flattering" in live_body, live_body[-900:]
+assert "The ads pay for themselves at this rate" not in live_body, live_body[-900:]
 assert "what Stripe charged across every merchant" in live_body, live_body[-900:]
 assert "of commission actually charged" in live_body, live_body[-900:]
 # Drawn escaped: two dollar signs on one line are inline maths to Streamlit, and
 # the heading was losing both of them off the page.
 drawn = "\n".join(str(m.value) for m in test.markdown)
-assert f"\\${earned} back for every \\$1" in drawn, drawn[-900:]
+assert f"At most \\${earned} back for every \\$1" in drawn, drawn[-900:]
 
 frames = [df.value for df in test.dataframe]
 campaigns = next(f for f in frames if "Cost per conversion" in list(f.columns))
@@ -451,7 +461,7 @@ print("paused: ok")
 bad_stripe = run("badstripe")
 bad_metrics = {m.label: m.value for m in bad_stripe.metric}
 bad_body = texts(bad_stripe)
-assert bad_metrics["Commission per $1 spent"] == "1.20", bad_metrics
+assert bad_metrics["Commission per $1 spent, at most"] == "1.20", bad_metrics
 assert "$1.20 back for every $1 of ad spend" in bad_body, bad_body[-900:]
 assert "Commission is assumed at 12%" in bad_body, bad_body[-900:]
 print("badstripe: ok")
@@ -471,7 +481,7 @@ assert eur_metrics["Orders (CRM)"] == "120", eur_metrics["Orders (CRM)"]
 assert eur_metrics["Revenue per $1 spent"] == "\u2014", eur_metrics
 # Commission survives it, and should: it is what Stripe charged in dollars
 # against spend in dollars, whatever currency the shop's own takings are in.
-assert eur_metrics["Commission per $1 spent"] == earned, eur_metrics
+assert eur_metrics["Commission per $1 spent, at most"] == earned, eur_metrics
 assert f"${earned} back for every $1 of ad spend" in eur_body, eur_body[-900:]
 assert "of revenue at 12%" not in eur_body, eur_body[-900:]
 assert "takings are in EUR" in eur_body, eur_body[-900:]

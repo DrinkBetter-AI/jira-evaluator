@@ -6082,9 +6082,10 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         earned = ads_client.earned_return(commission.now, spend.cost)
         before = ads_client.earned_return(commission.before, spend.prev_cost)
         basis = (
-            f"Commission Stripe charged in the window, divided by spend. "
-            f"{ads_client.BREAK_EVEN_RETURN:.2f} is where the ads pay for "
-            "themselves."
+            "Commission Stripe charged in the window, divided by spend. Every "
+            "sale in the window is in it, ads or not, so it is a ceiling rather "
+            f"than a return; {ads_client.BREAK_EVEN_RETURN:.2f} is where an ad "
+            "pays for itself."
         )
     else:
         earned = (
@@ -6099,14 +6100,15 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         )
         basis = (
             f"Revenue in the window at {keep:.0%} commission, divided by spend. "
-            f"{ads_client.BREAK_EVEN_RETURN:.2f} is where the ads pay for "
-            "themselves."
+            "Every sale in the window is in it, ads or not, so it is a ceiling "
+            f"rather than a return; {ads_client.BREAK_EVEN_RETURN:.2f} is where "
+            "an ad pays for itself."
         )
     _tile(
         tiles[3],
         TAB_BUSINESS,
         ads,
-        f"Commission per {unit} spent",
+        f"Commission per {unit} spent, at most",
         f"{earned:.2f}" if earned else "\u2014",
         # A ratio, not money: hundredths are the whole movement here, so an
         # unchanged window says so in the word the tiles use rather than
@@ -6136,14 +6138,37 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         f"{spend.conversions:,.0f}",
     )
 
-    if earned:
+    # The headline follows the sentences in the expander: a ceiling that was
+    # read and came to zero is still a ceiling worth printing - it says the
+    # window's sales earned nothing, not that nothing could be measured.
+    # And only where money went out: a quiet window can still hold takings and
+    # a measured ledger, but a return on nothing spent is not a figure.
+    has_ceiling = commission is not None or bool(sales and comparable and sales.revenue)
+    if has_ceiling and spend.cost:
         goal = ads_client.BREAK_EVEN_RETURN
         gap = goal - earned
         standing = (
-            "The ads pay for themselves at this rate."
+            "Above what an ad needs to pay for itself - at its most flattering."
             if gap <= 0
-            else f"{_money(gap, money)} short on every {unit}, which is "
-            f"{_money(spend.cost * gap, money)} over these {days} days."
+            else f"{_money(gap, money)} short on every {unit} even at its most "
+            f"flattering, which is {_money(spend.cost * gap, money)} over these "
+            f"{days} days."
+        )
+        # The same sum over the sales Google's own attribution recorded, which is
+        # the floor under that ceiling. Quoted beside it rather than instead of
+        # it: one counts sales the ads had nothing to do with, the other misses
+        # sales they did win, and the answer is somewhere between the two. The
+        # conversion value is commission already - the site's tag deliberately
+        # sends the marketplace's cut of each order - so no rate is applied.
+        floor = ads_client.attributed_return(spend.conversion_value, spend.cost)
+        # Withheld unless it really is the lower of the two: Google claiming more
+        # value than the shop captured, or a measured commission of nothing,
+        # would put this above the ceiling it is quoted as sitting under.
+        attributed = (
+            f" On the sales Google itself claims it is {_money(floor, money)} "
+            f"per {unit}."
+            if spend.conversion_value and floor < earned
+            else ""
         )
         trend = (
             ""
@@ -6152,13 +6177,14 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
             f"{_money(before, money)} in the previous {days} days."
         )
         headline = (
-            f"### {_money(earned, money)} back for every {unit} of ad spend\n\n"
-            f"**Goal {goal:.2f}.** {standing}{trend}"
+            f"### At most {_money(earned, money)} back for every {unit} of ad "
+            f"spend\n\n"
+            f"**Goal {goal:.2f}.** {standing}{attributed}{trend}"
         )
         _report(TAB_BUSINESS).note(
             ads,
-            f"**{_money(earned, money)} back for every {unit} of ad spend.** "
-            f"Goal {goal:.2f}. {standing}{trend}",
+            f"**At most {_money(earned, money)} back for every {unit} of ad "
+            f"spend.** Goal {goal:.2f}. {standing}{attributed}{trend}",
         )
         st.markdown(_unmathed(headline))
         st.caption(
@@ -6170,6 +6196,28 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
             "Connect a Stripe key with Application Fees read access and this "
             "becomes what was actually charged, per merchant agreement."
         )
+    elif spend.cost and spend.conversion_value:
+        # No ceiling could be computed - no Stripe ledger, and either no
+        # comparable takings or none captured in the window - but the
+        # attributed return needs only the ad account's own figures, which are
+        # in its own currency by definition.
+        floor = ads_client.attributed_return(spend.conversion_value, spend.cost)
+        headline = (
+            f"### On the sales Google itself claims, {_money(floor, money)} "
+            f"back for every {unit} of ad spend\n\n"
+            f"**Goal {ads_client.BREAK_EVEN_RETURN:.2f}.** The tag sends the "
+            "marketplace's cut of each order, so this is commission already. "
+            "Only Google's own attribution is counted here; no all-channel "
+            "ceiling could be read beside it."
+        )
+        _report(TAB_BUSINESS).note(
+            ads,
+            f"**On the sales Google itself claims, {_money(floor, money)} back "
+            f"for every {unit} of ad spend.** Goal "
+            f"{ads_client.BREAK_EVEN_RETURN:.2f}. Only Google's own attribution "
+            "is counted; no all-channel ceiling could be read beside it.",
+        )
+        st.markdown(_unmathed(headline))
 
     if spend.partial:
         st.warning(
