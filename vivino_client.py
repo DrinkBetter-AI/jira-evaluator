@@ -44,7 +44,7 @@ _TIMEOUT = 30
 # the pages stop, start again from the highest price seen. The request budget
 # is the honest ceiling - a shop bigger than it is reported as partly read.
 _PAGE_SIZE = 24
-_MAX_REQUESTS = 900
+_MAX_REQUESTS = 2200
 _PAUSE_SECONDS = 0.15
 # The wall-clock ceiling, held under the deployment's 1800s request limit: a
 # slow feed ends the read with what it has rather than outliving the server's
