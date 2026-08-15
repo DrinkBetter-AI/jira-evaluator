@@ -89,6 +89,23 @@ def test_a_merged_pr_that_cannot_show_its_key_does_not_cost_the_clean_badge():
     assert "🔍 Clean PRs" in earned
 
 
+def test_delivered_hours_sums_estimates_and_says_what_it_cannot_see():
+    resolved = pd.DataFrame(
+        [
+            {"estimate_hours": 4.0, "issue_type": "Task"},
+            {"estimate_hours": 2.5, "issue_type": "Bug"},
+            {"estimate_hours": 0.0, "issue_type": "Bug"},
+            # A closing epic is its children's work, not a week of its own.
+            {"estimate_hours": 40.0, "issue_type": "Epic"},
+        ]
+    )
+    assert kpi.delivered_hours(resolved) == (6.5, 3, 1)
+
+
+def test_delivered_hours_of_an_empty_week_is_zero():
+    assert kpi.delivered_hours(pd.DataFrame()) == (0.0, 0, 0)
+
+
 def test_no_judgeable_pr_means_no_clean_badge():
     prs = pd.DataFrame(
         [
