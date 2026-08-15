@@ -46,6 +46,7 @@ from jira_client import (
     load_jira_profile,
 )
 from access_gate import render_sign_out, require_password
+import focus
 import github_client
 import pr_hygiene
 from capacity import (
@@ -8214,6 +8215,133 @@ def _as_frame(value: Any) -> pd.DataFrame:
     return value if isinstance(value, pd.DataFrame) else pd.DataFrame()
 
 
+def _render_personal_prs(
+    person: str,
+    open_prs: pd.DataFrame,
+    merged_prs: pd.DataFrame,
+    tickets: pd.DataFrame,
+    github_ready: bool,
+    github_error: str,
+) -> None:
+    """The one engineer's pull requests: what is open, and what shipped lately."""
+    st.subheader("Your Pull Requests")
+    if not github_ready:
+        st.info(
+            "Connect GitHub to see PR status. Set a read-only DASHBOARD_GITHUB_TOKEN "
+            "on the deployment."
+            + (f" ({github_error})" if github_error else "")
+        )
+        return
+
+    keys = _known_project_keys(tickets)
+    login_map = focus.parse_login_map()
+    mine_open = focus.personal_prs(
+        pr_hygiene.add_hygiene_fields(open_prs, keys), person, tickets, login_map
+    )
+    mine_merged = focus.personal_prs(
+        pr_hygiene.add_hygiene_fields(merged_prs, keys), person, tickets, login_map
+    )
+
+    if not focus.logins_for(person, login_map):
+        st.caption(
+            f"No GitHub login is mapped for {person} (set GITHUB_LOGIN_MAP, e.g. "
+            '"Name=login"), so only PRs naming one of their Jira tickets appear here.'
+        )
+
+    if mine_open.empty and mine_merged.empty:
+        st.info(f"No open or recently merged PRs found for {person}.")
+        return
+
+    stuck = (
+        mine_open[mine_open["approving_reviews"].fillna(0).astype(int) == 0]
+        if not mine_open.empty
+        else mine_open
+    )
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Open PRs", len(mine_open))
+    c2.metric("Stuck (no approving review)", len(stuck))
+    c3.metric("Merged recently", len(mine_merged))
+
+    config = {
+        "url": st.column_config.LinkColumn("PR", display_text=r"/pull/(\d+)"),
+        "title": st.column_config.TextColumn("Title", width="large"),
+        "jira_key": st.column_config.TextColumn("Jira"),
+        "age_days": st.column_config.NumberColumn("Age (days)", format="%.0f"),
+        "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.0f"),
+    }
+    if not mine_open.empty:
+        st.markdown("**Open — oldest first**")
+        st.dataframe(
+            mine_open.sort_values("age_days", ascending=False)[
+                ["url", "title", "jira_key", "age_days", "idle_days"]
+            ],
+            width="stretch",
+            hide_index=True,
+            column_config=config,
+        )
+    if not mine_merged.empty:
+        merged_cols = [
+            column
+            for column in ("url", "title", "jira_key", "merged_at")
+            if column in mine_merged.columns
+        ]
+        st.markdown("**Recently merged**")
+        st.dataframe(
+            mine_merged[merged_cols],
+            width="stretch",
+            hide_index=True,
+            column_config=config,
+        )
+
+
+def _render_individual_page(
+    person: str,
+    filtered: pd.DataFrame,
+    organization: pd.DataFrame,
+    open_prs: pd.DataFrame,
+    merged_prs: pd.DataFrame,
+    github_ready: bool,
+    github_error: str,
+    include_backlogs: bool,
+) -> None:
+    """One engineer's page: nothing on it belongs to anyone else.
+
+    The point is focus - when someone opens their own view, every ticket, PR
+    and number is theirs, so the page says where to put the next hour rather
+    than what the rest of the organization is doing."""
+    st.caption(f"Focused view — everything on this page is {person}'s own work.")
+
+    _render_scope_breakdown(filtered, scope=SCOPE_INDIVIDUAL, include_backlogs=include_backlogs)
+
+    st.divider()
+    _render_personal_prs(person, open_prs, merged_prs, organization, github_ready, github_error)
+
+    st.divider()
+    # Their documentation habit, not just their assignments: tickets they wrote
+    # count too, because the writer is who can make a ticket Devin-ready.
+    owners = organization["assignee"].fillna("").astype(str).str.strip()
+    reporters = (
+        organization["reporter"].fillna("").astype(str).str.strip()
+        if "reporter" in organization.columns
+        else pd.Series("", index=organization.index)
+    )
+    theirs = organization[(owners == person) | (reporters == person)]
+    _render_ticket_quality(theirs)
+
+    st.divider()
+    _render_priority_queue(filtered, include_backlogs=include_backlogs)
+
+    st.divider()
+    _render_estimate_policy(filtered)
+
+    st.divider()
+    _render_stale_cleanup(filtered)
+
+    st.divider()
+    st.subheader("Sprint Capacity")
+    _render_sprint_capacity(filtered, status_source_df=filtered, selected_ticket_key=None)
+
+
 def _render_engineering_page() -> None:
     st.caption("Visual monitoring for stale, idle, and high-risk tickets.")
     # Reserved before the sections run: the download button can only be built
@@ -8288,30 +8416,6 @@ def _render_engineering_page() -> None:
     pr_count_7 = data.get("merged_count_7") if github_ready else None
     pr_count_30 = data.get("merged_count_30") if github_ready else None
     open_count_exact = data.get("open_pr_count") if github_ready else None
-
-    # None (not an empty frame) marks a read that failed, so a section can say
-    # "could not load" instead of an authoritative "there is nothing here".
-    _render_resolved_summary(
-        data.get("resolved_count_7"),
-        data.get("resolved_count_30"),
-        data.get("resolved_30"),
-        pr_count_7,
-        pr_count_30,
-        merged_prs,
-        github_ready,
-        github_error,
-    )
-    st.divider()
-
-    _render_new_and_triage(
-        data.get("created_count_1"),
-        data.get("created_count_7"),
-        data.get("triage_stuck_count"),
-        data.get("created_7"),
-        data.get("triage_stuck"),
-        TRIAGE_STUCK_HOURS,
-    )
-    st.divider()
 
     # "Unassigned" is Jira's placeholder, not a colleague: offering it here would
     # inflate the head-count and let someone "focus" on a person who does not
@@ -8393,6 +8497,46 @@ def _render_engineering_page() -> None:
     unscoped = filtered
     if selected_assignees is not None:
         filtered = filtered[filtered["assignee"].isin(selected_assignees)]
+
+    # One engineer means one page about them alone: the org-wide sections would
+    # only be somebody else's work wearing their name at the top.
+    if scope == SCOPE_INDIVIDUAL and selected_assignees:
+        _render_individual_page(
+            person=str(selected_assignees[0]),
+            filtered=filtered,
+            organization=df,
+            open_prs=open_prs,
+            merged_prs=merged_prs,
+            github_ready=github_ready,
+            github_error=github_error,
+            include_backlogs=include_backlogs,
+        )
+        _download_report(engineering_slot, TAB_ENGINEERING)
+        return
+
+    # None (not an empty frame) marks a read that failed, so a section can say
+    # "could not load" instead of an authoritative "there is nothing here".
+    _render_resolved_summary(
+        data.get("resolved_count_7"),
+        data.get("resolved_count_30"),
+        data.get("resolved_30"),
+        pr_count_7,
+        pr_count_30,
+        merged_prs,
+        github_ready,
+        github_error,
+    )
+    st.divider()
+
+    _render_new_and_triage(
+        data.get("created_count_1"),
+        data.get("created_count_7"),
+        data.get("triage_stuck_count"),
+        data.get("created_7"),
+        data.get("triage_stuck"),
+        TRIAGE_STUCK_HOURS,
+    )
+    st.divider()
 
     _render_metrics(
         filtered,
