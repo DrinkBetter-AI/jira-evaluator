@@ -48,6 +48,7 @@ from jira_client import (
 from access_gate import render_sign_out, require_password
 import focus
 import github_client
+import kpi
 import pr_hygiene
 from capacity import (
     capacity_table,
@@ -459,6 +460,41 @@ def fetch_resolved_tickets(
     client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
     return client.search_issues(
         jql=_resolved_jql(statuses, days),
+        fields=list(RESOLVED_FIELDS),
+        max_results=max_results,
+        page_size=page_size,
+    )
+
+
+def _reopened_jql(statuses: tuple[str, ...], days: int) -> str:
+    """JQL for tickets that LEFT a resolved status within the last ``days``.
+
+    A ticket that was called done and then moved out of every resolved status
+    is rework - usually a bug that came back.
+    """
+    return (
+        f"status CHANGED FROM ({_jql_status_list(statuses)}) AFTER -{int(days)}d "
+        f"AND status NOT IN ({_jql_status_list(statuses)}) ORDER BY updated DESC"
+    )
+
+
+@st.cache_data(ttl=300, show_spinner=False, refresh_mode="background")
+def fetch_reopened_tickets(
+    creds_path: str,
+    profile_name: str,
+    days: int,
+    statuses: tuple[str, ...],
+    max_results: int,
+    page_size: int,
+    schema_version: int,
+) -> pd.DataFrame:
+    """Tickets that left a resolved status in the window and are still out of it."""
+    _ = schema_version
+    if not statuses:
+        return pd.DataFrame()
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.search_issues(
+        jql=_reopened_jql(statuses, days),
         fields=list(RESOLVED_FIELDS),
         max_results=max_results,
         page_size=page_size,
@@ -8303,6 +8339,146 @@ def _render_personal_prs(
         )
 
 
+def _person_frame(frame: pd.DataFrame | None, person: str) -> pd.DataFrame:
+    """The rows of ``frame`` assigned to ``person``; a failed read reads as none."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty or "assignee" not in frame.columns:
+        return pd.DataFrame()
+    owners = frame["assignee"].fillna("").astype(str).str.strip()
+    return frame[owners == str(person).strip()]
+
+
+def _render_scorecard(
+    person: str,
+    owned: pd.DataFrame,
+    gradable_source: pd.DataFrame,
+    personal_open_prs: pd.DataFrame,
+    github_ready: bool,
+) -> None:
+    """The KPI scorecard: components, badges and the 7/30/90-day trend."""
+    st.subheader("Scorecard")
+
+    def _window(days: int) -> pd.DataFrame:
+        return fetch_resolved_tickets(
+            creds_path=CREDS_PATH,
+            profile_name=PROFILE_NAME,
+            days=days,
+            statuses=RESOLVED_STATUSES,
+            max_results=MAX_RESULTS,
+            page_size=JIRA_PAGE_SIZE,
+            schema_version=FETCH_SCHEMA_VERSION,
+        )
+
+    with st.spinner("Reading resolved and reopened history..."):
+        try:
+            resolved_7 = len(_person_frame(_window(7), person))
+            resolved_30 = len(_person_frame(_window(30), person))
+            resolved_90 = len(_person_frame(_window(90), person))
+            reopened_90 = len(
+                _person_frame(
+                    fetch_reopened_tickets(
+                        creds_path=CREDS_PATH,
+                        profile_name=PROFILE_NAME,
+                        days=90,
+                        statuses=RESOLVED_STATUSES,
+                        max_results=MAX_RESULTS,
+                        page_size=JIRA_PAGE_SIZE,
+                        schema_version=FETCH_SCHEMA_VERSION,
+                    ),
+                    person,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"History could not be read, so the trend is hidden: {str(exc)[:200]}")
+            resolved_7 = resolved_30 = resolved_90 = reopened_90 = None
+
+    if "has_estimate" not in owned.columns or "estimate_hours" not in owned.columns:
+        owned = estimate_policy(owned, BACKLOG_STATUSES)
+    scored = ticket_quality.score_tickets(gradable_source) if not gradable_source.empty else pd.DataFrame()
+    gradable = (
+        scored[scored["quality_score"].notna()]
+        if not scored.empty and "quality_score" in scored.columns
+        else pd.DataFrame()
+    )
+
+    prs = personal_open_prs if github_ready else pd.DataFrame()
+    parts = kpi.components(owned, gradable, resolved_7, resolved_90, reopened_90, prs)
+    score = kpi.overall(parts)
+
+    left, right = st.columns([1, 2])
+    with left:
+        st.metric(
+            "Overall",
+            "n/a" if score is None else f"{score:.0f} / 100",
+            help=(
+                "Weighted mean of the components on the right; a component with "
+                "nothing to measure is dropped and the weights renormalize."
+            ),
+        )
+        earned = kpi.badges(
+            parts, owned, gradable, resolved_7, resolved_30, resolved_90, reopened_90, prs
+        )
+        if earned:
+            st.markdown("**Badges this week**")
+            for badge, why in earned:
+                st.markdown(f"{badge} — {why}")
+        else:
+            st.caption("No badges earned yet this week.")
+    with right:
+        if parts:
+            st.dataframe(
+                pd.DataFrame(
+                    {
+                        "Component": [p.name for p in parts],
+                        "Score": [round(p.score) for p in parts],
+                        "Weight": [kpi.WEIGHTS.get(p.name, 0.0) for p in parts],
+                        "Evidence": [p.detail for p in parts],
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Score": st.column_config.ProgressColumn(
+                        "Score", min_value=0, max_value=100, format="%d"
+                    ),
+                },
+            )
+        else:
+            st.info("Not enough data yet to score any component.")
+
+    if resolved_7 is not None:
+        st.markdown("**Trend — resolved per week, by window**")
+        rate_7 = kpi.weekly_rate(resolved_7, 7)
+        rate_30 = kpi.weekly_rate(resolved_30, 30)
+        rate_90 = kpi.weekly_rate(resolved_90, 90)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(
+            "Last 7 days",
+            f"{rate_7:.1f}/wk",
+            delta=None if rate_30 is None else f"{rate_7 - rate_30:+.1f} vs 30d pace",
+        )
+        c2.metric(
+            "Last 30 days",
+            f"{rate_30:.1f}/wk",
+            delta=None if rate_90 is None else f"{rate_30 - rate_90:+.1f} vs 90d pace",
+        )
+        c3.metric("Last 90 days", f"{rate_90:.1f}/wk", help="Their own baseline.")
+        c4.metric(
+            "Reopened (90d)",
+            reopened_90,
+            help=(
+                "Tickets that left a resolved status in the last 90 days and are "
+                "still out of it - rework."
+            ),
+            delta=None if not reopened_90 else f"{reopened_90} came back",
+            delta_color="inverse",
+        )
+        st.caption(
+            "Rates are per week so the windows compare like for like. Rising "
+            "short-window rates mean improving; a 7-day rate under the 90-day "
+            "baseline means slowing down."
+        )
+
+
 def _render_individual_page(
     person: str,
     filtered: pd.DataFrame,
@@ -8322,10 +8498,6 @@ def _render_individual_page(
 
     _render_scope_breakdown(filtered, scope=SCOPE_INDIVIDUAL, include_backlogs=include_backlogs)
 
-    st.divider()
-    _render_personal_prs(person, open_prs, merged_prs, organization, github_ready, github_error)
-
-    st.divider()
     # Their documentation habit, not just their assignments: tickets they wrote
     # count too, because the writer is who can make a ticket Devin-ready.
     owners = organization["assignee"].fillna("").astype(str).str.strip()
@@ -8335,6 +8507,24 @@ def _render_individual_page(
         else pd.Series("", index=organization.index)
     )
     theirs = organization[(owners == person) | (reporters == person)]
+
+    personal_open = (
+        focus.personal_prs(
+            pr_hygiene.add_hygiene_fields(open_prs, _known_project_keys(organization)),
+            person,
+            organization,
+        )
+        if github_ready
+        else pd.DataFrame()
+    )
+
+    st.divider()
+    _render_scorecard(person, filtered.copy(), theirs, personal_open, github_ready)
+
+    st.divider()
+    _render_personal_prs(person, open_prs, merged_prs, organization, github_ready, github_error)
+
+    st.divider()
     _render_ticket_quality(theirs)
 
     st.divider()
