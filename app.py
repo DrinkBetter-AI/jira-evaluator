@@ -341,7 +341,11 @@ def fetch_resolved_count(
 
 
 def _person_clause(person: str) -> str:
-    """A JQL ``assignee = \"...\"`` clause, quoted the same way statuses are."""
+    """A JQL ``assignee = \"...\"`` clause.
+
+    ``person`` is the Jira account id when the caller knows it (exact, and
+    survives two people sharing a display name), else the display name.
+    """
     escaped = str(person).strip().replace("\\", "\\\\").replace('"', '\\"')
     return f'assignee = "{escaped}"'
 
@@ -8382,12 +8386,21 @@ def _render_scorecard(
     st.subheader("Scorecard")
 
     # Counted server-side per person (like the headline tiles), so a busy
-    # 90-day window is never silently truncated by the row-fetch cap.
+    # 90-day window is never silently truncated by the row-fetch cap. The
+    # account id, when the board carries one, beats the display name in JQL:
+    # exact, and unambiguous between namesakes.
+    who = person
+    if "assignee_account_id" in owned.columns:
+        ids = owned["assignee_account_id"].dropna().astype(str).str.strip()
+        ids = ids[ids != ""].unique()
+        if len(ids) == 1:
+            who = str(ids[0])
+
     def _window(days: int) -> int | None:
         return fetch_person_resolved_count(
             creds_path=CREDS_PATH,
             profile_name=PROFILE_NAME,
-            person=person,
+            person=who,
             days=days,
             statuses=RESOLVED_STATUSES,
             schema_version=FETCH_SCHEMA_VERSION,
@@ -8401,7 +8414,7 @@ def _render_scorecard(
             reopened_90 = fetch_person_reopened_count(
                 creds_path=CREDS_PATH,
                 profile_name=PROFILE_NAME,
-                person=person,
+                person=who,
                 days=90,
                 statuses=RESOLVED_STATUSES,
                 schema_version=FETCH_SCHEMA_VERSION,
@@ -8541,19 +8554,25 @@ def _render_individual_page(
     personal_prs = pd.DataFrame()
     if github_ready:
         keys = _known_project_keys(organization)
-        frames = [
-            focus.personal_prs(
-                pr_hygiene.add_hygiene_fields(frame, keys), person, organization
-            )
-            for frame in (open_prs, merged_prs)
-            if isinstance(frame, pd.DataFrame) and not frame.empty
-        ]
+        # The merged-PR fetch carries no branch or body, so a Jira key can
+        # only be read from a merged PR's title; mark those rows so the
+        # clean-PR badge is not withheld for a key nobody could see.
+        frames = []
+        for frame, detectable in ((open_prs, True), (merged_prs, False)):
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                mine = focus.personal_prs(
+                    pr_hygiene.add_hygiene_fields(frame, keys), person, organization
+                ).copy()
+                mine["key_detectable"] = detectable
+                frames.append(mine)
         if frames:
             personal_prs = pd.concat(frames, ignore_index=True)
             if "url" in personal_prs.columns:
                 personal_prs = personal_prs.drop_duplicates(subset="url")
 
-    whole_board = organization[owners == name]
+    # Backlog tickets are parked on purpose - the page's other metrics exempt
+    # them, and so does the score, regardless of the sidebar toggle.
+    whole_board = _metrics_df(organization[owners == name], include_backlogs=False)
 
     st.divider()
     _render_scorecard(person, whole_board.copy(), theirs, personal_prs, github_ready)

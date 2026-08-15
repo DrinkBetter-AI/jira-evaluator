@@ -259,9 +259,17 @@ def badges(
         earned.append(("🧪 No boomerangs", "nothing resolved in 90 days came back"))
 
     if not prs.empty and {"has_jira_key", "is_unowned"} <= set(prs.columns):
-        keyed = prs["has_jira_key"].fillna(False).astype(bool).all()
+        # A merged PR's fetch carries no branch or body, so a missing key
+        # there is invisible data, not a missing key; judge only rows whose
+        # key could actually be seen.
+        judgeable = (
+            prs[prs["key_detectable"].fillna(False).astype(bool)]
+            if "key_detectable" in prs.columns
+            else prs
+        )
+        keyed = judgeable["has_jira_key"].fillna(False).astype(bool).all()
         owned_prs = ~prs["is_unowned"].fillna(False).astype(bool)
         if bool(keyed) and bool(owned_prs.all()):
-            earned.append(("🔍 Clean PRs", "every PR names its ticket and has a reviewer"))
+            earned.append(("🔍 Clean PRs", "every PR names its ticket and nobody left one unowned"))
 
     return earned

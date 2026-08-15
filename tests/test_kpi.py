@@ -77,6 +77,18 @@ def test_an_epic_does_not_count_against_estimate_discipline():
     assert by_name["Estimates"] == 100.0
 
 
+def test_a_merged_pr_that_cannot_show_its_key_does_not_cost_the_clean_badge():
+    prs = pd.DataFrame(
+        [
+            {"has_jira_key": True, "is_unowned": False, "key_detectable": True},
+            # Merged fetch carries no branch/body, so no key is visible.
+            {"has_jira_key": False, "is_unowned": False, "key_detectable": False},
+        ]
+    )
+    earned = dict(kpi.badges([], pd.DataFrame(), pd.DataFrame(), None, None, None, None, prs))
+    assert "🔍 Clean PRs" in earned
+
+
 def test_the_estimate_rule_follows_the_written_policy_when_present():
     owned = pd.DataFrame(
         [
