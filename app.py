@@ -8563,7 +8563,11 @@ def _render_individual_page(
                 mine = focus.personal_prs(
                     pr_hygiene.add_hygiene_fields(frame, keys), person, organization
                 ).copy()
-                mine["key_detectable"] = detectable
+                # A merged PR that names its ticket in the title has shown
+                # its key despite the lighter fetch, so it is judgeable too.
+                mine["key_detectable"] = detectable | mine.get(
+                    "has_jira_key", pd.Series(False, index=mine.index)
+                ).fillna(False).astype(bool)
                 frames.append(mine)
         if frames:
             personal_prs = pd.concat(frames, ignore_index=True)

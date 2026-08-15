@@ -267,9 +267,11 @@ def badges(
             if "key_detectable" in prs.columns
             else prs
         )
-        keyed = judgeable["has_jira_key"].fillna(False).astype(bool).all()
+        keyed = not judgeable.empty and bool(
+            judgeable["has_jira_key"].fillna(False).astype(bool).all()
+        )
         owned_prs = ~prs["is_unowned"].fillna(False).astype(bool)
-        if bool(keyed) and bool(owned_prs.all()):
+        if keyed and bool(owned_prs.all()):
             earned.append(("🔍 Clean PRs", "every PR names its ticket and nobody left one unowned"))
 
     return earned
