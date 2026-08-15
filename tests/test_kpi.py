@@ -77,6 +77,19 @@ def test_an_epic_does_not_count_against_estimate_discipline():
     assert by_name["Estimates"] == 100.0
 
 
+def test_the_estimate_rule_follows_the_written_policy_when_present():
+    owned = pd.DataFrame(
+        [
+            # Backlog ticket exempt by policy despite missing estimate.
+            {"idle_days": 1.0, "has_estimate": False, "policy_applies": False},
+            {"idle_days": 1.0, "has_estimate": True, "policy_applies": True},
+        ]
+    )
+    parts = kpi.components(owned, pd.DataFrame(), None, None, None, pd.DataFrame())
+    by_name = {p.name: p.score for p in parts}
+    assert by_name["Estimates"] == 100.0
+
+
 def test_badges_appear_only_when_earned():
     fresh = pd.DataFrame([{"idle_days": 2.0, "has_estimate": True, "issue_type": "Task"}])
     parts = kpi.components(fresh, pd.DataFrame(), 4, 12, 0, pd.DataFrame())

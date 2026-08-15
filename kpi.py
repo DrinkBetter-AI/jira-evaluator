@@ -148,14 +148,20 @@ def components(
         )
 
     if not owned.empty and "has_estimate" in owned.columns:
-        applies = owned
-        if "issue_type" in owned.columns:
-            is_container = (
-                _norm(owned["issue_type"])
-                .str.replace(r"[-_\s]", "", regex=True)
-                .isin(CONTAINER_ISSUE_TYPES)
-            )
-            applies = owned[~is_container]
+        # The team's written rule (hygiene.estimate_policy) exempts backlog
+        # tickets and containers; score people against that rule, not a
+        # stricter private one.
+        if "policy_applies" in owned.columns:
+            applies = owned[owned["policy_applies"].fillna(False).astype(bool)]
+        else:
+            applies = owned
+            if "issue_type" in owned.columns:
+                is_container = (
+                    _norm(owned["issue_type"])
+                    .str.replace(r"[-_\s]", "", regex=True)
+                    .isin(CONTAINER_ISSUE_TYPES)
+                )
+                applies = owned[~is_container]
         if not applies.empty:
             estimated = int(applies["has_estimate"].fillna(False).astype(bool).sum())
             out.append(
