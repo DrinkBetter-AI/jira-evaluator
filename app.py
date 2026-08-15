@@ -8758,8 +8758,10 @@ def _render_engineering_page() -> None:
         filtered = filtered[filtered["assignee"].isin(selected_assignees)]
 
     # One engineer means one page about them alone: the org-wide sections would
-    # only be somebody else's work wearing their name at the top.
-    if scope == SCOPE_INDIVIDUAL and selected_assignees:
+    # only be somebody else's work wearing their name at the top. That holds
+    # however the reader narrowed to them - the Individual scope, or the Team
+    # multiselect whittled down to a single name.
+    if selected_assignees is not None and len(selected_assignees) == 1:
         _render_individual_page(
             person=str(selected_assignees[0]),
             filtered=filtered,
