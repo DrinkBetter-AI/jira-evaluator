@@ -89,6 +89,18 @@ def test_a_merged_pr_that_cannot_show_its_key_does_not_cost_the_clean_badge():
     assert "🔍 Clean PRs" in earned
 
 
+def test_no_judgeable_pr_means_no_clean_badge():
+    prs = pd.DataFrame(
+        [
+            # Only merged PRs, none of which can show a key: no evidence,
+            # so no badge.
+            {"has_jira_key": False, "is_unowned": False, "key_detectable": False},
+        ]
+    )
+    earned = dict(kpi.badges([], pd.DataFrame(), pd.DataFrame(), None, None, None, None, prs))
+    assert "🔍 Clean PRs" not in earned
+
+
 def test_the_estimate_rule_follows_the_written_policy_when_present():
     owned = pd.DataFrame(
         [
