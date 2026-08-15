@@ -70,6 +70,7 @@ from teams import (
 from theme import inject_styles, kpi_strip
 import report as reporting
 from hygiene import (
+    CONTAINER_ISSUE_TYPES,
     DEFAULT_STALE_DAYS,
     estimate_policy,
     policy_compliance_by_owner,
@@ -1074,6 +1075,100 @@ def _tier_legend_html() -> str:
     return f'<div style="font-size:0.85rem;margin:2px 0 10px;">{spans}</div>'
 
 
+def _sprint_label(row: pd.Series) -> str:
+    """Where a ticket sits in planning: its sprint, or Backlog, or its status."""
+    name = str(row.get("sprint_name") or "").strip()
+    state = str(row.get("sprint_state") or "").strip().lower()
+    if name and state in {"active", "future"}:
+        return f"{name} ({state})"
+    status = str(row.get("status") or "").strip()
+    if status.lower() in BACKLOG_STATUSES:
+        return "Backlog"
+    return f"No sprint ({status})" if status else "No sprint"
+
+
+_URGENT_PRIORITIES = {"highest", "high", "urgent", "critical", "blocker"}
+
+
+def _workload_hours(owned: pd.DataFrame) -> dict[str, float | int]:
+    """The estimated-hour totals behind the one-on-one tiles."""
+    hours = pd.to_numeric(
+        owned.get("estimate_hours", pd.Series(index=owned.index, dtype=float)),
+        errors="coerce",
+    ).fillna(0.0)
+    state = owned.get("sprint_state", pd.Series(index=owned.index, dtype=object))
+    state = state.fillna("").astype(str).str.strip().str.lower()
+    priority = owned.get("priority", pd.Series(index=owned.index, dtype=object))
+    priority = priority.fillna("").astype(str).str.strip().str.lower()
+    # "No estimate" follows the same flag as the Estimate? column - a ticket
+    # estimated only in words counts as estimated there, so it must here too.
+    # Containers (epics, initiatives) are exempt from the estimate policy: their
+    # work lives in their children, so they are not missing an estimate.
+    if "has_estimate" in owned.columns:
+        missing = ~owned["has_estimate"].fillna(False).astype(bool)
+        if "issue_type" in owned.columns:
+            is_container = (
+                owned["issue_type"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .str.replace(r"[-_\s]", "", regex=True)
+                .isin(CONTAINER_ISSUE_TYPES)
+            )
+            missing &= ~is_container
+        unestimated = int(missing.sum())
+    else:
+        unestimated = int((hours <= 0).sum())
+    return {
+        "total": float(hours.sum()),
+        "sprint": float(hours[state == "active"].sum()),
+        "urgent": float(hours[priority.isin(_URGENT_PRIORITIES)].sum()),
+        "unestimated": unestimated,
+    }
+
+
+def _render_workload_metrics(owned: pd.DataFrame) -> None:
+    """The one-on-one numbers: how many hours of estimated work, and where.
+
+    Hours come from Jira's original estimate, so a ticket without an estimate
+    counts zero everywhere - the caption says how many such tickets there are
+    rather than letting the totals quietly understate the load.
+    """
+    load = _workload_hours(owned)
+    unestimated = int(load["unestimated"])
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        "Estimated Hours (all open)",
+        f"{load['total']:.1f} h",
+        help="Every open ticket's original estimate added up - the future workload.",
+    )
+    c2.metric(
+        "Current Sprint Hours",
+        f"{load['sprint']:.1f} h",
+        help="Estimated hours on tickets planned into the active sprint.",
+    )
+    c3.metric(
+        "Urgent Hours (High+)",
+        f"{load['urgent']:.1f} h",
+        help=(
+            "Estimated hours on tickets whose priority is High, Highest, "
+            "Urgent, Critical or Blocker."
+        ),
+    )
+    c4.metric(
+        "No Estimate",
+        unestimated,
+        help="Open tickets carrying no estimate - invisible in the hour totals.",
+    )
+    if unestimated:
+        st.caption(
+            f"{unestimated} ticket(s) carry no estimate, so the hour totals "
+            "understate the real load by whatever those turn out to cost."
+        )
+
+
 def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
     """The per-person ticket board: tier-coloured and sortable."""
     owners = df["assignee"].fillna("").astype(str).str.strip()
@@ -1087,13 +1182,14 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
         st.info(f"No tickets for {assignee} in the current scope.")
         return
 
-    if "has_estimate" not in owned.columns:
+    if "has_estimate" not in owned.columns or "estimate_hours" not in owned.columns:
         owned = estimate_policy(owned, BACKLOG_STATUSES)
     owned["tier"] = owned.apply(_attention_tier, axis=1)
     owned["devin"] = owned.apply(_devin_can_handle, axis=1)
     owned["has_estimate_label"] = owned["has_estimate"].map(
         lambda value: "Yes" if bool(value) else "No"
     )
+    owned["sprint_label"] = owned.apply(_sprint_label, axis=1)
     owned["key_url"] = owned["key"].map(_jira_ticket_url)
     owned["_tier_order"] = owned["tier"].map(_TIER_ORDER).fillna(9)
     for column in ("created", "updated"):
@@ -1105,6 +1201,7 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
             )
 
     st.markdown(f"#### {assignee} — {len(owned)} open ticket(s)")
+    _render_workload_metrics(owned)
     st.markdown(_tier_legend_html(), unsafe_allow_html=True)
     st.caption("Click any column header to sort, or pick a field below. The key links to Jira.")
 
@@ -1118,6 +1215,8 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
         "Status": "status",
         "Severity (priority)": "priority",
         "Has estimate": "has_estimate_label",
+        "Estimate (h)": "estimate_hours",
+        "Sprint": "sprint_label",
         "Devin-able?": "devin",
     }
     sort_options = {label: col for label, col in sort_options.items() if col in owned.columns}
@@ -1143,6 +1242,8 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
         "created",
         "updated",
         "has_estimate_label",
+        "estimate_hours",
+        "sprint_label",
         "devin",
     ]
     display_cols = [c for c in display_cols if c in owned.columns]
@@ -1170,6 +1271,14 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
             "created": st.column_config.TextColumn("Created"),
             "updated": st.column_config.TextColumn("Updated"),
             "has_estimate_label": st.column_config.TextColumn("Estimate?"),
+            "estimate_hours": st.column_config.NumberColumn("Estimate (h)", format="%.1f"),
+            "sprint_label": st.column_config.TextColumn(
+                "Sprint",
+                help=(
+                    "The sprint the ticket sits in, or Backlog / its status "
+                    "when it is not planned into any sprint."
+                ),
+            ),
             "devin": st.column_config.TextColumn(
                 "Devin-able?",
                 help=(
