@@ -8242,10 +8242,16 @@ def _render_personal_prs(
         pr_hygiene.add_hygiene_fields(merged_prs, keys), person, tickets, login_map
     )
 
-    if not focus.logins_for(person, login_map):
+    # Without a mapped login, open PRs still surface through the Jira keys they
+    # name - but a merged PR's ticket is Done and gone from the open-ticket
+    # frame, so the merged list cannot be trusted and says so rather than
+    # showing a silent zero.
+    login_known = bool(focus.logins_for(person, login_map))
+    if not login_known:
         st.caption(
             f"No GitHub login is mapped for {person} (set GITHUB_LOGIN_MAP, e.g. "
-            '"Name=login"), so only PRs naming one of their Jira tickets appear here.'
+            '"Name=login"). Open PRs naming one of their Jira tickets still appear; '
+            "recently merged PRs need the login mapping."
         )
 
     if mine_open.empty and mine_merged.empty:
@@ -8260,7 +8266,10 @@ def _render_personal_prs(
     c1, c2, c3 = st.columns(3)
     c1.metric("Open PRs", len(mine_open))
     c2.metric("Stuck (no approving review)", len(stuck))
-    c3.metric("Merged recently", len(mine_merged))
+    if login_known:
+        c3.metric("Merged recently", len(mine_merged))
+    else:
+        c3.metric("Merged recently", "n/a", help="Needs GITHUB_LOGIN_MAP.")
 
     config = {
         "url": st.column_config.LinkColumn("PR", display_text=r"/pull/(\d+)"),
@@ -8279,7 +8288,7 @@ def _render_personal_prs(
             hide_index=True,
             column_config=config,
         )
-    if not mine_merged.empty:
+    if login_known and not mine_merged.empty:
         merged_cols = [
             column
             for column in ("url", "title", "jira_key", "merged_at")
