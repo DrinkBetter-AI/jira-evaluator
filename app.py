@@ -48,6 +48,7 @@ from jira_client import (
 from access_gate import render_sign_out, require_password
 import focus
 import github_client
+import kpi
 import pr_hygiene
 from capacity import (
     capacity_table,
@@ -339,6 +340,58 @@ def fetch_resolved_count(
     return client.approximate_count(_resolved_jql(statuses, days, ordered=False))
 
 
+def _person_clause(person: str) -> str:
+    """A JQL ``assignee = \"...\"`` clause.
+
+    ``person`` is the Jira account id when the caller knows it (exact, and
+    survives two people sharing a display name), else the display name.
+    """
+    escaped = str(person).strip().replace("\\", "\\\\").replace('"', '\\"')
+    return f'assignee = "{escaped}"'
+
+
+@st.cache_data(ttl=300, show_spinner=False, refresh_mode="background")
+def fetch_person_resolved_count(
+    creds_path: str,
+    profile_name: str,
+    person: str,
+    days: int,
+    statuses: tuple[str, ...],
+    schema_version: int,
+) -> int | None:
+    """One person's resolved count for a window, never paging-capped.
+
+    Counted server-side like the headline tiles, so a 90-day window on a busy
+    Jira is not silently truncated to its most recent thousand rows.
+    """
+    _ = schema_version
+    if not statuses or not str(person).strip():
+        return 0
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.approximate_count(
+        f"{_person_clause(person)} AND {_resolved_jql(statuses, days, ordered=False)}"
+    )
+
+
+@st.cache_data(ttl=300, show_spinner=False, refresh_mode="background")
+def fetch_person_reopened_count(
+    creds_path: str,
+    profile_name: str,
+    person: str,
+    days: int,
+    statuses: tuple[str, ...],
+    schema_version: int,
+) -> int | None:
+    """One person's count of tickets that left a resolved status and stayed out."""
+    _ = schema_version
+    if not statuses or not str(person).strip():
+        return 0
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.approximate_count(
+        f"{_person_clause(person)} AND {_reopened_jql(statuses, days, ordered=False)}"
+    )
+
+
 def _created_jql(days: int, ordered: bool = True) -> str:
     """JQL for tickets created within the last ``days`` (org-wide, all projects)."""
     jql = f"created >= -{int(days)}d"
@@ -463,6 +516,19 @@ def fetch_resolved_tickets(
         max_results=max_results,
         page_size=page_size,
     )
+
+
+def _reopened_jql(statuses: tuple[str, ...], days: int, ordered: bool = True) -> str:
+    """JQL for tickets that LEFT a resolved status within the last ``days``.
+
+    A ticket that was called done and then moved out of every resolved status
+    is rework - usually a bug that came back.
+    """
+    jql = (
+        f"status CHANGED FROM ({_jql_status_list(statuses)}) AFTER -{int(days)}d "
+        f"AND status NOT IN ({_jql_status_list(statuses)})"
+    )
+    return jql + " ORDER BY updated DESC" if ordered else jql
 
 
 @st.cache_data(ttl=300, show_spinner=False, refresh_mode="background")
@@ -8309,6 +8375,148 @@ def _render_personal_prs(
         )
 
 
+def _render_scorecard(
+    person: str,
+    owned: pd.DataFrame,
+    gradable_source: pd.DataFrame,
+    personal_open_prs: pd.DataFrame,
+    github_ready: bool,
+) -> None:
+    """The KPI scorecard: components, badges and the 7/30/90-day trend."""
+    st.subheader("Scorecard")
+
+    # Counted server-side per person (like the headline tiles), so a busy
+    # 90-day window is never silently truncated by the row-fetch cap. The
+    # account id, when the board carries one, beats the display name in JQL:
+    # exact, and unambiguous between namesakes.
+    who = person
+    if "assignee_account_id" in owned.columns:
+        ids = owned["assignee_account_id"].dropna().astype(str).str.strip()
+        ids = ids[ids != ""].unique()
+        if len(ids) == 1:
+            who = str(ids[0])
+
+    def _window(days: int) -> int | None:
+        return fetch_person_resolved_count(
+            creds_path=CREDS_PATH,
+            profile_name=PROFILE_NAME,
+            person=who,
+            days=days,
+            statuses=RESOLVED_STATUSES,
+            schema_version=FETCH_SCHEMA_VERSION,
+        )
+
+    with st.spinner("Reading resolved and reopened history..."):
+        try:
+            resolved_7 = _window(7)
+            resolved_30 = _window(30)
+            resolved_90 = _window(90)
+            reopened_90 = fetch_person_reopened_count(
+                creds_path=CREDS_PATH,
+                profile_name=PROFILE_NAME,
+                person=who,
+                days=90,
+                statuses=RESOLVED_STATUSES,
+                schema_version=FETCH_SCHEMA_VERSION,
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"History could not be read, so the trend is hidden: {str(exc)[:200]}")
+            resolved_7 = resolved_30 = resolved_90 = reopened_90 = None
+
+    if "has_estimate" not in owned.columns or "estimate_hours" not in owned.columns:
+        owned = estimate_policy(owned, BACKLOG_STATUSES)
+    scored = ticket_quality.score_tickets(gradable_source) if not gradable_source.empty else pd.DataFrame()
+    gradable = (
+        scored[scored["quality_score"].notna()]
+        if not scored.empty and "quality_score" in scored.columns
+        else pd.DataFrame()
+    )
+
+    prs = personal_open_prs if github_ready else pd.DataFrame()
+    parts = kpi.components(owned, gradable, resolved_7, resolved_90, reopened_90, prs)
+    score = kpi.overall(parts)
+
+    left, right = st.columns([1, 2])
+    with left:
+        st.metric(
+            "Overall",
+            "n/a" if score is None else f"{score:.0f} / 100",
+            help=(
+                "Weighted mean of the components on the right; a component with "
+                "nothing to measure is dropped and the weights renormalize."
+            ),
+        )
+        earned = kpi.badges(
+            parts, owned, gradable, resolved_7, resolved_30, resolved_90, reopened_90, prs
+        )
+        if earned:
+            st.markdown("**Badges this week**")
+            for badge, why in earned:
+                st.markdown(f"{badge} — {why}")
+        else:
+            st.caption("No badges earned yet this week.")
+    with right:
+        if parts:
+            st.dataframe(
+                pd.DataFrame(
+                    {
+                        "Component": [p.name for p in parts],
+                        "Score": [round(p.score) for p in parts],
+                        "Weight": [kpi.WEIGHTS.get(p.name, 0.0) for p in parts],
+                        "Evidence": [p.detail for p in parts],
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "Score": st.column_config.ProgressColumn(
+                        "Score", min_value=0, max_value=100, format="%d"
+                    ),
+                },
+            )
+        else:
+            st.info("Not enough data yet to score any component.")
+
+    rate_7 = kpi.weekly_rate(resolved_7, 7)
+    rate_30 = kpi.weekly_rate(resolved_30, 30)
+    rate_90 = kpi.weekly_rate(resolved_90, 90)
+    if rate_7 is not None:
+        st.markdown("**Trend — resolved per week, by window**")
+
+        def _rate(value: float | None) -> str:
+            return "—" if value is None else f"{value:.1f}/wk"
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(
+            "Last 7 days",
+            _rate(rate_7),
+            delta=None if rate_30 is None else f"{rate_7 - rate_30:+.1f} vs 30d pace",
+        )
+        c2.metric(
+            "Last 30 days",
+            _rate(rate_30),
+            delta=None
+            if rate_90 is None or rate_30 is None
+            else f"{rate_30 - rate_90:+.1f} vs 90d pace",
+        )
+        c3.metric("Last 90 days", _rate(rate_90), help="Their own baseline.")
+        c4.metric(
+            "Reopened (90d)",
+            "—" if reopened_90 is None else reopened_90,
+            help=(
+                "Tickets that left a resolved status in the last 90 days and are "
+                "still out of it - rework."
+            ),
+            delta=None if not reopened_90 else f"{reopened_90} came back",
+            delta_color="inverse",
+        )
+        st.caption(
+            "Rates are per week so the windows compare like for like. Rising "
+            "short-window rates mean improving; a 7-day rate under the 90-day "
+            "baseline means slowing down."
+        )
+
+
 def _render_individual_page(
     person: str,
     filtered: pd.DataFrame,
@@ -8328,10 +8536,6 @@ def _render_individual_page(
 
     _render_scope_breakdown(filtered, scope=SCOPE_INDIVIDUAL, include_backlogs=include_backlogs)
 
-    st.divider()
-    _render_personal_prs(person, open_prs, merged_prs, organization, github_ready, github_error)
-
-    st.divider()
     # Their documentation habit, not just their assignments: tickets they wrote
     # count too, because the writer is who can make a ticket Devin-ready.
     owners = organization["assignee"].fillna("").astype(str).str.strip()
@@ -8342,6 +8546,41 @@ def _render_individual_page(
     )
     name = str(person).strip()
     theirs = organization[(owners == name) | (reporters == name)]
+
+    # The scorecard sees open AND recently merged PRs together (bounced merged
+    # work still counts as rework), and the person's whole open board rather
+    # than the sidebar-filtered slice - a headline score must not move because
+    # a filter widget did.
+    personal_prs = pd.DataFrame()
+    if github_ready:
+        keys = _known_project_keys(organization)
+        # The merged-PR fetch carries no branch or body, so a Jira key can
+        # only be read from a merged PR's title; mark those rows so the
+        # clean-PR badge is not withheld for a key nobody could see.
+        frames = []
+        for frame, detectable in ((open_prs, True), (merged_prs, False)):
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                mine = focus.personal_prs(
+                    pr_hygiene.add_hygiene_fields(frame, keys), person, organization
+                ).copy()
+                mine["key_detectable"] = detectable
+                frames.append(mine)
+        if frames:
+            personal_prs = pd.concat(frames, ignore_index=True)
+            if "url" in personal_prs.columns:
+                personal_prs = personal_prs.drop_duplicates(subset="url")
+
+    # Backlog tickets are parked on purpose - the page's other metrics exempt
+    # them, and so does the score, regardless of the sidebar toggle.
+    whole_board = _metrics_df(organization[owners == name], include_backlogs=False)
+
+    st.divider()
+    _render_scorecard(person, whole_board.copy(), theirs, personal_prs, github_ready)
+
+    st.divider()
+    _render_personal_prs(person, open_prs, merged_prs, organization, github_ready, github_error)
+
+    st.divider()
     _render_ticket_quality(theirs)
 
     st.divider()
@@ -8862,6 +9101,8 @@ def _clear_page_caches(page_title: str) -> None:
         fetch_tickets,
         fetch_resolved_count,
         fetch_resolved_tickets,
+        fetch_person_resolved_count,
+        fetch_person_reopened_count,
         fetch_created_count,
         fetch_created_tickets,
         fetch_triage_stuck_count,
