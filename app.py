@@ -8225,6 +8225,10 @@ def _render_personal_prs(
 ) -> None:
     """The one engineer's pull requests: what is open, and what shipped lately."""
     st.subheader("Your Pull Requests")
+    st.caption(
+        "PRs you authored, plus PRs by anyone on tickets assigned to you — "
+        "work on your ticket is yours to shepherd even when a colleague wrote it."
+    )
     if not github_ready:
         st.info(
             "Connect GitHub to see PR status. Set a read-only DASHBOARD_GITHUB_TOKEN "
