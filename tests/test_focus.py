@@ -56,6 +56,11 @@ def test_a_first_name_key_matches_the_full_display_name():
     assert focus.logins_for("Mehdi Ordikhani", mapping) == set()
 
 
+def test_a_two_word_key_matches_a_longer_display_name():
+    mapping = focus.parse_login_map("Mehdi Ordikhani=mordikh")
+    assert focus.logins_for("Mehdi Ordikhani Fard", mapping) == {"mordikh"}
+
+
 def test_their_prs_are_theirs_by_login_or_by_ticket():
     mapping = focus.parse_login_map("Tam=Phelan164")
     mine = focus.personal_prs(prs(), "Tam Nguyen", tickets(), mapping)

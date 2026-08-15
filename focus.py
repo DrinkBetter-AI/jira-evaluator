@@ -16,6 +16,8 @@ import os
 
 import pandas as pd
 
+from capacity import same_person
+
 _LOGIN_MAP_VAR = "GITHUB_LOGIN_MAP"
 
 
@@ -40,18 +42,17 @@ def parse_login_map(raw: str | None = None) -> dict[str, set[str]]:
 def logins_for(person: str, login_map: dict[str, set[str]] | None = None) -> set[str]:
     """The GitHub logins mapped to ``person``, matched loosely on the name.
 
-    A map key matches when it equals the display name or one of its words
-    ("Tam" matches "Tam Nguyen"), the same forgiving rule the team roster
-    uses for Jira names.
+    A map key matches by name-token subset either way ("Tam" matches
+    "Tam Nguyen", "Mehdi Ordikhani" matches "Mehdi Ordikhani Fard") - the
+    same forgiving rule the team roster uses for Jira names.
     """
     mapping = parse_login_map() if login_map is None else login_map
     name = str(person or "").strip().lower()
     if not name:
         return set()
-    words = set(name.split())
     found: set[str] = set()
     for key, logins in mapping.items():
-        if key == name or key in words or name in key.split():
+        if same_person(key, name):
             found |= logins
     return found
 
