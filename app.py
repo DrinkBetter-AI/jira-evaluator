@@ -8506,7 +8506,8 @@ def _render_individual_page(
         if "reporter" in organization.columns
         else pd.Series("", index=organization.index)
     )
-    theirs = organization[(owners == person) | (reporters == person)]
+    name = str(person).strip()
+    theirs = organization[(owners == name) | (reporters == name)]
 
     personal_open = (
         focus.personal_prs(
