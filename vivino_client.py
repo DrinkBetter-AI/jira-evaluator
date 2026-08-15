@@ -12,6 +12,7 @@ same ones a browser makes opening the shop's public page.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 import unicodedata
@@ -40,6 +41,11 @@ _HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 _TIMEOUT = 30
+# Vivino refuses Cloud Run's shared egress addresses outright (403 on every
+# endpoint) while serving the same requests from other hosts, so a deployment
+# names a forward proxy with acceptable egress here - locally it stays unset
+# and requests go direct.
+_PROXY_VAR = "VIVINO_PROXY"
 # A page holds 24 listings, and the feed stops turning pages long before a
 # 13,000-wine shop runs out, so the read walks the price axis instead: when
 # the pages stop, start again from the highest price seen. The request budget
@@ -149,6 +155,30 @@ _MERCHANT_IDS = {
 }
 
 
+# Greedy to the last @ of the token, so a password holding / or @ still goes.
+_URL_CREDENTIAL = re.compile(r"//\S*@")
+
+
+def _worded(exc: Exception) -> str:
+    """The failure in words, with any URL's embedded credential kept out."""
+    text = str(exc)
+    proxy = os.environ.get(_PROXY_VAR, "").strip()
+    if proxy:
+        # The configured value is scrubbed literally too, so a password no
+        # pattern anticipates - one holding a slash, say - still never shows.
+        text = text.replace(proxy, "the proxy")
+    return _URL_CREDENTIAL.sub("//", text)
+
+
+def _session() -> requests.Session:
+    """A session that reaches Vivino: direct, or through the deployment's proxy."""
+    http = requests.Session()
+    proxy = os.environ.get(_PROXY_VAR, "").strip()
+    if proxy:
+        http.proxies = {"http": proxy, "https": proxy}
+    return http
+
+
 def _scraped_id(slug: str, http: requests.Session) -> int | None:
     """The merchant id read off the shop page itself, or None if it has none."""
     try:
@@ -157,7 +187,9 @@ def _scraped_id(slug: str, http: requests.Session) -> int | None:
         )
         page.raise_for_status()
     except requests.RequestException as exc:
-        raise VivinoError(f"Vivino's shop page for {slug} could not be read: {exc}")
+        raise VivinoError(
+            f"Vivino's shop page for {slug} could not be read: {_worded(exc)}"
+        ) from None
     match = re.search(r"merchant_id[^0-9]{0,10}(\d+)", page.text)
     return int(match.group(1)) if match else None
 
@@ -169,7 +201,7 @@ def merchant_id(slug: str, session: requests.Session | None = None) -> int | Non
     is asked first; the table only answers when the page cannot be read, so a
     bot wall does not stop a shop whose id is already known.
     """
-    http = session or requests.Session()
+    http = session or _session()
     try:
         scraped = _scraped_id(slug, http)
     except VivinoError:
@@ -209,7 +241,7 @@ def fetch_shop(slug: str, session: requests.Session | None = None) -> Shop:
     reached. Bottles other than 0.75l are dropped - a magnum is not the same
     product at a different price.
     """
-    http = session or requests.Session()
+    http = session or _session()
     merchant = merchant_id(slug, http)
     if merchant is None:
         # A page without a readable merchant id is a page that could not be
@@ -254,7 +286,9 @@ def _read_shop(slug: str, merchant: int, http: requests.Session) -> Shop:
                 # A read that saw pack prices has learned something worth
                 # showing even with no comparable bottle yet in hand.
                 if not rows and not packed:
-                    raise VivinoError(f"Vivino refused the {slug} listings: {exc}")
+                    raise VivinoError(
+                        f"Vivino refused the {slug} listings: {_worded(exc)}"
+                    ) from None
                 failed = True
                 break
             requests_made += 1

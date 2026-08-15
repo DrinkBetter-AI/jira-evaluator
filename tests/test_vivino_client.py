@@ -434,6 +434,47 @@ def test_a_page_without_a_merchant_id_is_a_failed_read_not_an_empty_shop():
         vv.fetch_shop("a-shop", FakeSession({}, merchant=None))
 
 
+def test_a_deployment_with_a_proxy_sends_vivino_traffic_through_it(monkeypatch):
+    monkeypatch.setenv("VIVINO_PROXY", "http://user:pw@10.0.0.5:8899")
+    session = vv._session()
+    assert session.proxies == {
+        "http": "http://user:pw@10.0.0.5:8899",
+        "https": "http://user:pw@10.0.0.5:8899",
+    }
+
+
+def test_a_failure_through_the_proxy_never_names_its_credential():
+    class RefusingSession(FakeSession):
+        def get(self, url, **kwargs):
+            raise requests.ConnectionError(
+                "Cannot connect to proxy http://user:secret@10.0.0.5:8899"
+            )
+
+    with pytest.raises(vv.VivinoError) as caught:
+        vv.fetch_shop("unknown-shop", RefusingSession({}))
+    assert "secret" not in str(caught.value)
+    assert "10.0.0.5" in str(caught.value)
+
+
+def test_a_password_holding_a_slash_is_scrubbed_all_the_same(monkeypatch):
+    monkeypatch.setenv("VIVINO_PROXY", "http://user:se/cret@10.0.0.5:8899")
+
+    class RefusingSession(FakeSession):
+        def get(self, url, **kwargs):
+            raise requests.ConnectionError(
+                "Cannot connect to proxy http://user:se/cret@10.0.0.5:8899"
+            )
+
+    with pytest.raises(vv.VivinoError) as caught:
+        vv.fetch_shop("unknown-shop", RefusingSession({}))
+    assert "cret" not in str(caught.value)
+
+
+def test_without_a_proxy_vivino_is_reached_directly(monkeypatch):
+    monkeypatch.delenv("VIVINO_PROXY", raising=False)
+    assert vv._session().proxies == {}
+
+
 def test_a_shop_already_known_is_not_asked_for_its_page_again():
     # Vivino's shop pages refuse cloud addresses (403) more readily than the
     # listings API, so a known merchant id must not depend on the page at all.

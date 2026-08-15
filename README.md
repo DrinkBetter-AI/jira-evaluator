@@ -54,6 +54,7 @@ profile when they are not all set.
 | `JIRA_EXTRA_PROJECT_KEYS`     | no                               | —                                                | Extra project keys a PR may reference, e.g. `MDP,WT2`, for projects the account cannot see; used by *PR Hygiene*                                                       |
 | `PR_STALE_AGE_DAYS`           | no                               | `14`                                             | A PR open longer than this counts as stale                                                                                                                             |
 | `PR_STALE_IDLE_DAYS`          | no                               | `7`                                              | A PR untouched for longer than this counts as stale                                                                                                                    |
+| `VIVINO_PROXY`                | no locally, yes on Cloud Run     | —                                                | Forward proxy URL (`http://user:password@host:port`) Vivino requests go through; Vivino refuses Cloud Run's shared egress addresses with 403s, so the hosted app needs a proxy whose address Vivino serves - unset, requests go direct, which works from most other hosts. The URL carries a credential, so mount it from Secret Manager rather than a plain env var |
 | `POSTGRES_PASSWORD`           | no                               | —                                                | Password for the order database (`MEDUSA_DB_PASSWORD` also accepted); without it the *Orders, Revenue & AOV* section says so and everything else works                 |
 | `POSTGRES_HOST`               | no                               | `db.prod.vinovoss.private`                       | Host holding the `medusa` schema (`MEDUSA_DB_HOST` also accepted). **The dev CRM uses the same schema on `db.dev.vinovoss.private`, so a wrong host reports a different shop rather than failing** |
 | `POSTGRES_DATABASE`           | no                               | `private_dataset`                                | Database the `medusa` schema lives in (`MEDUSA_DB_NAME` also accepted)                                                                                                  |
@@ -117,6 +118,11 @@ printf '%s' '<atlassian-api-token>' | \
 printf '%s' '<order-db-password>' | \
   gcloud secrets create orders-db-password --data-file=- --project "$PROJECT"
 
+# The proxy Vivino reads go through; its URL carries a credential, so it
+# lives in Secret Manager like the other credentials.
+printf '%s' 'http://<user>:<password>@<proxy-host>:<port>' | \
+  gcloud secrets create vivino-proxy --data-file=- --project "$PROJECT"
+
 gcloud run deploy jira-dashboard \
   --source . \
   --project "$PROJECT" --region "$REGION" \
@@ -124,7 +130,7 @@ gcloud run deploy jira-dashboard \
   --session-affinity --max-instances 1 \
   --network default --subnet default --vpc-egress private-ranges-only \
   --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>" \
-  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest,POSTGRES_PASSWORD=orders-db-password:latest"
+  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest,POSTGRES_PASSWORD=orders-db-password:latest,VIVINO_PROXY=vivino-proxy:latest"
 
 # Let the whole Workspace domain in (requires IAP or domain-restricted sharing).
 gcloud run services add-iam-policy-binding jira-dashboard \
@@ -148,7 +154,7 @@ gcloud run deploy jira-dashboard \
   --session-affinity --max-instances 1 \
   --network default --subnet default --vpc-egress private-ranges-only \
   --set-env-vars "JIRA_BASE_URL=https://vinovoss.atlassian.net,JIRA_EMAIL=<service-account-email>,DASHBOARD_PASSWORD=<shared-password>" \
-  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest,POSTGRES_PASSWORD=orders-db-password:latest,DASHBOARD_COOKIE_KEY=dashboard-cookie-key:latest"
+  --set-secrets "JIRA_API_TOKEN=jira-api-token:latest,POSTGRES_PASSWORD=orders-db-password:latest,DASHBOARD_COOKIE_KEY=dashboard-cookie-key:latest,VIVINO_PROXY=vivino-proxy:latest"
 ```
 
 The order database answers on a private VPC address, so without
