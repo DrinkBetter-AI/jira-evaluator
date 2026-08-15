@@ -8599,6 +8599,7 @@ def _render_weekly_delivery(person: str, who: str, weeks: int = 12) -> None:
         st.warning(f"Weekly history could not be read: {str(exc)[:200]}")
         return
 
+    today = pd.Timestamp.now(tz="UTC").normalize()
     rows = []
     for index in range(weeks):
         frame = _as_frame(weekly.get(str(index)))
@@ -8607,6 +8608,10 @@ def _render_weekly_delivery(person: str, who: str, weeks: int = 12) -> None:
         hours, tickets, unestimated = kpi.delivered_hours(frame)
         rows.append(
             {
+                # The date the window opens, so the chart's axis has an order of
+                # its own: labelled "-10w" it would be sorted as text, putting
+                # ten weeks ago between eleven and one.
+                "Week of": (today - pd.Timedelta(days=7 * (index + 1))).date(),
                 "Week": "This week" if index == 0 else f"-{index}w",
                 "Hours": hours,
                 "Tickets": tickets,
@@ -8619,7 +8624,7 @@ def _render_weekly_delivery(person: str, who: str, weeks: int = 12) -> None:
         st.info(f"{person} has no tickets resolved in the last {weeks} weeks.")
         return
 
-    st.bar_chart(table.set_index("Week")["Hours"], height=240)
+    st.bar_chart(table.set_index("Week of")["Hours"], height=240)
     recent = table.tail(4)
     c1, c2, c3 = st.columns(3)
     c1.metric("Last 4 weeks", f"{recent['Hours'].sum():.0f}h")
