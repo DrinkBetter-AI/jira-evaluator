@@ -57,6 +57,22 @@ def test_a_text_only_estimate_is_not_called_unestimated():
     assert load["unestimated"] == 1
 
 
+def test_an_unestimated_epic_is_not_called_missing_an_estimate():
+    # Containers hold their children's work; the estimate policy exempts them,
+    # so the No Estimate tile must not count them either.
+    board = dashboard.estimate_policy(
+        pd.DataFrame(
+            [
+                {"original_estimate_sec": 0, "issue_type": "Epic", "status": "To Do"},
+                {"original_estimate_sec": 0, "issue_type": "Task", "status": "To Do"},
+            ]
+        ),
+        {"backlog"},
+    )
+    load = dashboard._workload_hours(board)
+    assert load["unestimated"] == 1
+
+
 def test_an_empty_board_reports_zero_everywhere():
     load = dashboard._workload_hours(pd.DataFrame())
     assert load["total"] == 0.0

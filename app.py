@@ -70,6 +70,7 @@ from teams import (
 from theme import inject_styles, kpi_strip
 import report as reporting
 from hygiene import (
+    CONTAINER_ISSUE_TYPES,
     DEFAULT_STALE_DAYS,
     estimate_policy,
     policy_compliance_by_owner,
@@ -1101,8 +1102,22 @@ def _workload_hours(owned: pd.DataFrame) -> dict[str, float | int]:
     priority = priority.fillna("").astype(str).str.strip().str.lower()
     # "No estimate" follows the same flag as the Estimate? column - a ticket
     # estimated only in words counts as estimated there, so it must here too.
+    # Containers (epics, initiatives) are exempt from the estimate policy: their
+    # work lives in their children, so they are not missing an estimate.
     if "has_estimate" in owned.columns:
-        unestimated = int((~owned["has_estimate"].fillna(False).astype(bool)).sum())
+        missing = ~owned["has_estimate"].fillna(False).astype(bool)
+        if "issue_type" in owned.columns:
+            is_container = (
+                owned["issue_type"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .str.lower()
+                .str.replace(r"[-_\s]", "", regex=True)
+                .isin(CONTAINER_ISSUE_TYPES)
+            )
+            missing &= ~is_container
+        unestimated = int(missing.sum())
     else:
         unestimated = int((hours <= 0).sum())
     return {
@@ -1135,9 +1150,12 @@ def _render_workload_metrics(owned: pd.DataFrame) -> None:
         help="Estimated hours on tickets planned into the active sprint.",
     )
     c3.metric(
-        "Urgent Hours (High/Highest)",
+        "Urgent Hours (High+)",
         f"{load['urgent']:.1f} h",
-        help="Estimated hours on tickets whose priority is High or above.",
+        help=(
+            "Estimated hours on tickets whose priority is High, Highest, "
+            "Urgent, Critical or Blocker."
+        ),
     )
     c4.metric(
         "No Estimate",
