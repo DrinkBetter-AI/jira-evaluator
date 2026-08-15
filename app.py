@@ -8334,7 +8334,8 @@ def _render_individual_page(
         if "reporter" in organization.columns
         else pd.Series("", index=organization.index)
     )
-    theirs = organization[(owners == person) | (reporters == person)]
+    name = str(person).strip()
+    theirs = organization[(owners == name) | (reporters == name)]
     _render_ticket_quality(theirs)
 
     st.divider()
