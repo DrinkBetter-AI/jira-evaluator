@@ -392,6 +392,49 @@ def fetch_person_reopened_count(
     )
 
 
+def _resolved_week_jql(statuses: tuple[str, ...], weeks_ago: int) -> str:
+    """JQL for one whole week of resolutions, ``weeks_ago`` weeks back.
+
+    Windows are half-open and non-overlapping (``AFTER -14d BEFORE -7d`` is the
+    week before last), so a ticket resolved once is counted in one week only.
+    """
+    older = (int(weeks_ago) + 1) * 7
+    newer = int(weeks_ago) * 7
+    jql = f"status CHANGED TO ({_jql_status_list(statuses)}) AFTER -{older}d"
+    if newer:
+        jql += f" BEFORE -{newer}d"
+    return jql
+
+
+# Estimates and issue type are all the weekly delivery view reads; the rest of
+# DEFAULT_FIELDS would be a bigger payload for columns it never shows.
+DELIVERY_FIELDS = ("assignee", "issuetype", "status", "summary", "timetracking")
+
+
+@st.cache_data(ttl=300, show_spinner=False, refresh_mode="background")
+def fetch_person_resolved_week(
+    creds_path: str,
+    profile_name: str,
+    person: str,
+    weeks_ago: int,
+    statuses: tuple[str, ...],
+    max_results: int,
+    page_size: int,
+    schema_version: int,
+) -> pd.DataFrame:
+    """One person's tickets resolved during a single past week."""
+    _ = schema_version
+    if not statuses or not str(person).strip():
+        return pd.DataFrame()
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.search_issues(
+        jql=f"{_person_clause(person)} AND {_resolved_week_jql(statuses, weeks_ago)}",
+        fields=list(DELIVERY_FIELDS),
+        max_results=max_results,
+        page_size=page_size,
+    )
+
+
 def _created_jql(days: int, ordered: bool = True) -> str:
     """JQL for tickets created within the last ``days`` (org-wide, all projects)."""
     jql = f"created >= -{int(days)}d"
@@ -8385,16 +8428,7 @@ def _render_scorecard(
     """The KPI scorecard: components, badges and the 7/30/90-day trend."""
     st.subheader("Scorecard")
 
-    # Counted server-side per person (like the headline tiles), so a busy
-    # 90-day window is never silently truncated by the row-fetch cap. The
-    # account id, when the board carries one, beats the display name in JQL:
-    # exact, and unambiguous between namesakes.
-    who = person
-    if "assignee_account_id" in owned.columns:
-        ids = owned["assignee_account_id"].dropna().astype(str).str.strip()
-        ids = ids[ids != ""].unique()
-        if len(ids) == 1:
-            who = str(ids[0])
+    who = _jql_identity(owned, person)
 
     def _window(days: int) -> int | None:
         return fetch_person_resolved_count(
@@ -8517,6 +8551,94 @@ def _render_scorecard(
         )
 
 
+def _jql_identity(owned: pd.DataFrame, person: str) -> str:
+    """How to name this person in JQL: their account id when the board knows it.
+
+    The account id is exact and unambiguous between namesakes; the display name
+    is the fallback for a board that carries no id, or two people sharing one
+    spelling.
+    """
+    if "assignee_account_id" in owned.columns:
+        ids = owned["assignee_account_id"].dropna().astype(str).str.strip()
+        ids = ids[ids != ""].unique()
+        if len(ids) == 1:
+            return str(ids[0])
+    return person
+
+
+def _render_weekly_delivery(person: str, who: str, weeks: int = 12) -> None:
+    """Estimated hours delivered per week, backfilled from Jira's own history."""
+    st.subheader("Estimated Hours Delivered")
+    st.caption(
+        "Estimates on the tickets they resolved each week, read back through "
+        "Jira's history. This is scoped work delivered, not effort recorded: "
+        "hardly anybody logs time, so a week with unestimated tickets in it is "
+        "understated, and a generous estimate flatters the week. Read the shape "
+        "over the weeks, not any single bar."
+    )
+
+    try:
+        weekly = _parallel(
+            {
+                str(index): (
+                    lambda i=index: fetch_person_resolved_week(
+                        creds_path=CREDS_PATH,
+                        profile_name=PROFILE_NAME,
+                        person=who,
+                        weeks_ago=i,
+                        statuses=RESOLVED_STATUSES,
+                        max_results=MAX_RESULTS,
+                        page_size=JIRA_PAGE_SIZE,
+                        schema_version=FETCH_SCHEMA_VERSION,
+                    )
+                )
+                for index in range(weeks)
+            }
+        )
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"Weekly history could not be read: {str(exc)[:200]}")
+        return
+
+    rows = []
+    for index in range(weeks):
+        frame = _as_frame(weekly.get(str(index)))
+        if not frame.empty:
+            frame = estimate_policy(frame, BACKLOG_STATUSES)
+        hours, tickets, unestimated = kpi.delivered_hours(frame)
+        rows.append(
+            {
+                "Week": "This week" if index == 0 else f"-{index}w",
+                "Hours": hours,
+                "Tickets": tickets,
+                "No estimate": unestimated,
+            }
+        )
+    table = pd.DataFrame(rows[::-1])
+
+    if not table["Tickets"].sum():
+        st.info(f"{person} has no tickets resolved in the last {weeks} weeks.")
+        return
+
+    st.bar_chart(table.set_index("Week")["Hours"], height=240)
+    recent = table.tail(4)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Last 4 weeks", f"{recent['Hours'].sum():.0f}h")
+    c2.metric(
+        "Weekly average",
+        f"{table['Hours'].mean():.1f}h",
+        help=f"Across all {weeks} weeks, including weeks with nothing resolved.",
+    )
+    blind = int(table["No estimate"].sum())
+    c3.metric(
+        "Resolved with no estimate",
+        blind,
+        help="Each of these delivered work the hours above cannot see.",
+        delta=None if not blind else "hours understated",
+        delta_color="inverse",
+    )
+    st.dataframe(table[::-1], width="stretch", hide_index=True)
+
+
 def _render_individual_page(
     person: str,
     filtered: pd.DataFrame,
@@ -8580,6 +8702,9 @@ def _render_individual_page(
 
     st.divider()
     _render_scorecard(person, whole_board.copy(), theirs, personal_prs, github_ready)
+
+    st.divider()
+    _render_weekly_delivery(person, _jql_identity(whole_board, person))
 
     st.divider()
     _render_personal_prs(person, open_prs, merged_prs, organization, github_ready, github_error)

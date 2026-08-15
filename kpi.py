@@ -52,6 +52,34 @@ class Component:
     detail: str
 
 
+def delivered_hours(resolved: pd.DataFrame) -> tuple[float, int, int]:
+    """Estimated hours on a set of resolved tickets, and how blind that sum is.
+
+    Returns ``(hours, tickets, unestimated)``. The hours are what the team
+    *estimated* the work at, not effort anyone recorded: with almost nothing
+    logged in Jira, this is the closest honest proxy, and the unestimated count
+    says how far the sum understates the week.
+    """
+    if resolved.empty:
+        return 0.0, 0, 0
+    hours = pd.to_numeric(
+        resolved.get("estimate_hours", pd.Series(dtype="float64")), errors="coerce"
+    ).fillna(0.0)
+    containers = (
+        _norm(resolved.get("issue_type", pd.Series("", index=resolved.index)))
+        .str.replace(r"[-_\s]", "", regex=True)
+        .isin(CONTAINER_ISSUE_TYPES)
+    )
+    # An epic closing is not a week's work delivered; its children already are.
+    counted = resolved[~containers]
+    hours = hours[~containers]
+    return (
+        round(float(hours.sum()), 1),
+        int(len(counted)),
+        int((hours <= 0).sum()),
+    )
+
+
 def _norm(series: pd.Series) -> pd.Series:
     return series.fillna("").astype(str).str.strip().str.lower()
 
