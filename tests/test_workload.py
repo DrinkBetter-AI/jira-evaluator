@@ -41,6 +41,22 @@ def test_the_hour_tiles_count_the_right_rows():
     assert load["unestimated"] == 1
 
 
+def test_a_text_only_estimate_is_not_called_unestimated():
+    # estimate_policy marks a ticket estimated only in words ("2h" with no
+    # numeric seconds) as having an estimate; the tile must say the same.
+    board = dashboard.estimate_policy(
+        pd.DataFrame(
+            [
+                {"original_estimate": "2h", "original_estimate_sec": 0, "status": "To Do"},
+                {"original_estimate": None, "original_estimate_sec": 0, "status": "To Do"},
+            ]
+        ),
+        {"backlog"},
+    )
+    load = dashboard._workload_hours(board)
+    assert load["unestimated"] == 1
+
+
 def test_an_empty_board_reports_zero_everywhere():
     load = dashboard._workload_hours(pd.DataFrame())
     assert load["total"] == 0.0

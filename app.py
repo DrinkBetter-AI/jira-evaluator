@@ -1099,11 +1099,17 @@ def _workload_hours(owned: pd.DataFrame) -> dict[str, float | int]:
     state = state.fillna("").astype(str).str.strip().str.lower()
     priority = owned.get("priority", pd.Series(index=owned.index, dtype=object))
     priority = priority.fillna("").astype(str).str.strip().str.lower()
+    # "No estimate" follows the same flag as the Estimate? column - a ticket
+    # estimated only in words counts as estimated there, so it must here too.
+    if "has_estimate" in owned.columns:
+        unestimated = int((~owned["has_estimate"].fillna(False).astype(bool)).sum())
+    else:
+        unestimated = int((hours <= 0).sum())
     return {
         "total": float(hours.sum()),
         "sprint": float(hours[state == "active"].sum()),
         "urgent": float(hours[priority.isin(_URGENT_PRIORITIES)].sum()),
-        "unestimated": int((hours <= 0).sum()),
+        "unestimated": unestimated,
     }
 
 
@@ -1158,17 +1164,12 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
         st.info(f"No tickets for {assignee} in the current scope.")
         return
 
-    if "has_estimate" not in owned.columns:
+    if "has_estimate" not in owned.columns or "estimate_hours" not in owned.columns:
         owned = estimate_policy(owned, BACKLOG_STATUSES)
     owned["tier"] = owned.apply(_attention_tier, axis=1)
     owned["devin"] = owned.apply(_devin_can_handle, axis=1)
     owned["has_estimate_label"] = owned["has_estimate"].map(
         lambda value: "Yes" if bool(value) else "No"
-    )
-    owned["estimate_hours"] = (
-        pd.to_numeric(owned.get("original_estimate_sec"), errors="coerce")
-        .fillna(0.0)
-        .div(3600.0)
     )
     owned["sprint_label"] = owned.apply(_sprint_label, axis=1)
     owned["key_url"] = owned["key"].map(_jira_ticket_url)
