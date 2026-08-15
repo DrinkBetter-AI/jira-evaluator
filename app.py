@@ -8298,6 +8298,8 @@ def _render_personal_prs(
             for column in ("url", "title", "jira_key", "merged_at")
             if column in mine_merged.columns
         ]
+        if "merged_at" in mine_merged.columns:
+            mine_merged = mine_merged.sort_values("merged_at", ascending=False)
         st.markdown("**Recently merged**")
         st.dataframe(
             mine_merged[merged_cols],
