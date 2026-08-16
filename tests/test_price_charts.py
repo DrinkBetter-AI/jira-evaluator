@@ -53,8 +53,10 @@ def test_every_chart_states_its_own_text_size():
     about the whole dashboard, not the two charts added beside the complaint.
     """
     source = (Path(__file__).resolve().parents[1] / "app.py").read_text()
-    assert "st.plotly_chart(" not in source, "a chart drawn around theme.plot()"
-    assert source.count("theme.plot(") >= 10
+    # Any receiver, not only ``st``: a chart written as ``left.plotly_chart``
+    # into a column would slip past a check for the one spelling.
+    assert ".plotly_chart(" not in source, "a chart drawn around theme.plot()"
+    assert source.count("theme.plot(") >= 11
 
     drawn = {}
     figure = go.Figure()
@@ -69,6 +71,19 @@ def test_every_chart_states_its_own_text_size():
     assert figure.layout.title.font.size == theme.CHART_TITLE_FONT
     # And the caller's own arguments still reach Streamlit untouched.
     assert drawn == {"width": "stretch", "key": "anything"}
+
+    # A named container is drawn into rather than passed on as a chart argument.
+    column = []
+    theme.plot(
+        go.Figure(),
+        into=type(
+            "column",
+            (),
+            {"plotly_chart": staticmethod(lambda fig, **kw: column.append(fig))},
+        ),
+        width="stretch",
+    )
+    assert len(column) == 1
 
 
 def test_bigger_text_keeps_the_colours_the_app_already_drew_with():

@@ -1467,7 +1467,7 @@ def _render_mix(df: pd.DataFrame) -> None:
     figure.update_traces(textposition="inside", textinfo="percent+label")
     figure.update_layout(height=420, legend_title_text=label)
     left, right = st.columns([3, 2])
-    left.plotly_chart(figure, width="stretch")
+    theme.plot(figure, into=left, width="stretch")
     right.dataframe(
         mix.assign(share=(mix["tickets"] / mix["tickets"].sum() * 100).round(1)),
         width="stretch",
