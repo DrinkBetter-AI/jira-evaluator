@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import copy
 import datetime as _dt
 import functools
 import hashlib
@@ -328,10 +329,14 @@ def _table_html(block: Table) -> str:
     # shows. That table is printed plain instead: one table's tint is a smaller
     # loss than a board rearranged by somebody's ticket title.
     if rows <= MAX_ROWS and styler is not None and not reordered and not _has_markup(frame):
-        # Hiding and relabelling are the styler's own instructions to itself,
-        # given after the screen has already drawn from it, so nothing on screen
-        # is redrawn by them.
+        # On a copy of its own, because a styler answers hiding and relabelling
+        # by changing itself: printed straight from the page's own object, the
+        # next thing to draw from that table would get the printed version of it.
+        # The page is recorded, never edited. Deep, because the labels and the
+        # per-column writers a shallow copy would share are exactly what is being
+        # changed - and it is a table of at most a screenful of rows.
         with contextlib.suppress(Exception):
+            styler = copy.deepcopy(styler)
             if block.hide_index:
                 styler = styler.hide(axis="index")
             if hidden:

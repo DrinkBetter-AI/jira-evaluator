@@ -421,3 +421,26 @@ def test_nothing_the_sidebar_draws_belongs_to_the_board():
 
     assert snapshot._in_sidebar(Container(1))
     assert not snapshot._in_sidebar(Container(0))
+
+
+def test_printing_a_styled_table_leaves_the_page_s_own_table_alone():
+    import streamlit as st
+
+    frame = pd.DataFrame({"key": ["MB-1"], "idle_days": [3.14159]})
+    styled = frame.style.map(lambda value: "color: red")
+    before = styled.to_html()
+
+    board(
+        (
+            "dataframe",
+            (styled,),
+            {
+                "hide_index": True,
+                "column_config": {
+                    "idle_days": st.column_config.NumberColumn("Idle", format="%.1f")
+                },
+            },
+        )
+    ).html(now=WHEN)
+
+    assert styled.to_html() == before
