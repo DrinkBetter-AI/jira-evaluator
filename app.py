@@ -3842,7 +3842,7 @@ def _render_bubble_chart(
         title="Status",
     )
     fig.update_layout(height=560)
-    event = st.plotly_chart(fig, width="stretch", on_select="rerun", key=chart_key)
+    event = theme.plot(fig, width="stretch", on_select="rerun", key=chart_key)
     points = (event or {}).get("selection", {}).get("points", [])
     if points:
         return str(points[0].get("customdata", [None])[0])
@@ -3938,7 +3938,7 @@ def _contribution_pie(
     fig = px.pie(frame, names="who", values=value_name, title=title)
     fig.update_traces(textposition="inside", textinfo="value+label")
     fig.update_layout(height=340, margin=dict(t=48, b=8, l=8, r=8), showlegend=True)
-    st.plotly_chart(fig, width="stretch")
+    theme.plot(fig, width="stretch")
 
 
 def _metric_value(count: int | None) -> str | int:
@@ -4229,7 +4229,7 @@ def _render_orders(order_book: orders_client.OrderBook, source: str) -> None:
     if trend["orders"].sum():
         figure = px.bar(trend, x="date", y="orders", title="Orders per day (30 days)")
         figure.update_layout(height=260, margin=dict(l=0, r=0, t=40, b=0))
-        st.plotly_chart(figure, width="stretch", key="orders_daily")
+        theme.plot(figure, width="stretch", key="orders_daily")
 
     st.caption(
         "Revenue and AOV count captured payments only, so an order placed but not "
@@ -5139,7 +5139,7 @@ def _band_pictures(bands: pd.DataFrame, merchant: str) -> None:
         )
         ring.update_traces(textinfo="percent", hovertemplate="%{label}: %{value} wines")
         ring.update_layout(margin=dict(t=54, b=0, l=0, r=0), legend_title_text="")
-        st.plotly_chart(ring, width="stretch")
+        theme.plot(ring, width="stretch")
     rated = bands[bands["per_100_clicks"].notna()]
     if rated.empty:
         return
@@ -5161,18 +5161,12 @@ def _band_pictures(bands: pd.DataFrame, merchant: str) -> None:
             yaxis_title="",
             yaxis=dict(autorange="reversed"),
         )
-        st.plotly_chart(bars, width="stretch")
+        theme.plot(bars, width="stretch")
 
 
 # How many wines the price ladder draws. A merchant reads a page of bottles and
 # argues with it; a hundred rows is a spreadsheet they close.
 _LADDER_WINES = 20
-
-# Chart text, shared with every other figure through the plotly template these
-# come from; named here so a chart that sets its own layout font keeps the size.
-_CHART_FONT = theme.CHART_FONT
-_CHART_TITLE_FONT = theme.CHART_TITLE_FONT
-
 
 def _price_sales_scatter(points: pd.DataFrame, merchant: str, money: str) -> None:
     """Every clicked wine as a dot: what it costs against the market, what it sold.
@@ -5238,10 +5232,8 @@ def _price_sales_scatter(points: pd.DataFrame, merchant: str, money: str) -> Non
         xaxis_title="Percent against the market price",
         yaxis_title=f"Bottles sold per 100 shoppers ({merchant_client.SALES_DAYS}d)",
         legend_title_text="",
-        font=dict(size=_CHART_FONT),
-        title_font=dict(size=_CHART_TITLE_FONT),
     )
-    st.plotly_chart(figure, width="stretch")
+    theme.plot(figure, width="stretch")
 
     left, right = st.columns(2)
     left.metric(
@@ -5378,10 +5370,8 @@ def _price_ladder(points: pd.DataFrame, merchant: str, money: str) -> None:
         xaxis_title=f"Price per bottle ({money or 'USD'})",
         yaxis_title="",
         legend_title_text="",
-        font=dict(size=_CHART_FONT),
-        title_font=dict(size=_CHART_TITLE_FONT),
     )
-    st.plotly_chart(figure, width="stretch")
+    theme.plot(figure, width="stretch")
     st.caption(
         "Ordered by the shoppers who chose the bottle, so the wines at the top "
         "are the ones a price change would be felt on. A red line is the amount "
@@ -5770,7 +5760,7 @@ def _ad_pictures(frame: pd.DataFrame, money: str) -> None:
                 hovertemplate="%{hovertext}<extra></extra>",
             )
             ring.update_layout(margin=dict(t=54, b=0, l=0, r=0), legend_title_text="")
-            st.plotly_chart(ring, width="stretch")
+            theme.plot(ring, width="stretch")
     rated = bands[bands["per_dollar"].notna()]
     if rated.empty:
         return
@@ -5800,7 +5790,7 @@ def _ad_pictures(frame: pd.DataFrame, money: str) -> None:
             yaxis_title="",
             yaxis=dict(autorange="reversed"),
         )
-        st.plotly_chart(bars, width="stretch")
+        theme.plot(bars, width="stretch")
 
 
 def _render_most_clicked(
@@ -7693,7 +7683,7 @@ def _render_product_funnel() -> None:
     )
     figure.update_yaxes(autorange="reversed")
     figure.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
-    st.plotly_chart(figure, width="stretch", key="funnel_steps")
+    theme.plot(figure, width="stretch", key="funnel_steps")
 
     table = steps.assign(
         from_previous=steps["from_previous"].map(_percent),

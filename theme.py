@@ -76,6 +76,20 @@ def inject_styles() -> None:
     chart_fonts()
 
 
+def plot(figure, **kwargs):
+    """Draw a plotly figure at this dashboard's text size.
+
+    The size has to be set on the figure's own layout rather than left to the
+    template: Streamlit's chart component merges its own font sizes into the
+    template it finds, so a template alone is overwritten in the browser and
+    only a chart that states its size keeps it.
+    """
+    figure.update_layout(
+        font=dict(size=CHART_FONT), title_font=dict(size=CHART_TITLE_FONT)
+    )
+    return st.plotly_chart(figure, **kwargs)
+
+
 def _current_template():
     """The template plotly is drawing with, whatever form the default is in.
 
