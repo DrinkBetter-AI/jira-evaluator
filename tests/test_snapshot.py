@@ -78,6 +78,38 @@ def test_a_ticket_titled_like_markup_is_text_on_paper_and_not_markup():
     assert "&lt;script&gt;" in page
 
 
+def test_an_assignee_named_like_markup_is_text_even_as_a_row_label():
+    frame = pd.DataFrame({"tickets": [3]}, index=["<img src=x onerror=1>"])
+    styled = frame.style.set_properties(**{"background-color": "#fee"})
+    page = board(("dataframe", (styled,), {})).html(now=WHEN)
+
+    assert "<img src=x" not in page
+    assert "&lt;img src=x" in page
+
+
+def test_a_column_is_called_what_the_screen_calls_it_and_hidden_where_it_hides():
+    import streamlit as st
+
+    frame = pd.DataFrame({"key_url": ["http://j/MB-1"], "idle_days": [3.0], "tier": ["Red"]})
+    page = board(
+        (
+            "dataframe",
+            (frame,),
+            {
+                "hide_index": True,
+                "column_config": {
+                    "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
+                    "key_url": None,
+                },
+            },
+        )
+    ).html(now=WHEN)
+
+    assert "Idle (days)" in page
+    assert "idle_days" not in page
+    assert "key_url" not in page and "http://j/MB-1" not in page
+
+
 def test_a_table_longer_than_the_page_says_how_much_of_it_is_shown():
     frame = pd.DataFrame({"key": [f"MB-{n}" for n in range(snapshot.MAX_ROWS + 40)]})
     page = board(("dataframe", (frame,), {})).html(now=WHEN)
@@ -168,6 +200,36 @@ def test_the_board_is_a_pdf_a_reader_can_open():
     ).pdf(now=WHEN)
 
     assert printed and printed.startswith(b"%PDF-")
+
+
+def test_two_readers_at_once_each_get_their_own_whole_board():
+    """One session finishing must not stop another's page being recorded."""
+    import threading
+
+    import streamlit as st
+
+    started = threading.Event()
+    finished = threading.Event()
+    theirs: list[snapshot.Snapshot] = []
+
+    def other() -> None:
+        with snapshot.recording("Business") as recorded:
+            st.header("Orders")
+            started.set()
+            theirs.append(recorded)
+        finished.set()
+
+    with snapshot.recording("Engineering") as mine:
+        st.header("Before")
+        reader = threading.Thread(target=other)
+        reader.start()
+        started.wait(5)
+        finished.wait(5)
+        st.header("After")
+    reader.join()
+
+    assert [block.text for block in mine.blocks] == ["Before", "After"]
+    assert [block.text for block in theirs[0].blocks] == ["Orders"]
 
 
 def test_nothing_the_sidebar_draws_belongs_to_the_board():

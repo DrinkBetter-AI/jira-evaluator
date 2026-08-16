@@ -127,6 +127,8 @@ class Table:
 
     data: object
     hide_index: bool = False
+    # What the screen calls each column, and which it does not show at all.
+    columns: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -199,7 +201,11 @@ def _block(call: str, args: tuple, kwargs: dict):
         delta = kwargs.get("delta") or (args[2] if len(args) > 2 else "")
         return Metric(label, "" if value is None else str(value), "" if delta is None else str(delta))
     if call in ("dataframe", "table"):
-        return _table_block(_arg(args, kwargs, 0, "data"), bool(kwargs.get("hide_index")))
+        return _table_block(
+            _arg(args, kwargs, 0, "data"),
+            bool(kwargs.get("hide_index")),
+            kwargs.get("column_config") or {},
+        )
     if call == "plotly_chart":
         figure = _arg(args, kwargs, 0, "figure_or_data")
         return Chart(figure) if figure is not None else None
@@ -239,11 +245,11 @@ def _plain(value) -> str:
     return "" if value is None else str(value).strip()
 
 
-def _table_block(data, hide_index: bool = False) -> Table | None:
+def _table_block(data, hide_index: bool = False, columns: dict | None = None) -> Table | None:
     """A table the page drew, if what it drew was a table at all."""
     if _frame_of(data) is None:
         return None
-    return Table(data, hide_index)
+    return Table(data, hide_index, dict(columns or {}))
 
 
 def _frame_of(data) -> pd.DataFrame | None:
@@ -265,23 +271,58 @@ def _table_html(block: Table) -> str:
         return ""
     rows = len(frame)
     styler = block.data if hasattr(block.data, "to_html") and hasattr(block.data, "data") else None
+    hidden, named = _column_plan(block, frame)
     # A styler writes its cells as they are, so a ticket summary that happens to
     # contain a tag would be markup on the page rather than the text the screen
     # shows. That table is printed plain instead: one table's tint is a smaller
     # loss than a board rearranged by somebody's ticket title.
     if rows <= MAX_ROWS and styler is not None and not _has_markup(frame):
-        if block.hide_index:
-            # Hiding is the styler's own instruction to itself, given after the
-            # screen has already drawn from it, so nothing is redrawn by it.
-            with contextlib.suppress(Exception):
+        # Hiding and relabelling are the styler's own instructions to itself,
+        # given after the screen has already drawn from it, so nothing on screen
+        # is redrawn by them.
+        with contextlib.suppress(Exception):
+            if block.hide_index:
                 styler = styler.hide(axis="index")
-        return styler.to_html()
+            if hidden:
+                styler = styler.hide(subset=hidden, axis="columns")
+            shown = [column for column in frame.columns if column not in hidden]
+            if any(named.get(column, column) != column for column in shown):
+                styler = styler.relabel_index(
+                    [named.get(column, column) for column in shown], axis="columns"
+                )
+            return styler.to_html()
+    printed = frame.drop(columns=hidden, errors="ignore").rename(columns=named)
     note = f'<p class="caption">First {MAX_ROWS} of {rows} rows.</p>' if rows > MAX_ROWS else ""
-    return frame.head(MAX_ROWS).to_html(index=not block.hide_index, border=0, escape=True) + note
+    return printed.head(MAX_ROWS).to_html(index=not block.hide_index, border=0, escape=True) + note
+
+
+def _column_plan(block: Table, frame: pd.DataFrame) -> tuple[list, dict]:
+    """Which columns the screen hides, and what it calls the rest.
+
+    ``st.dataframe`` is given a `column_config` naming its columns for the
+    reader - "Idle (days)" rather than `idle_days` - and dropping the ones it
+    keeps only to work with. A printed board that showed `key_url` beside
+    Summary would not be the board on screen.
+    """
+    hidden = [name for name, spec in block.columns.items() if spec is None and name in frame.columns]
+    named = {
+        name: str(spec["label"])
+        for name, spec in block.columns.items()
+        if isinstance(spec, dict) and spec.get("label") and name in frame.columns
+    }
+    return hidden, named
 
 
 def _has_markup(frame: pd.DataFrame) -> bool:
-    """Whether any cell carries something a browser would read as a tag."""
+    """Whether anything printed verbatim carries what a browser reads as a tag.
+
+    The cells, but the row labels and the column names too: a styler writes all
+    three as they are, and any of the three can be a ticket summary or a name
+    somebody chose.
+    """
+    labels = pd.Series(list(frame.columns) + list(frame.index)).astype(str)
+    if labels.str.contains("<", regex=False).any():
+        return True
     text = frame.select_dtypes(include=["object", "string"])
     if text.empty:
         return False
@@ -336,50 +377,68 @@ def _in_sidebar(container) -> bool:
     return getattr(active, "_root_container", 0) == 1
 
 
+# Where the page being recorded on this thread is kept. Streamlit gives each
+# browser session its own script thread, so one reader's board is the thread's
+# own business and never another's.
+_listening = threading.local()
+
+# The wrappers go on once and stay on. Putting them on and taking them off
+# around each page would be two readers' business at once: the second to start
+# would capture the first's wrapper as the original, the first to finish would
+# take the second's off mid-page, and whatever was left installed would hold a
+# finished recording - with its frames and figures - for the life of the
+# process. Installed once, they hold nothing: with no page being recorded on
+# this thread they are a function call and a None check.
+_installed = threading.Lock()
+_ready = False
+
+
+def _listen() -> None:
+    """Put the recorder in the path of every drawing call, once, for good."""
+    global _ready
+    with _installed:
+        if _ready:
+            return
+        from streamlit.delta_generator import DeltaGenerator
+        import streamlit as st
+
+        for name in DRAWING_CALLS:
+            original = getattr(DeltaGenerator, name, None)
+            if original is None:
+                continue
+
+            def wrapper(self, *args, _name=name, _original=original, **kwargs):
+                snapshot = getattr(_listening, "snapshot", None)
+                if snapshot is not None and not _in_sidebar(self):
+                    snapshot.observe(_name, args, kwargs)
+                return _original(self, *args, **kwargs)
+
+            functools.update_wrapper(wrapper, original)
+            module_level = getattr(st, name, None)
+            setattr(DeltaGenerator, name, wrapper)
+            # ``st.dataframe`` and friends were bound to the main container when
+            # Streamlit was imported, so patching the class alone leaves them.
+            owner = getattr(module_level, "__self__", None)
+            if owner is not None:
+                setattr(st, name, wrapper.__get__(owner, DeltaGenerator))
+        _ready = True
+
+
 @contextlib.contextmanager
 def recording(page: str):
     """Keep every drawing call the page makes on this thread, then let go.
 
-    Streamlit hands each browser session its own script thread, and the patch
-    below is on the class every session draws through, so the recording is
-    filtered to the thread that asked for it - another reader's page is drawn
-    untouched and stays out of this file. The sidebar is skipped too: the
-    filters are how the page was asked for, not part of the board.
+    The sidebar is skipped: the filters are how the page was asked for, not
+    part of the board.
     """
-    from streamlit.delta_generator import DeltaGenerator
-    import streamlit as st
-
+    _listen()
     snapshot = Snapshot(page)
-    mine = threading.get_ident()
-    patched: list[tuple[str, object, object]] = []
-
-    for name in DRAWING_CALLS:
-        original = getattr(DeltaGenerator, name, None)
-        if original is None:
-            continue
-
-        def wrapper(self, *args, _name=name, _original=original, **kwargs):
-            if threading.get_ident() == mine and not _in_sidebar(self):
-                snapshot.observe(_name, args, kwargs)
-            return _original(self, *args, **kwargs)
-
-        functools.update_wrapper(wrapper, original)
-        module_level = getattr(st, name, None)
-        patched.append((name, original, module_level))
-        setattr(DeltaGenerator, name, wrapper)
-        # ``st.dataframe`` and friends were bound to the main container when
-        # Streamlit was imported, so patching the class alone leaves them.
-        owner = getattr(module_level, "__self__", None)
-        if owner is not None:
-            setattr(st, name, wrapper.__get__(owner, DeltaGenerator))
-
+    before = getattr(_listening, "snapshot", None)
+    _listening.snapshot = snapshot
     try:
         yield snapshot
     finally:
-        for name, original, module_level in patched:
-            setattr(DeltaGenerator, name, original)
-            if module_level is not None:
-                setattr(st, name, module_level)
+        _listening.snapshot = before
 
 
 def _weasyprint():
