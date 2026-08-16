@@ -1,0 +1,98 @@
+# Implementation plan — dashboard redesign & role-aware KPIs
+
+Prepared for Angel Vossough · 16 Aug 2026 · re-verified under Fable 5.
+The design spec is the mockup: `vinovoss-dashboard-design.html` (open it in a browser — Today, People, and Integrity are fully designed; Delivery/Code/Planning/Business are scoped stubs).
+Companions: `DASHBOARD_REDESIGN.md` (analysis), `KPI_SPEC.md` (metric definitions).
+
+---
+
+## 0. Verification statement
+
+Every material claim in the two companion documents was re-checked directly against the code, not against the overnight summaries. The "undefined" title bug and its fix were both reproduced empirically; the four structural exploits (staging-counts-as-resolved, current-assignee attribution, re-resolve erasure, scorecard renormalisation) were confirmed at their exact source lines; `integrity.py`, `pr_quality.py` and `estimate_accuracy.py` were stress-tested with adversarial synthetic data and behaved correctly (masked-days arithmetic, mid-flight estimate raises, mutual-approval detection, Devin-findings attribution). The full suite passes: **446 passed, 1 skipped**. Two corrections from the re-check: one stale docstring in `integrity.py` (fixed), and one wrong suspicion of mine — the routing fix's `visibility="hidden"` parameter is real in Streamlit 1.61.1.
+
+---
+
+## 1. What Angel must provide before Devin starts
+
+These block work packages below; nothing else does.
+
+1. **GitHub token 403.** PR metrics are dead on the live dashboard right now, and WP4 roughly triples GraphQL cost (~29 → ~1,030 of 5,000 points/hour — fine cached hourly). Likely rate limiting or expiry; check the token's type and limits.
+2. **Role roster.** Fill `roles_template.env` (every name seen in the data is pre-listed). Paste the ones you know; the PM can finish it. Format matches `JIRA_TEAM_PEOPLE`.
+3. **`ACTIVE_MERCHANTS`.** Exact catalogue spellings observed in the app: `TheWinesGood, Yiannis Wine Shop, Capital Fine Wine, Little International Wine`. Confirm these four strings and set the env var — the filter is exact-match.
+4. **Sprint dates in Jira.** Availability/utilisation stays empty until sprint start/end dates are set on the board. Config, not code.
+5. **Does Devin review every PR or only some repos?** Determines whether "AI-review findings" can be a scorecard component (full coverage) or evidence-only (partial). Metric handles both; the *weight* decision needs the answer.
+6. **GITHUB_LOGIN_MAP.** Without it, per-person PR joins quietly fall back to Jira-key matching only. One env var: `Tam=tungph;Farid=faridsh69;...` — worth 20 minutes of the PM's time.
+
+---
+
+## 2. Work packages for Devin
+
+Already done on `redesign/dashboard-and-kpis` (do **not** re-implement): the undefined-title fix, /engineering routing, nan-epic fix, type scale + tokens, `rank_bar` replacing the three unreadable pies, single validated palette, bot filtering in person tables, honest estimate-coverage tile, `ACTIVE_MERCHANTS` plumbing, the `changelog` column, and the four metric modules with 446 passing tests.
+
+### WP1 — Merge the branch and deploy `redesign/dashboard-and-kpis`
+Small. Review the diff, merge, deploy, set `ACTIVE_MERCHANTS` and `GITHUB_LOGIN_MAP`.
+*Accept:* no "undefined" titles in prod; /engineering resolves; Estimate coverage tile equals Policy Compliance; bots out of person tables; price section captions the merchant roster.
+
+### WP2 — Information architecture: one page → six
+Split `_render_engineering_page` into the six `st.Page`s in the mockup: **Today, People, Delivery, Code, Planning, Integrity** (Business unchanged). Pure reorganisation of existing render functions — no metric changes. Today page per the mockup: attention band (hero = stuck-PR share + three decision cards), six stat tiles with sparklines, throughput line chart, ranked status bars. Sidebar scope/filters persist across pages via session state.
+*Accept:* every existing section reachable in ≤2 clicks; Today renders in <3s from cache; deep links per page work.
+
+### WP3 — Flow-honesty wiring (Jira-only; no new API calls)
+Replace `idle_days` with `integrity.status_age_days` everywhere a *score or queue* depends on it (KPI strip "Stalled", Stale & Abandoned ranking, priority-score staleness term). Keep `idle_days` visible beside it as "last touched". Add re-resolve/ping-pong counts to the resolved roll-up so a staging round-trip stops minting credits. Resolution credit moves from current assignee to **changelog author** of the resolving transition.
+*Accept:* a label-only edit no longer removes a ticket from any stale queue (test exists); a ticket entering staging twice counts one resolution; the resolved ranking names whoever moved the ticket.
+
+### WP4 — Extended PR data + Code page
+Switch `fetch_open_prs`/`fetch_merged_prs` to the extended GraphQL (already written in `github_client.py`), cached ≥1h, degrading to the lean query on failure with an on-page notice ("PR quality data unavailable — lean mode"). Build the Code page: stuck/never-reviewed queues, Devin findings per author (share of judged PRs), size bands, merged-work traceability, review citizenship, abandoned rate.
+*Accept:* graceful degradation proven by revoking the token in staging; per-author tables show `reviews_fetched` so "no findings" ≠ "not reviewed".
+
+### WP5 — Role-aware scorecards + People page
+Read `JIRA_ROLES`. Per-role rubrics (weights below are the brainstorm draft, not final):
+
+| Component | Code roles¹ | QA-auto | QA-manual | PM |
+|---|---|---|---|---|
+| Delivery, size-weighted | 20 | 20 | — | — |
+| Cycle time vs role median | 15 | 15 | 15 (time-to-verify) | — |
+| Rework / re-resolves | 15 | 10 | — | — |
+| Estimate accuracy | 15 | 15 | — | — |
+| Review citizenship | 10 | 10 | — | — |
+| AI-review findings² | 10 | 10 | — | — |
+| Ticket hygiene | 10 | 10 | 20 (bug report quality) | 25 (tickets they write) |
+| Urgent response | 5 | 5 | 10 | 15 (triage latency) |
+| Bugs found that were fixed (validity) | — | 15 | 35 | — |
+| Tickets verified | — | — | 20 | — |
+| Epic & board hygiene (orphans, empty epics, estimate coverage of team) | — | — | — | 35 |
+| Sprint discipline (dates set, carry-over rate of team) | — | — | — | 25 |
+
+¹ backend, frontend, mobile, ML-ops/AI, recommendation, AI-recommendation. ² weight goes to 0 and redistributes if Devin coverage is partial (see prerequisite 5). Biz dev: no engineering scorecard.
+Leaderboard ranks **within role only**. Unmeasured components render as "insufficient data — needs X"; below 60 measurable points, "no score" (already enforced in `kpi.py`). Every component shows `n`.
+*Accept:* a person with role unset appears under "role unknown", unscored; QA-manual scoring runs with zero GitHub data; switching a person's role never changes another person's score.
+
+### WP6 — Integrity page (CEO-only)
+Gate: visible only when the signed-in session is Angel's (simplest: `DASHBOARD_ADMIN_COOKIE`-style second password or an env-listed viewer). Four cards per the mockup — masked freshness, mid-flight estimate revisions, staging round-trips, review pairs & self-merges — each with evidence rows linking to Jira/GitHub and the fixed "innocent reading" footnote. Integrity applies to **all hourly contractors**; cosmetic-touch counts are baselined *within role* so the PM's legitimate grooming doesn't false-positive.
+*Accept:* zero integrity UI rendered for non-admin sessions (not just hidden — not computed); every flag row links to its raw evidence; role-baselined thresholds covered by tests.
+
+### WP7 — Design-system conformance pass
+Apply the mockup's remaining specs app-wide: bars ≤24px with 4px rounded data-ends, 2px lines, hairline solid gridlines, legends for ≥2 series, no rotated axis labels anywhere, delta arrows colored by direction-times-goodness, `tabular-nums` in table columns, the two remaining Business-page pies converted to ranked bars, Vivino tab replaced with an explicit "unavailable — Vivino blocks our requests" state.
+*Accept:* screenshot review against the mockup; no chart with >8 colors; no vertical text.
+
+### WP8 — Regression net
+AppTest-based smoke render of every page with stubbed data (fragments already exist in `tests/test_theme_visual.py` — extend to all six pages); a fixture snapshot of one real Jira payload so changelog parsing is pinned; CI green required.
+
+**Order:** WP1 → WP2 → WP3 → (WP4 ∥ WP5) → WP6 → WP7 → WP8 runs alongside everything.
+**Do not** start WP4 before the 403 is diagnosed, or WP5 before the roster exists.
+
+---
+
+## 3. Design tokens (for Devin — the mockup is normative)
+
+Type: 13/14/15/17/20/32px (meta/label/body/lead/section/display), base font 17px. Ink: `#111827` / `#475569` / `#64748b` / `#94a3b8`. Planes: page `#f8fafc`, card `#ffffff`, hairline `#e5e7eb`. Series (validated, fixed order, never cycled): `#2563eb #eb6834 #1baf7a #eda100 #e87ba4 #008300 #4a3aa7 #e34948` — fold to "Other" past 8; aqua/yellow/magenta require visible labels or a table (sub-3:1 contrast). Status (icon + label, never color alone): good `#15803d`, warn `#b45309`, critical `#b91c1c`, info `#1d4ed8`. Content max-width 1560px. One hero number per page, ≥48px.
+
+---
+
+## 4. Brainstorm agenda (you + me, before handing WP5/WP6 to Devin)
+
+1. The rubric weights table above — per role, what's over/under-weighted?
+2. AI-recommendation vs recommendation engineer — same rubric or split? (I drafted them identical.)
+3. What the engineers see: their own scorecard only (current assumption) — do they also see their own *rank within role*?
+4. Integrity thresholds — how many masked days / cosmetic-per-transition before a flag shows? (I propose: no fixed threshold; always show top 3 by magnitude with evidence.)
+5. Whether invoiced hours can be imported monthly (CSV) — it is the only true cross-check for `hours_per_delivered_line`.

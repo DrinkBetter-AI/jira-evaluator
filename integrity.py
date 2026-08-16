@@ -360,10 +360,10 @@ def changelog_events(source: Any) -> pd.DataFrame:
       histories list per row),
     - a mapping of ticket key to changelog or histories.
 
-    The flexibility is not decoration. ``jira_client._issues_to_dataframe``
-    throws the changelog away, so today the raw issue dicts are the only place
-    this data survives; when the fetch layer is changed to keep a ``changelog``
-    column, the same call keeps working.
+    The flexibility is not decoration. ``jira_client._issues_to_dataframe`` now
+    carries the changelog through as a ``changelog`` column, but older callers
+    still hold raw issue dicts and a snapshot loaded from disk may hold either;
+    the same call works on all of them.
 
     One row per ``items[]`` entry, carrying the history entry's id, timestamp and
     author so a single save that touched five fields can be recognised as one

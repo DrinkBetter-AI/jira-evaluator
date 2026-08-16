@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VinoVoss Engineering — dashboard redesign (Fable 5 design mockup)</title>
+<style>
+  :root{
+    /* ink */
+    --ink:#111827; --ink-2:#475569; --ink-3:#64748b; --ink-4:#94a3b8;
+    /* planes */
+    --page:#f8fafc; --card:#ffffff; --line:#e5e7eb; --line-soft:#eef2f7;
+    /* series (validated: dataviz six-checks, light surface) */
+    --s1:#2563eb; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100;
+    --s5:#e87ba4; --s6:#008300; --s7:#4a3aa7; --s8:#e34948;
+    /* status — icon + label always, never color alone */
+    --good:#15803d; --good-bg:#ecfdf3;
+    --warn:#b45309; --warn-bg:#fef7ec;
+    --crit:#b91c1c; --crit-bg:#fdecec;
+    --info:#1d4ed8; --info-bg:#eff4ff;
+    /* type scale: 13 / 14 / 15 / 17 / 20 / 32 */
+    --t-meta:13px; --t-label:14px; --t-body:15px; --t-lead:17px; --t-section:20px; --t-display:32px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--page);color:var(--ink);
+       font:var(--t-body)/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;}
+  a{color:var(--info);text-decoration:none} a:hover{text-decoration:underline}
+
+  /* ---------- shell ---------- */
+  .shell{max-width:1280px;margin:0 auto;padding:0 28px 64px}
+  header.top{position:sticky;top:0;z-index:9;background:rgba(248,250,252,.92);
+    backdrop-filter:blur(6px);border-bottom:1px solid var(--line);margin:0 -28px;padding:0 28px}
+  .brandrow{display:flex;align-items:center;gap:14px;padding:14px 0 10px}
+  .logo{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,#7c1d3f,#2563eb);
+    display:grid;place-items:center;color:#fff;font-weight:700;font-size:14px}
+  .brand{font-size:var(--t-lead);font-weight:650}
+  .fresh{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:var(--t-meta);color:var(--ink-3)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--good)}
+  .btn{border:1px solid var(--line);background:var(--card);border-radius:8px;
+    padding:6px 12px;font-size:var(--t-label);color:var(--ink-2);cursor:pointer}
+  .btn:hover{border-color:var(--ink-4)}
+  nav.tabs{display:flex;gap:2px;overflow-x:auto}
+  nav.tabs button{appearance:none;border:0;background:none;cursor:pointer;
+    font-size:var(--t-label);font-weight:550;color:var(--ink-3);
+    padding:9px 14px;border-radius:8px 8px 0 0;border-bottom:2px solid transparent;white-space:nowrap}
+  nav.tabs button:hover{color:var(--ink)}
+  nav.tabs button.on{color:var(--s1);border-bottom-color:var(--s1)}
+  nav.tabs .lock{font-size:11px;vertical-align:1px}
+
+  .page{display:none;padding-top:22px}
+  .page.on{display:block}
+  h2.sec{font-size:var(--t-section);font-weight:650;margin:30px 0 4px}
+  p.secnote{margin:0 0 14px;font-size:var(--t-label);color:var(--ink-3);max-width:70ch}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px}
+  .grid{display:grid;gap:14px}
+
+  /* ---------- hero / attention band ---------- */
+  .hero{display:grid;grid-template-columns:minmax(300px,1.15fr) 2fr;gap:14px;margin-top:6px}
+  .hero .lead{border-left:4px solid var(--crit)}
+  .hero .kicker{font-size:var(--t-meta);font-weight:650;letter-spacing:.04em;
+    text-transform:uppercase;color:var(--crit);display:flex;gap:6px;align-items:center}
+  .hero .big{font-size:48px;font-weight:700;line-height:1.05;margin:6px 0 2px}
+  .hero .big small{font-size:var(--t-lead);font-weight:500;color:var(--ink-3)}
+  .meter{height:8px;border-radius:4px;background:#f3d1d1;margin:12px 0 8px;overflow:hidden}
+  .meter i{display:block;height:100%;width:92%;background:var(--crit);border-radius:4px 0 0 4px}
+  .hero .sub{font-size:var(--t-label);color:var(--ink-2)}
+  .decide{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .decide .card{display:flex;flex-direction:column;gap:6px;padding:16px 18px}
+  .decide .n{font-size:26px;font-weight:700}
+  .decide .what{font-size:var(--t-label);font-weight:600}
+  .decide .why{font-size:var(--t-meta);color:var(--ink-3);flex:1}
+  .decide .act{font-size:var(--t-meta);font-weight:600}
+  .chip{display:inline-flex;align-items:center;gap:5px;border-radius:999px;
+    padding:2px 9px;font-size:12px;font-weight:600}
+  .chip.warn{background:var(--warn-bg);color:var(--warn)}
+  .chip.crit{background:var(--crit-bg);color:var(--crit)}
+  .chip.info{background:var(--info-bg);color:var(--info)}
+  .chip.good{background:var(--good-bg);color:var(--good)}
+  .chip.gray{background:#f1f5f9;color:var(--ink-2)}
+
+  /* ---------- stat tiles ---------- */
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}
+  .tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px 12px}
+  .tile .lbl{font-size:var(--t-label);color:var(--ink-3)}
+  .tile .val{font-size:var(--t-display);font-weight:700;line-height:1.15;margin:2px 0 0}
+  .tile .row{display:flex;align-items:flex-end;justify-content:space-between;gap:8px}
+  .tile .delta{font-size:var(--t-meta);font-weight:600}
+  .tile .delta.up{color:var(--good)} .tile .delta.down{color:var(--crit)} .tile .delta.flat{color:var(--ink-3)}
+  .tile .note{font-size:var(--t-meta);color:var(--ink-4);margin-top:2px}
+  .spark{width:96px;height:30px;flex:none}
+
+  /* ---------- charts ---------- */
+  .charts2{display:grid;grid-template-columns:1.25fr 1fr;gap:14px}
+  .chart-title{font-size:var(--t-body);font-weight:650;margin:0 0 2px}
+  .chart-sub{font-size:var(--t-meta);color:var(--ink-3);margin:0 0 10px}
+  .legend{display:flex;gap:16px;font-size:var(--t-meta);color:var(--ink-2);margin:8px 0 0}
+  .key{display:inline-flex;align-items:center;gap:6px}
+  .key i{width:14px;height:3px;border-radius:2px;display:inline-block}
+  svg text{font:12px system-ui,-apple-system,"Segoe UI",sans-serif;fill:var(--ink-3)}
+  svg .lab{font-weight:600;fill:var(--ink-2)}
+  .hbars{display:grid;gap:7px;margin-top:6px}
+  .hbar{display:grid;grid-template-columns:172px 1fr 44px;align-items:center;gap:10px;font-size:var(--t-label)}
+  .hbar .name{color:var(--ink-2);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .hbar .track{height:16px;border-radius:0 4px 4px 0;background:var(--s1);min-width:2px}
+  .hbar .v{font-variant-numeric:tabular-nums;font-weight:600;color:var(--ink-2)}
+  .hbar.dim .track{background:#cbd5e1}
+  .flagic{color:var(--warn);font-size:12px;margin-left:4px}
+
+  /* ---------- tables ---------- */
+  table{width:100%;border-collapse:collapse;font-size:var(--t-label)}
+  th{font-size:var(--t-meta);font-weight:600;color:var(--ink-3);text-align:left;
+     padding:8px 10px;border-bottom:1px solid var(--line);background:#f6f8fb;white-space:nowrap}
+  td{padding:9px 10px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  tr:hover td{background:#f8fafc}
+  .who{display:flex;align-items:center;gap:9px}
+  .av{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;
+      font-size:11px;font-weight:700;color:#fff;flex:none}
+  .rolechip{font-size:11px;font-weight:600;color:var(--ink-3);background:#f1f5f9;
+    border-radius:5px;padding:1px 6px;white-space:nowrap}
+  .scorebar{display:inline-flex;align-items:center;gap:8px}
+  .scorebar .tr{width:74px;height:7px;border-radius:4px;background:#e2e8f0;overflow:hidden;flex:none}
+  .scorebar .tr i{display:block;height:100%;border-radius:4px 0 0 4px}
+  .nnote{font-size:11px;color:var(--ink-4)}
+  .filters{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 14px}
+  .fchip{border:1px solid var(--line);background:var(--card);border-radius:999px;
+    padding:5px 13px;font-size:var(--t-meta);font-weight:550;color:var(--ink-2);cursor:pointer}
+  .fchip.on{background:var(--s1);border-color:var(--s1);color:#fff}
+
+  /* ---------- scorecard ---------- */
+  .score2{display:grid;grid-template-columns:1.4fr 1fr;gap:14px}
+  .comp{display:grid;grid-template-columns:170px 1fr 52px 70px;gap:10px;align-items:center;
+    font-size:var(--t-label);padding:6px 0}
+  .comp .cn{color:var(--ink-2)} .comp .cw{font-size:11px;color:var(--ink-4)}
+  .comp .tr{height:9px;border-radius:4px;background:#e2e8f0;overflow:hidden}
+  .comp .tr i{display:block;height:100%;border-radius:4px 0 0 4px}
+  .comp .cv{font-weight:650;text-align:right;font-variant-numeric:tabular-nums}
+  .comp .cnote{font-size:11px;color:var(--ink-4);text-align:right}
+  .comp.na .tr{background:repeating-linear-gradient(45deg,#eef2f7 0 6px,#e2e8f0 6px 12px)}
+  .comp.na .cv{color:var(--ink-4);font-weight:500}
+
+  /* ---------- integrity ---------- */
+  .intro-int{border-left:4px solid var(--warn)}
+  .evrow{font-size:var(--t-meta);color:var(--ink-2);
+    font-variant-numeric:tabular-nums;padding:3px 0}
+  .evrow code{background:#f1f5f9;border-radius:4px;padding:0 5px;font-size:12px}
+  .innocent{font-size:var(--t-meta);color:var(--ink-4);border-top:1px dashed var(--line);
+    margin-top:12px;padding-top:9px;font-style:italic}
+  .intgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .maskbar{display:inline-block;height:9px;border-radius:4px;background:var(--warn);vertical-align:middle}
+
+  /* ---------- stub pages ---------- */
+  .stub{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}
+  .stub .card h3{margin:0 0 4px;font-size:var(--t-body)}
+  .stub .card p{margin:0;font-size:var(--t-meta);color:var(--ink-3)}
+
+  .foot{margin-top:44px;border-top:1px solid var(--line);padding-top:14px;
+    font-size:var(--t-meta);color:var(--ink-4)}
+  @media (max-width:960px){
+    .hero,.charts2,.score2,.intgrid{grid-template-columns:1fr}
+    .decide{grid-template-columns:1fr}
+  }
+  /* tooltip */
+  .tip{position:fixed;pointer-events:none;background:var(--ink);color:#fff;
+    font-size:12px;border-radius:6px;padding:5px 9px;opacity:0;transition:opacity .12s;z-index:99;
+    font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body data-palette="#2563eb,#eb6834,#1baf7a,#eda100,#e87ba4,#008300,#4a3aa7,#e34948">
+<div class="tip" id="tip"></div>
+<div class="shell">
+
+<header class="top">
+  <div class="brandrow">
+    <div class="logo">V</div>
+    <div class="brand">VinoVoss Engineering</div>
+    <div class="fresh"><span class="dot"></span> Data as of today 09:58 &nbsp;·&nbsp; Jira ✓ &nbsp; GitHub ✓
+      <button class="btn">↻ Refresh</button>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button data-p="today" class="on">Today</button>
+    <button data-p="people">People</button>
+    <button data-p="delivery">Delivery</button>
+    <button data-p="code">Code</button>
+    <button data-p="planning">Planning</button>
+    <button data-p="integrity">Integrity <span class="lock">🔒</span></button>
+    <button data-p="business">Business</button>
+  </nav>
+</header>
+
+<!-- ============================================================ TODAY -->
+<section class="page on" id="p-today">
+
+  <div class="hero">
+    <div class="card lead">
+      <div class="kicker">⚠ Needs a decision</div>
+      <div class="big">73<small> of 79</small></div>
+      <div style="font-size:var(--t-lead);font-weight:600;margin-top:2px">open PRs have no approving review</div>
+      <div class="meter"><i></i></div>
+      <div class="sub">21 have never been reviewed at all. Oldest unreviewed PR: <b>825 days</b>.
+        &nbsp;<a href="#">See stuck PRs →</a></div>
+    </div>
+    <div class="decide">
+      <div class="card">
+        <span class="chip warn">⏱ Triage</span>
+        <div class="n">5</div>
+        <div class="what">tickets stuck in triage &gt; 48h</div>
+        <div class="why">Untriaged bugs age silently — oldest is 3 days, two unassigned.</div>
+        <div class="act"><a href="#">Assign owners →</a></div>
+      </div>
+      <div class="card">
+        <span class="chip crit">👀 Review</span>
+        <div class="n">13</div>
+        <div class="what">PRs &gt; 2 days with no reviewer asked</div>
+        <div class="why">Nobody was requested and nobody has looked. These stall by default.</div>
+        <div class="act"><a href="#">Assign reviewers →</a></div>
+      </div>
+      <div class="card">
+        <span class="chip info">∅ Ownership</span>
+        <div class="n">55</div>
+        <div class="what">open tickets with no owner</div>
+        <div class="why">15% of open work belongs to nobody, so nobody's score carries it.</div>
+        <div class="act"><a href="#">Run owner sweep →</a></div>
+      </div>
+    </div>
+  </div>
+
+  <h2 class="sec">This week</h2>
+  <p class="secnote">Counts are telemetry, not performance — people are scored on the People page, size-weighted and cycle-anchored.</p>
+  <div class="kpis">
+    <div class="tile"><div class="lbl">Tickets resolved · 7d</div>
+      <div class="row"><div class="val">96</div><svg class="spark" data-s="70,88,64,92,81,75,102,84,93,78,89,96" data-hue="--s1"></svg></div>
+      <div class="delta up">▲ +8 vs prior week</div></div>
+    <div class="tile"><div class="lbl">PRs merged · 7d</div>
+      <div class="row"><div class="val">126</div><svg class="spark" data-s="98,110,92,130,104,120,141,109,133,117,124,126" data-hue="--s2"></svg></div>
+      <div class="delta up">▲ +9 vs prior week</div><div class="note">excl. bots (23 bot merges)</div></div>
+    <div class="tile"><div class="lbl">Median cycle time</div>
+      <div class="row"><div class="val">9.5<span style="font-size:17px;font-weight:500;color:var(--ink-3)">d</span></div>
+      <svg class="spark" data-s="12,11,13,10,11,9,10,12,9,10,9,9.5" data-hue="--s1"></svg></div>
+      <div class="delta up">▲ 1.1d faster vs 90d</div><div class="note">In&nbsp;Progress → resolved, from changelog</div></div>
+    <div class="tile"><div class="lbl">Open tickets</div>
+      <div class="row"><div class="val">360</div><svg class="spark" data-s="330,338,335,349,344,352,347,358,353,361,357,360" data-hue="--s1"></svg></div>
+      <div class="delta flat">— flat vs prior week</div></div>
+    <div class="tile"><div class="lbl">Stalled 30d+ <span title="No status transition in 30 days — field edits don't reset this clock.">ⓘ</span></div>
+      <div class="row"><div class="val">45</div><svg class="spark" data-s="30,32,36,35,39,38,42,41,44,43,44,45" data-hue="--s8"></svg></div>
+      <div class="delta down">▲ 12% of open</div><div class="note">by status age, not edit age</div></div>
+    <div class="tile"><div class="lbl">Estimate coverage</div>
+      <div class="row"><div class="val">61%</div><svg class="spark" data-s="48,50,52,51,55,54,57,58,57,60,59,61" data-hue="--s3"></svg></div>
+      <div class="delta up">▲ +3pp · past-Backlog, epics exempt</div></div>
+  </div>
+
+  <div class="charts2" style="margin-top:14px">
+    <div class="card">
+      <p class="chart-title">Throughput — 12 weeks</p>
+      <p class="chart-sub">Tickets resolved and PRs merged per week (bots excluded)</p>
+      <svg id="linechart" viewBox="0 0 620 210" width="100%" height="210" role="img"
+           aria-label="Line chart of weekly tickets resolved and PRs merged over 12 weeks"></svg>
+      <div class="legend">
+        <span class="key"><i style="background:var(--s1)"></i> Tickets resolved</span>
+        <span class="key"><i style="background:var(--s2)"></i> PRs merged</span>
+      </div>
+    </div>
+    <div class="card">
+      <p class="chart-title">Where open work sits</p>
+      <p class="chart-sub">360 open tickets by status — ranked</p>
+      <div class="hbars" id="statusbars"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ PEOPLE -->
+<section class="page" id="p-people">
+  <h2 class="sec" style="margin-top:6px">People</h2>
+  <p class="secnote">Scores compare <b>within a role only</b> — a backend engineer is never ranked against a manual tester.
+     A component with too little data says so instead of scoring, and below 60 points of measurable weight there is no score at all.
+     <span class="chip gray">roles illustrative until the roster is confirmed</span></p>
+
+  <div class="filters">
+    <button class="fchip on">All roles</button><button class="fchip">Backend</button>
+    <button class="fchip">Frontend</button><button class="fchip">Mobile</button>
+    <button class="fchip">ML / AI</button><button class="fchip">Recommendation</button>
+    <button class="fchip">QA — automated</button><button class="fchip">QA — manual</button>
+    <button class="fchip">PM</button>
+  </div>
+
+  <div class="card" style="padding:6px 8px">
+    <table>
+      <thead><tr>
+        <th>Person</th><th>Score</th><th class="num">Delivered <span title="Resolved tickets weighted by PR size band; trivial-heavy mixes are flagged.">ⓘ</span></th>
+        <th class="num">Cycle (med)</th><th class="num">Reviews given · TTFR</th>
+        <th class="num">Estimate accuracy</th><th>Flags 🔒</th>
+      </tr></thead>
+      <tbody>
+        <tr><td><div class="who"><span class="av" style="background:var(--s1)">TA</span><b>Tam</b> <span class="rolechip">backend</span></div></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:81%;background:var(--good)"></i></span><b>81</b></span> <span class="nnote">n=31</span></td>
+          <td class="num">42 pts <span class="nnote">8% trivial</span></td><td class="num">6.2d</td>
+          <td class="num">14 · 11h</td><td class="num">×1.1 <span class="nnote">IQR 0.5</span></td>
+          <td><span class="chip gray">0</span></td></tr>
+        <tr><td><div class="who"><span class="av" style="background:var(--s7)">SS</span><b>Sai Shankar</b> <span class="rolechip">ML-ops</span></div></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:74%;background:var(--good)"></i></span><b>74</b></span> <span class="nnote">n=24</span></td>
+          <td class="num">38 pts <span class="nnote">12% trivial</span></td><td class="num">7.8d</td>
+          <td class="num">9 · 18h</td><td class="num">×1.3 <span class="nnote">IQR 0.8</span></td>
+          <td><span class="chip gray">0</span></td></tr>
+        <tr><td><div class="who"><span class="av" style="background:var(--s3)">SC</span><b>Santi Caamaño</b> <span class="rolechip">frontend</span></div></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:66%;background:var(--s4)"></i></span><b>66</b></span> <span class="nnote">n=19</span></td>
+          <td class="num">29 pts <span class="nnote">21% trivial</span></td><td class="num">10.4d</td>
+          <td class="num">11 · 9h</td><td class="num">×1.6 <span class="nnote">IQR 1.1</span></td>
+          <td><span class="chip warn">⚑ 1</span></td></tr>
+        <tr><td><div class="who"><span class="av" style="background:var(--s2)">AL</span><b>Ali</b> <span class="rolechip">recommendation</span></div></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:58%;background:var(--s4)"></i></span><b>58</b></span> <span class="nnote">n=27</span></td>
+          <td class="num">24 pts <span class="nnote">40% trivial ⚑</span></td><td class="num">13.1d</td>
+          <td class="num">2 · 41h</td><td class="num">×2.4 <span class="nnote">IQR 1.9 ⚑</span></td>
+          <td><span class="chip warn">⚑ 2</span></td></tr>
+        <tr><td><div class="who"><span class="av" style="background:var(--s8)">AR</span><b>Arsalan</b> <span class="rolechip">backend</span></div></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:52%;background:var(--s4)"></i></span><b>52</b></span> <span class="nnote">n=22</span></td>
+          <td class="num">21 pts <span class="nnote">18% trivial</span></td><td class="num">15.9d</td>
+          <td class="num">5 · 27h</td><td class="num">×1.9 <span class="nnote">IQR 1.4</span></td>
+          <td><span class="chip crit">⚑ 3</span></td></tr>
+        <tr><td><div class="who"><span class="av" style="background:var(--s6)">DQ</span><b>Dina</b> <span class="rolechip">QA — manual</span></div></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:77%;background:var(--good)"></i></span><b>77</b></span> <span class="nnote">n=48 · QA rubric</span></td>
+          <td class="num">64 verified</td><td class="num">1.9d <span class="nnote">to verify</span></td>
+          <td class="num">— <span class="nnote">n/a for role</span></td><td class="num">92% <span class="nnote">bug validity</span></td>
+          <td><span class="chip gray">0</span></td></tr>
+        <tr style="opacity:.75"><td><div class="who"><span class="av" style="background:var(--ink-4)">JW</span><b>Jon Wang</b> <span class="rolechip">mobile</span></div></td>
+          <td><span class="chip gray">no score — 40% measurable</span> <span class="nnote">needs: 5+ finished tickets</span></td>
+          <td class="num">3 pts</td><td class="num">—</td><td class="num">0 · —</td><td class="num">—</td>
+          <td><span class="chip gray">0</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 class="sec">Scorecard — Tam <span class="rolechip" style="font-size:12px;vertical-align:3px">backend rubric</span></h2>
+  <div class="score2">
+    <div class="card">
+      <div class="comp"><div><div class="cn">Delivery, size-weighted</div><div class="cw">weight 20</div></div>
+        <div class="tr"><i style="width:84%;background:var(--s1)"></i></div><div class="cv">84</div><div class="cnote">n=18 PRs</div></div>
+      <div class="comp"><div><div class="cn">Cycle time vs role median</div><div class="cw">weight 15</div></div>
+        <div class="tr"><i style="width:78%;background:var(--s1)"></i></div><div class="cv">78</div><div class="cnote">med 6.2d</div></div>
+      <div class="comp"><div><div class="cn">Rework &amp; re-resolves</div><div class="cw">weight 15</div></div>
+        <div class="tr"><i style="width:90%;background:var(--s1)"></i></div><div class="cv">90</div><div class="cnote">1 reopen/90d</div></div>
+      <div class="comp"><div><div class="cn">Estimate accuracy</div><div class="cw">weight 15</div></div>
+        <div class="tr"><i style="width:82%;background:var(--s1)"></i></div><div class="cv">82</div><div class="cnote">×1.1, IQR 0.5</div></div>
+      <div class="comp"><div><div class="cn">Review citizenship</div><div class="cw">weight 10</div></div>
+        <div class="tr"><i style="width:71%;background:var(--s1)"></i></div><div class="cv">71</div><div class="cnote">14 given, 11h</div></div>
+      <div class="comp"><div><div class="cn">AI-review findings</div><div class="cw">weight 10</div></div>
+        <div class="tr"><i style="width:75%;background:var(--s1)"></i></div><div class="cv">75</div><div class="cnote">12% flagged</div></div>
+      <div class="comp"><div><div class="cn">Ticket hygiene</div><div class="cw">weight 10</div></div>
+        <div class="tr"><i style="width:88%;background:var(--s1)"></i></div><div class="cv">88</div><div class="cnote">4.4 / 5</div></div>
+      <div class="comp na"><div><div class="cn">Urgent response</div><div class="cw">weight 5</div></div>
+        <div class="tr"></div><div class="cv">n/a</div><div class="cnote">no High+ held</div></div>
+      <p class="secnote" style="margin-top:12px">Overall <b>81</b> over 95 measurable points.
+        Unmeasured components are excluded and named — never scored zero, never silently dropped.</p>
+    </div>
+    <div class="card">
+      <p class="chart-title">Delivered, 12 weeks <span class="nnote">(size-weighted points)</span></p>
+      <svg class="spark" style="width:100%;height:56px" data-s="2.5,4,3,5,3.5,4,6,3,5,4,4.5,5" data-hue="--s1" data-fill="1"></svg>
+      <table style="margin-top:12px">
+        <thead><tr><th>Evidence</th><th class="num">links</th></tr></thead>
+        <tbody>
+          <tr><td>PRs merged this period</td><td class="num"><a href="#">18 ↗</a></td></tr>
+          <tr><td>Tickets resolved (changelog-credited)</td><td class="num"><a href="#">21 ↗</a></td></tr>
+          <tr><td>Reviews given</td><td class="num"><a href="#">14 ↗</a></td></tr>
+          <tr><td>Estimate revisions mid-flight</td><td class="num"><a href="#">0 ↗</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ INTEGRITY -->
+<section class="page" id="p-integrity">
+  <div class="card intro-int" style="margin-top:6px">
+    <b>Visible to you only.</b>
+    <span style="color:var(--ink-2)">Every flag below is a prompt to look, never a verdict — each card states its innocent
+    reading, and each number links to the raw tickets or PRs behind it. Attribution is by changelog author, not current assignee.</span>
+  </div>
+
+  <div class="intgrid" style="margin-top:14px">
+    <div class="card">
+      <p class="chart-title">Freshness that isn't</p>
+      <p class="chart-sub">Days of apparent activity produced by edits that moved no work (masked days = edit-idle vs status-idle gap)</p>
+      <table>
+        <thead><tr><th>Person</th><th class="num">masked days</th><th></th><th class="num">cosmetic : transitions</th></tr></thead>
+        <tbody>
+          <tr><td>Arsalan</td><td class="num">41</td><td><span class="maskbar" style="width:82px"></span></td><td class="num">34 : 2 <a href="#">↗</a></td></tr>
+          <tr><td>Santi Caamaño</td><td class="num">19</td><td><span class="maskbar" style="width:38px"></span></td><td class="num">12 : 5 <a href="#">↗</a></td></tr>
+          <tr><td>Ali</td><td class="num">11</td><td><span class="maskbar" style="width:22px"></span></td><td class="num">9 : 6 <a href="#">↗</a></td></tr>
+        </tbody>
+      </table>
+      <div class="evrow" style="margin-top:8px">Worst single day: <code>Fri Aug 14</code> — 19 tickets touched, 0 status changes.</div>
+      <div class="innocent">Innocent reading: real grooming — rewriting thin tickets into workable ones lands here too.</div>
+    </div>
+
+    <div class="card">
+      <p class="chart-title">Estimates revised mid-flight</p>
+      <p class="chart-sub">Original estimate changed after work began — the bill was rewritten by someone who knew the hours already booked</p>
+      <div class="evrow"><code>MB-6416</code> 2h → 8h &nbsp;<b>raised</b>&nbsp; day 9 of work · by Ali</div>
+      <div class="evrow"><code>MB-8470</code> 6h → 22h &nbsp;<b>raised</b>&nbsp; day 4 of work · by Arsalan</div>
+      <div class="evrow"><code>MB-8834</code> 8h → 12h &nbsp;<b>raised</b>&nbsp; day 11 of work · by Santi</div>
+      <div class="evrow"><code>MB-7323</code> 16h → 10h &nbsp;<span style="color:var(--good)"><b>lowered</b></span>&nbsp; day 2 · by Farid</div>
+      <div class="innocent">Innocent reading: scope genuinely grew. The tell is a pattern, not one edit — and lowered revisions are listed with equal weight.</div>
+    </div>
+
+    <div class="card">
+      <p class="chart-title">Staging round-trips</p>
+      <p class="chart-sub">Tickets entering a resolved-class status more than once — each entry mints a "resolved" credit today</p>
+      <div class="evrow"><code>MB-8594</code> entered Review in Staging <b>4×</b> in 30d · Santi</div>
+      <div class="evrow"><code>MB-8676</code> entered Review in Staging <b>3×</b> in 30d · Shawn</div>
+      <div class="evrow"><code>MB-8231</code> entered Ready for Production <b>2×</b> in 21d · Mohsen</div>
+      <div class="innocent">Innocent reading: staging genuinely bounced the work back. Pair with the reopen ledger before reading intent.</div>
+    </div>
+
+    <div class="card">
+      <p class="chart-title">Review pairs &amp; self-merges</p>
+      <p class="chart-sub">Concentrated approval traffic and merges without outside review</p>
+      <div class="evrow"><b>engA ⇄ engB</b> — 9 of engA's last 10 approvals came from engB, and 8 of engB's from engA · 6 empty-body ⚑</div>
+      <div class="evrow"><b>Self-merged, never approved:</b> arsalanvm 4 · MohsenStack 2 <a href="#">↗</a></div>
+      <div class="evrow"><b>Merged off-trunk</b> (into own feature branch): 7 PRs this month</div>
+      <div class="innocent">Innocent reading: a two-person subteam reviews each other because nobody else knows the code. Concentration is a question, not an accusation.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ STUBS -->
+<section class="page" id="p-delivery">
+  <h2 class="sec" style="margin-top:6px">Delivery <span class="chip gray">existing sections, restyled — no metric changes</span></h2>
+  <div class="stub">
+    <div class="card"><h3>Ticket composition</h3><p>Ranked bars by status / team / priority / epic — the fixed "undefined" chart lives here.</p></div>
+    <div class="card"><h3>Epics</h3><p>Remaining work per epic, orphans, empty epics, suggested parents.</p></div>
+    <div class="card"><h3>Prioritized queue</h3><p>Score-ranked worklist, unchanged formula, linked to sprint planner.</p></div>
+    <div class="card"><h3>Stale &amp; abandoned</h3><p>Now driven by <b>status age</b>, so a label edit no longer rescues a dead ticket.</p></div>
+    <div class="card"><h3>Backlog cleanup</h3><p>The one-ticket-at-a-time triage cards, kept as-is — it's the best interaction in the app.</p></div>
+  </div>
+</section>
+
+<section class="page" id="p-code">
+  <h2 class="sec" style="margin-top:6px">Code <span class="chip gray">PR health + the new quality metrics</span></h2>
+  <div class="stub">
+    <div class="card"><h3>Open &amp; stuck PRs</h3><p>Today's headline drills into here: stuck, never-reviewed, no-reviewer queues.</p></div>
+    <div class="card"><h3>AI review findings</h3><p>Devin's changes-requested share per author — share of judged PRs, never a raw total.</p></div>
+    <div class="card"><h3>Size &amp; hygiene</h3><p>Size bands per person, Jira-key traceability of <b>merged</b> work, abandoned-PR rate.</p></div>
+    <div class="card"><h3>Review citizenship</h3><p>Reviews given, time-to-first-review, distinct authors reviewed.</p></div>
+  </div>
+</section>
+
+<section class="page" id="p-planning">
+  <h2 class="sec" style="margin-top:6px">Planning <span class="chip gray">existing planner + capacity, restyled</span></h2>
+  <div class="stub">
+    <div class="card"><h3>Sprint planner</h3><p>Goal-first planning, editable rows — kept. Needs sprint dates set in Jira for availability.</p></div>
+    <div class="card"><h3>Sprint capacity</h3><p>Committed vs available hours; estimate revisions made mid-sprint get a marker here.</p></div>
+  </div>
+</section>
+
+<section class="page" id="p-business">
+  <h2 class="sec" style="margin-top:6px">Business <span class="chip gray">unchanged this phase</span></h2>
+  <div class="stub">
+    <div class="card"><h3>Orders, revenue &amp; AOV</h3><p>As-is.</p></div>
+    <div class="card"><h3>Price competitiveness</h3><p>Now scoped to trading merchants only (<code>ACTIVE_MERCHANTS</code>): TheWinesGood, Yiannis Wine Shop, Capital Fine Wine, Little International Wine. Vivino tab shows "unavailable — blocked" instead of an empty prompt.</p></div>
+    <div class="card"><h3>Ads, burn, funnel</h3><p>As-is.</p></div>
+  </div>
+</section>
+
+<div class="foot">
+  Design mockup by Claude (Fable 5) · VinoVoss dashboard redesign · numbers are real values captured 16 Aug 2026 where available, illustrative where marked ·
+  roles and flags are illustrative until the roster is confirmed. Palette validated (dataviz six-checks, light surface).
+</div>
+</div>
+
+<script>
+/* tabs */
+const tabs=document.querySelectorAll('#tabs button'), pages=document.querySelectorAll('.page');
+tabs.forEach(b=>b.onclick=()=>{tabs.forEach(x=>x.classList.remove('on'));b.classList.add('on');
+  pages.forEach(p=>p.classList.remove('on'));document.getElementById('p-'+b.dataset.p).classList.add('on');
+  window.scrollTo(0,0);});
+
+/* sparklines */
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+document.querySelectorAll('.spark').forEach(svg=>{
+  const d=svg.dataset.s.split(',').map(Number), hue=css(svg.dataset.hue||'--s1');
+  const w=svg.clientWidth||96, h=svg.clientHeight||30, pad=3;
+  svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
+  const mn=Math.min(...d), mx=Math.max(...d);
+  const x=i=>pad+i*(w-2*pad)/(d.length-1), y=v=>h-pad-((v-mn)/((mx-mn)||1))*(h-2*pad);
+  const pts=d.map((v,i)=>`${x(i)},${y(v)}`).join(' ');
+  let inner='';
+  if(svg.dataset.fill) inner+=`<polygon points="${pad},${h-pad} ${pts} ${w-pad},${h-pad}" fill="${hue}" opacity="0.1"/>`;
+  inner+=`<polyline points="${pts}" fill="none" stroke="${hue}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  inner+=`<circle cx="${x(d.length-1)}" cy="${y(d[d.length-1])}" r="3.5" fill="${hue}" stroke="#fff" stroke-width="2"/>`;
+  svg.innerHTML=inner;
+});
+
+/* line chart: 12 weeks, two series, hover layer */
+(function(){
+  const svg=document.getElementById('linechart'); if(!svg) return;
+  const W=620,H=210,L=40,R=96,T=14,B=28;
+  const resolved=[70,88,64,92,81,75,102,84,93,78,89,96];
+  const merged=[98,110,92,130,104,120,141,109,133,117,124,126];
+  const wk=['May 25','Jun 1','Jun 8','Jun 15','Jun 22','Jun 29','Jul 6','Jul 13','Jul 20','Jul 27','Aug 3','Aug 10'];
+  const mx=150, x=i=>L+i*(W-L-R)/11, y=v=>T+(1-v/mx)*(H-T-B);
+  let g='';
+  [0,50,100,150].forEach(v=>{g+=`<line x1="${L}" y1="${y(v)}" x2="${W-R}" y2="${y(v)}" stroke="#e5e7eb" stroke-width="1"/>
+    <text x="${L-8}" y="${y(v)+4}" text-anchor="end">${v}</text>`;});
+  [0,3,6,9,11].forEach(i=>{g+=`<text x="${x(i)}" y="${H-8}" text-anchor="middle">${wk[i]}</text>`;});
+  const line=(d,c)=>`<polyline points="${d.map((v,i)=>`${x(i)},${y(v)}`).join(' ')}" fill="none" stroke="${c}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  const s1=css('--s1'), s2=css('--s2');
+  g+=line(merged,s2)+line(resolved,s1);
+  g+=`<text class="lab" x="${x(11)+10}" y="${y(merged[11])+4}">126 merged</text>`;
+  g+=`<text class="lab" x="${x(11)+10}" y="${y(resolved[11])+4}">96 resolved</text>`;
+  [[resolved,s1,'resolved'],[merged,s2,'merged']].forEach(([d,c,n])=>{
+    d.forEach((v,i)=>{g+=`<circle cx="${x(i)}" cy="${y(v)}" r="8" fill="transparent" data-tip="${wk[i]}: ${v} ${n}"/>
+      <circle cx="${x(i)}" cy="${y(v)}" r="3" fill="${c}" stroke="#fff" stroke-width="2" pointer-events="none"/>`;});
+  });
+  svg.innerHTML=g;
+})();
+
+/* ranked status bars */
+(function(){
+  const data=[['To Do',118],['In Progress',84],['Review in Staging',43],['On Hold',38,1],
+    ['IN DEV ENV',30],['TRIAGE',12],['Code Review',11],['DISCUSSION NEEDED',8],
+    ['Ready for Production',7],['Blocked',6,1],['Other (2)',3,0,1]];
+  const mx=118, host=document.getElementById('statusbars');
+  host.innerHTML=data.map(([n,v,flag,dim])=>`
+    <div class="hbar${dim?' dim':''}" data-tip="${n}: ${v} tickets (${(v/360*100).toFixed(1)}%)">
+      <div class="name">${n}${flag?'<span class="flagic" title="attention status"> ⚠</span>':''}</div>
+      <div><div class="track" style="width:${(v/mx*100).toFixed(1)}%"></div></div>
+      <div class="v">${v}</div></div>`).join('');
+})();
+
+/* tooltip */
+const tip=document.getElementById('tip');
+document.addEventListener('mousemove',e=>{
+  const t=e.target.closest('[data-tip]');
+  if(t){tip.textContent=t.dataset.tip;tip.style.opacity=1;
+    tip.style.left=(e.clientX+14)+'px';tip.style.top=(e.clientY+14)+'px';}
+  else tip.style.opacity=0;
+});
+</script>
+</body>
+</html>
