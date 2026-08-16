@@ -5135,7 +5135,7 @@ def _band_pictures(bands: pd.DataFrame, merchant: str) -> None:
             hole=0.35,
             # Kept short: the text is drawn larger than it used to be, and a
             # title long enough to be clipped is worse than a terse one.
-            title=f"{merchant}: wines by price against the market",
+            title="Wines by price against the market",
         )
         ring.update_traces(textinfo="percent", hovertemplate="%{label}: %{value} wines")
         ring.update_layout(margin=dict(t=54, b=0, l=0, r=0), legend_title_text="")
@@ -5776,7 +5776,8 @@ def _ad_pictures(frame: pd.DataFrame, money: str) -> None:
             orientation="h",
             color=rated["band"].astype(str),
             color_discrete_map=colours,
-            title=f"Revenue per {_money(1, money)} of ads, by price against market",
+            # Short enough not to be clipped in half a row at the larger size.
+            title=f"Revenue per {_money(1, money)} of ads",
             # To the cent while the return is small: a band giving back forty
             # cents a dollar labelled 0 reads as a band that sold nothing.
             text=rated["per_dollar"].map(
