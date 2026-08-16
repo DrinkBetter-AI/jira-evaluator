@@ -974,7 +974,10 @@ def _deliver_board_snapshot(recorded: board.Snapshot) -> None:
     if not asked or slot is None or recorded.empty:
         return
     with st.spinner("Drawing the board into a PDF..."):
-        printed = recorded.pdf()
+        # Drawn once: every chart on it is an image somebody has to render, and
+        # the fallback below is the same page, not another one.
+        page = recorded.html()
+        printed = board.to_pdf(page)
     if printed:
         slot.download_button(
             "Download PDF",
@@ -988,7 +991,7 @@ def _deliver_board_snapshot(recorded: board.Snapshot) -> None:
     # browser to print - rather than nothing at all.
     slot.download_button(
         "Download board",
-        data=recorded.html().encode("utf-8"),
+        data=page.encode("utf-8"),
         file_name=recorded.filename("html"),
         mime="text/html",
         key="board_snapshot_html",

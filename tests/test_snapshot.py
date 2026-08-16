@@ -202,6 +202,21 @@ def test_the_board_is_a_pdf_a_reader_can_open():
     assert printed and printed.startswith(b"%PDF-")
 
 
+def test_a_board_that_cannot_be_laid_out_is_offered_as_the_page(monkeypatch):
+    """A PDF library that fails mid-layout must not lose the reader their board."""
+
+    class Refuses:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def write_pdf(self):
+            raise RuntimeError("no such font")
+
+    monkeypatch.setattr(snapshot, "_weasyprint", lambda: Refuses)
+
+    assert snapshot.to_pdf("<html></html>") is None
+
+
 def test_a_link_with_search_terms_in_it_still_points_where_it_pointed():
     page = board(("markdown", ("[Open in Jira](https://j/issues?jql=a=1&b=2)",), {})).html(now=WHEN)
 

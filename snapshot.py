@@ -454,9 +454,19 @@ def _weasyprint():
 
 
 def to_pdf(page: str) -> bytes | None:
-    """The page as PDF bytes, or None where WeasyPrint is not installed."""
+    """The page as PDF bytes, or None where it could not be made into one.
+
+    A font that cannot be found, an image that cannot be read: the reader asked
+    for their board and is given the printable page instead of a traceback.
+    """
     render = _weasyprint()
-    return None if render is None else render(string=page).write_pdf()
+    if render is None:
+        return None
+    try:
+        return render(string=page).write_pdf()
+    except Exception:  # noqa: BLE001 - the board is offered as HTML instead
+        logger.warning("The board could not be laid out as a PDF", exc_info=True)
+        return None
 
 
 # Streamlit's chart template does not name its colours: it fills them with
