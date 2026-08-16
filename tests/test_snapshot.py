@@ -202,6 +202,23 @@ def test_the_board_is_a_pdf_a_reader_can_open():
     assert printed and printed.startswith(b"%PDF-")
 
 
+def test_a_link_with_search_terms_in_it_still_points_where_it_pointed():
+    page = board(("markdown", ("[Open in Jira](https://j/issues?jql=a=1&b=2)",), {})).html(now=WHEN)
+
+    assert 'href="https://j/issues?jql=a=1&amp;b=2"' in page
+    assert "&amp;amp;" not in page
+
+
+def test_a_line_the_page_wrote_once_is_printed_once():
+    """``st.write`` draws by calling markdown, and both must not be kept."""
+    import streamlit as st
+
+    with snapshot.recording("Engineering") as recorded:
+        st.write("Closing MB-1, MB-2")
+
+    assert [block.text for block in recorded.blocks] == ["Closing MB-1, MB-2"]
+
+
 def test_two_readers_at_once_each_get_their_own_whole_board():
     """One session finishing must not stop another's page being recorded."""
     import threading

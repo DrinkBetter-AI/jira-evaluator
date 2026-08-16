@@ -49,7 +49,9 @@ CHART_HEIGHT = 620
 
 # The calls a page makes to draw itself. Widgets are deliberately absent: a
 # button or a selectbox is how the reader asked for what is on the page, not
-# part of what the page said.
+# part of what the page said. ``write`` is absent too, and for the opposite
+# reason: it draws by calling one of these itself, so listening to both would
+# print every line of it twice.
 DRAWING_CALLS = (
     "title",
     "header",
@@ -57,7 +59,6 @@ DRAWING_CALLS = (
     "markdown",
     "caption",
     "text",
-    "write",
     "metric",
     "dataframe",
     "table",
@@ -537,11 +538,23 @@ _ESCAPED = re.compile(r"\\([$*_`\[\]])")
 
 
 def _rich(text: str) -> str:
-    """One line of the page's markdown as HTML: bold, code, links, italics."""
-    marked = _LINK.sub(
-        lambda m: f'<a href="{html.escape(m.group(2), quote=True)}">{html.escape(m.group(1))}</a>',
-        html.escape(text),
-    )
+    """One line of the page's markdown as HTML: bold, code, links, italics.
+
+    The links are read off the line as the page wrote it, before the line is
+    escaped: a Jira search address carries ``&`` between its terms, and escaping
+    it once as part of the line and again as an address would send the reader
+    somewhere that does not exist.
+    """
+    pieces: list[str] = []
+    written = 0
+    for link in _LINK.finditer(text):
+        pieces.append(html.escape(text[written : link.start()]))
+        pieces.append(
+            f'<a href="{html.escape(link.group(2), quote=True)}">{html.escape(link.group(1))}</a>'
+        )
+        written = link.end()
+    pieces.append(html.escape(text[written:]))
+    marked = "".join(pieces)
     marked = _CODE.sub(r"<code>\1</code>", marked)
     marked = _BOLD.sub(r"<strong>\1</strong>", marked)
     marked = _ITALIC.sub(r"<em>\1</em>", marked)
