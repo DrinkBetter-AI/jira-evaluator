@@ -13,3 +13,10 @@ python-dotenv>=1.0.0
 psycopg2-binary>=2.9.9
 google-cloud-bigquery>=3.25.0
 db-dtypes>=1.2.0
+# Printing the whole board. WeasyPrint lays the recorded page out as a PDF and
+# needs Pango/Cairo from the image; Kaleido turns each chart into a picture and
+# drives the headless Chromium the image installs (BROWSER_PATH points at it).
+# Both are optional at runtime: without WeasyPrint the board is offered as HTML,
+# without a renderer a chart leaves a labelled gap.
+weasyprint>=62.0
+kaleido>=1.0.0

@@ -74,6 +74,7 @@ from teams import (
 import theme
 from theme import inject_styles, kpi_strip
 import report as reporting
+import snapshot as board
 from hygiene import (
     CONTAINER_ISSUE_TYPES,
     DEFAULT_STALE_DAYS,
@@ -876,6 +877,11 @@ def _metrics_df(df: pd.DataFrame, include_backlogs: bool) -> pd.DataFrame:
 TAB_ENGINEERING = "Engineering"
 TAB_BUSINESS = "Business"
 REPORTS_KEY = "tab_reports"
+# Which page was asked for as a file, and where on it the button that asked
+# sits: the file can only be built once the page has finished drawing, so the
+# ask is recorded here and answered into the same corner afterwards.
+BOARD_ASKED_KEY = "board_snapshot_asked"
+BOARD_SLOT_KEY = "board_snapshot_slot"
 
 
 def _report(tab: str) -> reporting.Report:
@@ -934,6 +940,59 @@ def _download_report(slot, tab: str) -> None:
         mime="text/html",
         key=f"download_{tab.lower()}",
         help="A one-page summary of this tab. Open it and print to PDF.",
+    )
+    _offer_board_snapshot(slot, tab)
+
+
+def _offer_board_snapshot(slot, tab: str) -> None:
+    """Offer the page itself - all of it - as a PDF someone else can read.
+
+    The report above is a summary; this is the board: every section in the
+    order it is drawn, tables in the colours they are tinted, charts as the
+    charts they are. A design can only be judged whole, and a reader outside
+    the dashboard - an advisor, a model being asked what to change - cannot be
+    handed a screen.
+    """
+    st.session_state[BOARD_SLOT_KEY] = slot
+    if slot.button(
+        "Whole board as PDF",
+        key=f"snapshot_{tab.lower()}",
+        help="Every section of this page, drawn as it looks, in one PDF.",
+    ):
+        st.session_state[BOARD_ASKED_KEY] = tab
+
+
+def _page_name(page) -> str:
+    """What the file calls the page, whatever Streamlit has named it."""
+    return str(getattr(page, "title", "") or "Dashboard")
+
+
+def _deliver_board_snapshot(recorded: board.Snapshot) -> None:
+    """Hand over the recording of the page that has just finished drawing."""
+    asked = st.session_state.pop(BOARD_ASKED_KEY, None)
+    slot = st.session_state.pop(BOARD_SLOT_KEY, None)
+    if not asked or slot is None or recorded.empty:
+        return
+    with st.spinner("Drawing the board into a PDF..."):
+        printed = recorded.pdf()
+    if printed:
+        slot.download_button(
+            "Download PDF",
+            data=printed,
+            file_name=recorded.filename("pdf"),
+            mime="application/pdf",
+            key="board_snapshot_pdf",
+        )
+        return
+    # No PDF library where this is deployed: the same page, as the page, for a
+    # browser to print - rather than nothing at all.
+    slot.download_button(
+        "Download board",
+        data=recorded.html().encode("utf-8"),
+        file_name=recorded.filename("html"),
+        mime="text/html",
+        key="board_snapshot_html",
+        help="This deployment has no PDF library. Open it and print to PDF.",
     )
 
 
@@ -9770,7 +9829,12 @@ def main() -> None:
     # Gathered fresh on every run, because every figure the active page draws
     # is. Only one page runs per rerun, so this resets just its own report.
     _reset_reports()
-    page.run()
+    # The page draws exactly as it did before; the recorder only listens, so
+    # that the reader who asks for the board as a file gets the board they are
+    # looking at rather than a second rendering of it.
+    with board.recording(_page_name(page)) as recorded:
+        page.run()
+    _deliver_board_snapshot(recorded)
 
 
 if __name__ == "__main__":
