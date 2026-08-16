@@ -194,3 +194,35 @@ weekly goal; a gamed attendance is still a person at standup). The output and
 integrity layers (size-weighted delivery, cycle time, Clockify-vs-delivery,
 standup truth-check) are the ones that stay hard to fake, and they carry the
 renewal decisions. Presence signals inform; output signals decide.
+
+## 7. Sprint planning no-shows and the PM problem (Angel, 16 Aug, late)
+
+Context: people skip sprint planning without notice; Mihai is not authoritative
+and is distracted, so process enforcement through him does not happen.
+
+Three responses, none of which require Mihai to become someone he is not:
+
+1. **Sprint planning counts as a tracked meeting** in the attendance work
+   (speaker-derived, no-notice absences flagged) — same as standup. The 12 Aug
+   standup transcript already records planning being missed "due to scheduling
+   conflicts", so the evidence trail exists today.
+2. **Silence = consent.** The dashboard's existing Sprint Planner publishes the
+   sprint as a visible, per-person plan. Policy to announce with the rest:
+   miss planning without notice and the published plan stands as your
+   commitment — carry-over against it is measured (already a scorecard
+   component). Attendance stops being the only enforcement; absence costs
+   influence over your own week, which is a natural consequence rather than a
+   punishment Mihai has to deliver.
+3. **The PM rubric is also Angel's read on Mihai.** Triage latency, orphaned
+   tickets, empty epics, team estimate coverage, sprint dates set, carry-over
+   rate — every one of these is currently visibly failing (97 no-priority
+   tickets, sprint with no dates, 5 stuck in triage, 45 epics needing
+   attention). The same scorecard that makes engineers legible makes the PM
+   function legible. Whether the answer is coaching, narrowing his scope, or a
+   different PM, the decision gets to ride on ninety days of the same evidence
+   as everyone else's.
+
+The general principle, stated once: **authority the PM doesn't have is replaced
+by visibility, not by asking him to be tougher.** The system publishes
+commitments, records absences, and measures follow-through; Angel applies
+consequences at renewal time. Nobody has to chase anybody.
