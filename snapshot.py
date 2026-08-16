@@ -263,14 +263,25 @@ def _table_block(
 
 def _frame_of(data) -> pd.DataFrame | None:
     """The rows behind whatever was handed to ``dataframe``, or None."""
-    behind = getattr(data, "data", None)
-    if hasattr(data, "to_html") and isinstance(behind, (pd.DataFrame, pd.Series)):
-        data = behind  # a Styler: the colours are its own, the rows are these
+    if _styler(data) is not None:
+        data = data.data  # the colours are the styler's own, the rows are these
     if isinstance(data, pd.Series):
         data = data.to_frame()
     if not isinstance(data, pd.DataFrame):
         return None
     return None if data.empty else data
+
+
+def _styler(data):
+    """The styled table this is, if it is one, and None if it is a plain frame.
+
+    A styler is told apart by what only a styler has: a frame answers to `.data`
+    too, when a column of it happens to be called that, and reading it as the
+    rows behind a styler would print that one column as the whole table.
+    """
+    if not (hasattr(data, "to_html") and hasattr(data, "_compute")):
+        return None
+    return data if isinstance(getattr(data, "data", None), (pd.DataFrame, pd.Series)) else None
 
 
 def _table_html(block: Table) -> str:
@@ -279,7 +290,7 @@ def _table_html(block: Table) -> str:
     if frame is None:
         return ""
     rows = len(frame)
-    styler = block.data if hasattr(block.data, "to_html") and hasattr(block.data, "data") else None
+    styler = _styler(block.data)
     hidden, shown, named = _column_plan(block, frame)
     if not shown:
         return ""

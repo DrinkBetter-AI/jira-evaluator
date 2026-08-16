@@ -134,6 +134,13 @@ def test_only_the_columns_the_screen_lists_are_printed_and_in_that_order():
     assert page.index(">key<") < page.index(">summary<")
 
 
+def test_a_column_called_data_is_not_mistaken_for_a_styled_table():
+    frame = pd.DataFrame({"data": ["BigQuery"], "cost": ["$40"]})
+    page = board(("dataframe", (frame,), {"hide_index": True})).html(now=WHEN)
+
+    assert "BigQuery" in page and "$40" in page
+
+
 def test_a_ticket_titled_as_a_link_to_a_script_is_not_a_link():
     page = board(
         ("markdown", ("[click](javascript:alert(1)) and [Jira](https://j/MB-1)",), {})
