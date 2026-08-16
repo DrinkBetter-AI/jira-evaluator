@@ -160,3 +160,37 @@ the work happens — not entered manually after the fact.** Two consequences:
 as recently as 13 Aug (per Fireflies). Confirm Jira/GitHub/Slack/Zoom access is
 actually revoked — the ghost-roster problem is an access problem too, not just
 a metrics one.
+
+---
+
+## 6. Decisions from Angel (16 Aug, evening) — these are final, not brainstorm
+
+1. **Proactivity panel** (People page, visible). Three signals, all evidence-first:
+   problems reported outside one's own lane (reporter data, validity-weighted so
+   junk tickets don't count), PR reviews given **unprompted** (review present,
+   no review_request preceding it — the WP4 data distinguishes these), and
+   blockers raised early (transition into Blocked/Discussion Needed, or a
+   flagged Slack ask, *before* the due date rather than after). Self-assignment
+   was considered and deliberately excluded by Angel.
+2. **Consequences are real: renewal and hours decisions.** Therefore the system
+   must be announced to the team before it takes effect — measured-in-secret
+   then acted-on reads as ambush and poisons the remaining team. The announce-
+   ment is also the intervention: behavior changes the day measurement is known.
+3. **Full leaderboard, visible to everyone.** Within-role ranking, all names.
+   Combined with #2 this is a strong regime; expect it to move the middle and
+   possibly shed the bottom — plan hiring buffer accordingly. The integrity
+   page stays Angel-only regardless.
+4. **Standup attendance joins the visible metrics.** Attendance is derived from
+   transcript speakers (never the invite list). Two numbers per person:
+   attendance rate, and **no-notice absences** — absent from the transcript
+   with no message that day in the standup/team channel (Slack join is cheap).
+   Meetings are mandatory and scheduled; showing up is a fact, not surveillance.
+   Missing-with-notice is normal life and is not flagged.
+
+**Goodhart caution, stated for the record:** snippets, attendance and
+proactivity counts are presence signals and will be gamed the moment they carry
+weight — that is fine and even useful (a gamed snippet is still a written
+weekly goal; a gamed attendance is still a person at standup). The output and
+integrity layers (size-weighted delivery, cycle time, Clockify-vs-delivery,
+standup truth-check) are the ones that stay hard to fake, and they carry the
+renewal decisions. Presence signals inform; output signals decide.
