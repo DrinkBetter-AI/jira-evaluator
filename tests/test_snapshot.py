@@ -134,6 +134,54 @@ def test_only_the_columns_the_screen_lists_are_printed_and_in_that_order():
     assert page.index(">key<") < page.index(">summary<")
 
 
+def test_a_key_column_prints_the_key_the_screen_shows_and_not_its_address():
+    import streamlit as st
+
+    frame = pd.DataFrame({"key_url": ["https://j.example/browse/MB-1"], "idle": [3.14159]})
+    page = board(
+        (
+            "dataframe",
+            (frame,),
+            {
+                "hide_index": True,
+                "column_config": {
+                    "key_url": st.column_config.LinkColumn(
+                        "Key", display_text=r".*/browse/([^/?#]+)$"
+                    ),
+                    "idle": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
+                },
+            },
+        )
+    ).html(now=WHEN)
+
+    assert ">MB-1<" in page and "browse/MB-1" not in page
+    assert ">3.1<" in page and "3.14159" not in page
+
+
+def test_a_status_kept_as_a_category_is_read_for_markup_like_any_other_text():
+    frame = pd.DataFrame({"status": pd.Categorical(["<script>bad</script>"])})
+    page = board(("dataframe", (frame.style,), {"hide_index": True})).html(now=WHEN)
+
+    assert "<script>" not in page
+    assert "&lt;script&gt;" in page
+
+
+def test_the_plan_inside_an_editable_table_is_on_the_printed_board():
+    frame = pd.DataFrame({"key": ["MB-1"], "goal": ["Checkout"]})
+    page = board(("data_editor", (frame,), {"hide_index": True})).html(now=WHEN)
+
+    assert "Checkout" in page
+
+
+def test_a_board_drawn_from_other_figures_is_a_different_board():
+    one = board(("metric", ("Open tickets", 13), {}))
+    same = board(("metric", ("Open tickets", 13), {}))
+    other = board(("metric", ("Open tickets", 41), {}))
+
+    assert one.fingerprint() == same.fingerprint()
+    assert one.fingerprint() != other.fingerprint()
+
+
 def test_a_column_called_data_is_not_mistaken_for_a_styled_table():
     frame = pd.DataFrame({"data": ["BigQuery"], "cost": ["$40"]})
     page = board(("dataframe", (frame,), {"hide_index": True})).html(now=WHEN)
@@ -241,8 +289,21 @@ def test_a_deployment_with_no_pdf_library_is_offered_the_page_itself(monkeypatch
     assert snapshot.to_pdf("<html><body>x</body></html>") is None
 
 
+def _weasyprint_or_skip() -> None:
+    """Skip where WeasyPrint cannot be imported, however it fails to import.
+
+    Installed without the typesetting libraries it binds to, importing it raises
+    OSError rather than ImportError, which is a machine without Pango on it and
+    not a test that has found something.
+    """
+    try:
+        import weasyprint  # noqa: F401
+    except Exception as missing:  # noqa: BLE001 - any import trouble is a skip
+        pytest.skip(f"WeasyPrint is not usable here: {missing}")
+
+
 def test_the_board_is_a_pdf_a_reader_can_open():
-    pytest.importorskip("weasyprint")
+    _weasyprint_or_skip()
     frame = pd.DataFrame({"key": ["MB-1"], "idle_days": [3]})
     printed = board(
         ("title", ("Engineering board",), {}),

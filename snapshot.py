@@ -27,6 +27,7 @@ import base64
 import contextlib
 import datetime as _dt
 import functools
+import hashlib
 import html
 import logging
 import re
@@ -72,6 +73,9 @@ DRAWING_CALLS = (
     "success",
     "divider",
     "code",
+    # An editable table is a widget, but the sprint plan inside one is the
+    # section: printed as the table it shows, not as the editing it allows.
+    "data_editor",
     # Not drawings but structure: what a section is called when it is folded
     # away behind a label, and what the tabs beside it offer.
     "expander",
@@ -183,6 +187,28 @@ class Snapshot:
         """The page as a PDF, or None where no PDF library is installed."""
         return to_pdf(self.html(now=now))
 
+    def fingerprint(self) -> str:
+        """A short name for what the page is showing, as this drawing of it.
+
+        A board built from one set of filters must not be handed over beside a
+        page drawn from another, so the file made earlier is kept only while the
+        page it was made from is still the page on screen. Tables are named by
+        their shape and columns rather than their contents: reading a hundred
+        thousand cells to name a file nobody asked for is a cost every reader
+        would pay on every rerun.
+        """
+        named = []
+        for block in self.blocks:
+            if isinstance(block, (Table, SimpleChart)):
+                frame = _frame_of(block.data)
+                shape = None if frame is None else (frame.shape, tuple(str(c) for c in frame.columns))
+                named.append(f"{type(block).__name__}{shape}")
+            elif isinstance(block, Chart):
+                named.append("chart")
+            else:
+                named.append(repr(block))
+        return hashlib.sha256("|".join(named).encode("utf-8")).hexdigest()[:16]
+
     def filename(self, suffix: str, *, now: _dt.datetime | None = None) -> str:
         stamp = (now or _dt.datetime.now(_dt.timezone.utc)).strftime("%Y-%m-%d")
         slug = re.sub(r"[^a-z0-9]+", "-", self.page.lower()).strip("-")
@@ -203,7 +229,7 @@ def _block(call: str, args: tuple, kwargs: dict):
         value = _arg(args, kwargs, 1, "value")
         delta = kwargs.get("delta") or (args[2] if len(args) > 2 else "")
         return Metric(label, "" if value is None else str(value), "" if delta is None else str(delta))
-    if call in ("dataframe", "table"):
+    if call in ("dataframe", "table", "data_editor"):
         return _table_block(
             _arg(args, kwargs, 0, "data"),
             bool(kwargs.get("hide_index")),
@@ -291,7 +317,7 @@ def _table_html(block: Table) -> str:
         return ""
     rows = len(frame)
     styler = _styler(block.data)
-    hidden, shown, named = _column_plan(block, frame)
+    hidden, shown, named, written = _column_plan(block, frame)
     if not shown:
         return ""
     # A styler can be told to leave a column out but not to move one, so a table
@@ -310,18 +336,40 @@ def _table_html(block: Table) -> str:
                 styler = styler.hide(axis="index")
             if hidden:
                 styler = styler.hide(subset=hidden, axis="columns")
+            # Escaped as a matter of course, so a ticket title with a tag in it is
+            # the title and not markup, and then written the way the screen writes
+            # it: a key out of an address, a number to the places it shows.
+            styler = styler.format(escape="html").format_index(escape="html", axis="columns")
+            if not block.hide_index:
+                styler = styler.format_index(escape="html", axis="index")
+            if written:
+                styler = styler.format(
+                    {
+                        name: (lambda value, write=written[name]: html.escape(write(value)))
+                        for name in written
+                        if name in shown
+                    }
+                )
             if any(named.get(column, column) != column for column in shown):
                 styler = styler.relabel_index(
                     [named.get(column, column) for column in shown], axis="columns"
                 )
             return styler.to_html()
-    printed = frame[shown].rename(columns=named)
+    printed = frame[shown].rename(columns=named).copy()
+    for name in written:
+        if name in shown:
+            printed[named.get(name, name)] = frame[name].map(written[name])
     note = f'<p class="caption">First {MAX_ROWS} of {rows} rows.</p>' if rows > MAX_ROWS else ""
     return printed.head(MAX_ROWS).to_html(index=not block.hide_index, border=0, escape=True) + note
 
 
-def _column_plan(block: Table, frame: pd.DataFrame) -> tuple[list, list, dict]:
-    """Which columns the screen hides, which it shows in which order, and their names.
+def _column_plan(block: Table, frame: pd.DataFrame) -> tuple[list, list, dict, dict]:
+    """Which columns the screen hides, which it shows in which order, and how.
+
+    The last of the four is how the screen writes a column's values where it does
+    not write them as they are: MB-123 out of the address it links to, one decimal
+    place out of a float. Printed raw, the key column is a page-wide URL in every
+    row and the board's own proportions are the first thing lost.
 
     ``st.dataframe`` is given a `column_config` naming its columns for the
     reader - "Idle (days)" rather than `idle_days` - and dropping the ones it
@@ -341,7 +389,56 @@ def _column_plan(block: Table, frame: pd.DataFrame) -> tuple[list, list, dict]:
         for name, spec in block.columns.items()
         if isinstance(spec, dict) and spec.get("label") and name in frame.columns
     }
-    return hidden, shown, named
+    written = {}
+    for name, spec in block.columns.items():
+        if name not in frame.columns:
+            continue
+        writer = _presented(spec)
+        if writer is not None:
+            written[name] = writer
+    return hidden, shown, named, written
+
+
+def _presented(spec):
+    """How the screen writes one column's values, or None where it writes them raw.
+
+    A link column is given the text to show instead of the address - a pattern
+    whose group is the part to keep, or a phrase for every row - and a number
+    column the places to show it to.
+    """
+    config = spec.get("type_config") if isinstance(spec, dict) else None
+    if not isinstance(config, dict):
+        return None
+    if config.get("type") == "link" and isinstance(config.get("display_text"), str):
+        return _link_text(config["display_text"])
+    shape = config.get("format")
+    if config.get("type") == "number" and isinstance(shape, str) and "%" in shape:
+
+        def figure(value, shape=shape):
+            try:
+                return shape % value
+            except (TypeError, ValueError):
+                return _plain(value)
+
+        return figure
+    return None
+
+
+def _link_text(pattern: str):
+    """The visible half of a link column: a captured part, or a phrase."""
+    try:
+        matcher = re.compile(pattern)
+    except re.error:
+        return None
+    if not matcher.groups:
+        return lambda value, phrase=pattern: phrase
+
+    def shown(value, matcher=matcher):
+        text = _plain(value)
+        found = matcher.search(text)
+        return found.group(1) if found else text
+
+    return shown
 
 
 def _has_markup(frame: pd.DataFrame) -> bool:
@@ -354,7 +451,9 @@ def _has_markup(frame: pd.DataFrame) -> bool:
     labels = pd.Series(list(frame.columns) + list(frame.index)).astype(str)
     if labels.str.contains("<", regex=False).any():
         return True
-    text = frame.select_dtypes(include=["object", "string"])
+    # Everything a number is not: a status kept as a category and a summary kept
+    # as text are both text on the page, whatever pandas is holding them as.
+    text = frame.select_dtypes(exclude=["number", "bool", "datetime", "timedelta"])
     if text.empty:
         return False
     return bool(text.astype(str).apply(lambda column: column.str.contains("<", regex=False)).any().any())

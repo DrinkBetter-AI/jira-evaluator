@@ -979,6 +979,7 @@ def _build_board_file(recorded: board.Snapshot, tab: str) -> dict:
     if printed:
         return {
             "tab": tab,
+            "board": recorded.fingerprint(),
             "label": "Download PDF",
             "data": printed,
             "name": recorded.filename("pdf"),
@@ -989,6 +990,7 @@ def _build_board_file(recorded: board.Snapshot, tab: str) -> dict:
     # browser to print - rather than nothing at all.
     return {
         "tab": tab,
+        "board": recorded.fingerprint(),
         "label": "Download board",
         "data": page.encode("utf-8"),
         "name": recorded.filename("html"),
@@ -1004,6 +1006,10 @@ def _deliver_board_snapshot(recorded: board.Snapshot) -> None:
     rerun of the page, so an offer withdrawn as soon as it is accepted is an
     offer that can be pulled out from under the reader mid-download - and asking
     again would mean drawing every chart on the board a second time.
+
+    It stays on offer only while it is still this page, though: change a filter
+    or the scope and the board beside the button is not the board inside it, so
+    the offer is withdrawn rather than handing over last time's figures.
     """
     asked = st.session_state.pop(BOARD_ASKED_KEY, None)
     registered = st.session_state.pop(BOARD_SLOT_KEY, None)
@@ -1013,7 +1019,10 @@ def _deliver_board_snapshot(recorded: board.Snapshot) -> None:
     if asked and not recorded.empty:
         st.session_state[BOARD_FILE_KEY] = _build_board_file(recorded, asked)
     held = st.session_state.get(BOARD_FILE_KEY)
-    if not held or held["tab"] != tab:
+    if held and (held["tab"] != tab or held.get("board") != recorded.fingerprint()):
+        st.session_state.pop(BOARD_FILE_KEY, None)
+        held = None
+    if not held:
         return
     slot.download_button(
         held["label"],
