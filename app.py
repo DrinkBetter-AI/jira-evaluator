@@ -971,14 +971,24 @@ def _page_name(page) -> str:
     return str(getattr(page, "title", "") or "Dashboard")
 
 
-def _build_board_file(recorded: board.Snapshot, tab: str) -> dict:
-    """The board as a file to hand over: a PDF, or the page where none can be made."""
+def _build_board_file(recorded: board.Snapshot, tab: str) -> dict | None:
+    """The board as a file to hand over: a PDF, or the page where none can be made.
+
+    Nothing about wanting a file is worth the page the reader is looking at, so a
+    board that cannot be laid out says so where the button is and leaves the
+    dashboard standing.
+    """
     drawn = _dt.datetime.now().strftime("%H:%M")
-    with st.spinner("Drawing the board into a PDF..."):
-        # Drawn once: every chart on it is an image somebody has to render, and
-        # the fallback below is the same page, not another one.
-        page = recorded.html()
-        printed = board.to_pdf(page)
+    try:
+        with st.spinner("Drawing the board into a PDF..."):
+            # Drawn once: every chart on it is an image somebody has to render,
+            # and the fallback below is the same page, not another one.
+            page = recorded.html()
+            printed = board.to_pdf(page)
+    except Exception:  # noqa: BLE001 - a board nobody can print is not a broken page
+        logger.warning("The board could not be drawn into a file", exc_info=True)
+        st.warning("This board could not be drawn into a file.")
+        return None
     if printed:
         return {
             "tab": tab,
@@ -1022,7 +1032,9 @@ def _deliver_board_snapshot(recorded: board.Snapshot) -> None:
         return
     slot, tab = registered
     if asked and not recorded.empty:
-        st.session_state[BOARD_FILE_KEY] = _build_board_file(recorded, asked)
+        made = _build_board_file(recorded, asked)
+        if made is not None:
+            st.session_state[BOARD_FILE_KEY] = made
     held = st.session_state.get(BOARD_FILE_KEY)
     if held and (held["tab"] != tab or held.get("board") != recorded.fingerprint()):
         st.session_state.pop(BOARD_FILE_KEY, None)

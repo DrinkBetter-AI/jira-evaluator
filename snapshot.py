@@ -240,9 +240,16 @@ def _chart_name(figure) -> str:
 
 
 def _digest(points) -> str:
-    """A short name for a series of points, whatever they are held as."""
+    """A short name for a series of points, whatever they are held as.
+
+    Read as bytes only where the bytes are the numbers themselves. An array of
+    week labels holds addresses rather than words, and the same labels land at
+    different addresses each time the page is drawn - which would make every
+    board a new board and no held file ever survive its own rerun.
+    """
     raw = getattr(points, "tobytes", None)
-    named = raw() if callable(raw) else str(list(points)).encode("utf-8")
+    numeric = getattr(getattr(points, "dtype", None), "kind", "O") not in "OUSV"
+    named = raw() if numeric and callable(raw) else str(list(points)).encode("utf-8")
     return hashlib.sha256(named).hexdigest()[:12]
 
 
