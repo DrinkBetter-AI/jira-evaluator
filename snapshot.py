@@ -205,7 +205,7 @@ class Snapshot:
                 shape = None if frame is None else (frame.shape, tuple(str(c) for c in frame.columns))
                 named.append(f"{type(block).__name__}{shape}")
             elif isinstance(block, Chart):
-                named.append("chart")
+                named.append(_chart_name(block.figure))
             else:
                 named.append(repr(block))
         return hashlib.sha256("|".join(named).encode("utf-8")).hexdigest()[:16]
@@ -214,6 +214,28 @@ class Snapshot:
         stamp = (now or _dt.datetime.now(_dt.timezone.utc)).strftime("%Y-%m-%d")
         slug = re.sub(r"[^a-z0-9]+", "-", self.page.lower()).strip("-")
         return f"{slug}-board-{stamp}.{suffix}"
+
+
+def _chart_name(figure) -> str:
+    """What a chart is plotting, in as few words as name a board by.
+
+    A week of hours redrawn with different hours is a different board, and a
+    chart is often the only thing on a section that changed - so a chart named
+    only "chart" would leave last view's file on offer. The points are read, not
+    the whole figure: a figure serialised in full carries its layout, its
+    template and its palette, and hashing that on every rerun would cost every
+    reader the export nobody asked for.
+    """
+    marks = []
+    for trace in getattr(figure, "data", ()) or ():
+        for axis in ("x", "y", "z", "values", "labels"):
+            points = getattr(trace, axis, None)
+            if points is None:
+                continue
+            with contextlib.suppress(Exception):
+                marks.append(f"{axis}{len(points)}:{points[0]}:{points[-1]}")
+        marks.append(str(getattr(trace, "name", "")))
+    return "chart(" + "|".join(marks) + ")"
 
 
 def _block(call: str, args: tuple, kwargs: dict):

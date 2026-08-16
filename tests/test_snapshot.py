@@ -444,3 +444,14 @@ def test_printing_a_styled_table_leaves_the_page_s_own_table_alone():
     ).html(now=WHEN)
 
     assert styled.to_html() == before
+
+
+def test_a_board_whose_only_change_is_a_chart_is_a_different_board():
+    import plotly.express as px
+
+    def drawn(hours):
+        frame = pd.DataFrame({"week": ["-1w", "now"], "hours": hours})
+        return board(("plotly_chart", (px.bar(frame, x="week", y="hours"),), {}))
+
+    assert drawn([4, 12]).fingerprint() == drawn([4, 12]).fingerprint()
+    assert drawn([4, 12]).fingerprint() != drawn([4, 40]).fingerprint()
