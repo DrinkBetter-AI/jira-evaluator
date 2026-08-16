@@ -31,6 +31,7 @@ Everyone is hourly **except** Angel (CEO) and Arsalan (CTO).
 | Evmorfia Kostaki, Matthew, Sylvia | wine experts team | |
 | zoe | advisor | |
 | Jim | ML advisor | not in Jira assignee data |
+| Praveen Rai | biz dev | super expensive/hr · **the only person not on Clockify** |
 | Angel Vossough | CEO | GitHub **avosmod8** (confirmed) — #2 producer, 132 merged/30d · exempt |
 | Arsalan | CTO | GitHub **arsalanvm** (confirmed) · exempt from hourly-incentive metrics |
 
@@ -42,7 +43,9 @@ Sai Shankar (test eng), Sarju (frontend), Yantao He (CRM/Medusa), Dan O'Sullivan
 (frontend), Saji (UX), Mark (frontend), Courtney McNeil (designer), Lotte Karolina
 (wine), Jennifer (HR), Eva van Wielink (wine), Stanislav (ML), Saeid Parsa (ML),
 Armine Aproyan (PM), **Haichen Song (frontend — corrected: earlier recorded as
-active backend, Angel corrected to former)**.
+active backend, Angel corrected to former)**, Dat / Đào Nguyễn Anh (QA — fired;
+still appearing in standup invites and giving updates as recently as 13 Aug per
+Fireflies, so confirm his access and invites are actually revoked).
 
 **This is the headline:** 21 former people vs 12 active engineers in the same
 assignee data. The "23 assignees" scope, the unassigned counts, the stale queues
@@ -92,3 +95,12 @@ so AI-review findings can be a *scored* component for all code roles, not
 evidence-only. Integrity-page access: **decided — Angel only.** WP6 implements a second
 admin credential (the shared dashboard password stays for everyone else); the
 integrity computations must not run at all for non-admin sessions.
+
+## Time tracking (revealed 16 Aug)
+
+The team bills hours through **Clockify** — everyone except Praveen Rai. This is
+the invoiced-hours source the KPI spec flagged as the only true cross-check:
+Clockify hours per person per week, joined against delivered work (size-weighted
+PRs, resolved tickets by changelog author) and cycle time, closes the loop that
+Jira estimates and Jira worklogs cannot. Needs a Clockify API key (workspace
+reports endpoint, read-only) — see DEVIN_PLAN WP11.

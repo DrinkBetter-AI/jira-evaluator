@@ -121,3 +121,26 @@ Measuring reply latency org-wide is surveillance, and it's noisy across Vietnam/
 - **Praveen Rai** — posted snippets in June; not in Jira assignee data.
 - **Dat (Đào Nguyễn Anh, dat@vinovoss.com)** — gives QA/staging updates at standup; not in the roster Angel sorted.
 - Standup summary mentions "Tina" — probably Fireflies mishearing "Dina"; treat name-matching in WP10 with an alias table.
+
+### WP11 — Clockify: billed hours vs delivered work (the true cross-check)
+The team bills through Clockify (everyone but Praveen). Read-only API key +
+workspace id → weekly detailed report per person. Join three numbers per person
+per week on the Integrity page: **hours billed** (Clockify) · **delivered**
+(size-weighted merged PRs + changelog-credited resolutions) · **hours logged in
+Jira** (where present). The outlier metric `hours_per_delivered_line` in
+`estimate_accuracy.py` switches its hours source from Jira worklogs to Clockify,
+which makes it real. Flags: billed-hours weeks with near-zero board and PR
+movement; billed hours diverging from Jira-logged hours on the same tickets.
+*Accept:* per-person weekly triplet with links; MAD-based outliers only (no fixed
+thresholds); Angel-only page; a missing Clockify mapping renders "unmapped", never zero.
+*Blind spot stated on-page:* Clockify entries are still self-reported — this
+catches inconsistency between what was billed and what the systems recorded,
+not ground truth.
+
+**Prerequisite from Angel:** Clockify API key (read-only) + workspace name, and
+whether Clockify user emails match the vinovoss.com emails.
+
+**Dat's offboarding:** fired, yet present in standup invites and giving updates
+as recently as 13 Aug (per Fireflies). Confirm Jira/GitHub/Slack/Zoom access is
+actually revoked — the ghost-roster problem is an access problem too, not just
+a metrics one.
