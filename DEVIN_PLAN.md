@@ -140,6 +140,22 @@ not ground truth.
 **Prerequisite from Angel:** Clockify API key (read-only) + workspace name, and
 whether Clockify user emails match the vinovoss.com emails.
 
+**Policy (Angel, 16 Aug): hours are tracked with the live timer at the moment
+the work happens — not entered manually after the fact.** Two consequences:
+1. *Enforcement beats detection where possible:* Clockify has a workspace
+   setting that disallows manually-added entries ("force timer"). Turning it on
+   makes the policy self-enforcing at the source and is worth doing regardless
+   of the dashboard. (Check the plan tier supports it.)
+2. *Detection where enforcement is off:* the dashboard flags entry patterns that
+   look reconstructed rather than lived — perfectly round daily blocks (exactly
+   8.00h), one single block per day instead of timer-grained entries, and
+   overlapping entries. If the API exposes when an entry was *created* (vs when
+   the work supposedly happened), entries logged days later get flagged too —
+   verify this field exists before promising it; do not fake it from proxies.
+   Same MAD-outlier discipline as the rest: patterns ranked by magnitude with
+   evidence, no fixed thresholds, innocent reading stated (some legitimate work
+   — meetings, offline reviews — gets back-filled honestly).
+
 **Dat's offboarding:** fired, yet present in standup invites and giving updates
 as recently as 13 Aug (per Fireflies). Confirm Jira/GitHub/Slack/Zoom access is
 actually revoked — the ghost-roster problem is an access problem too, not just
