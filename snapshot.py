@@ -221,10 +221,11 @@ def _chart_name(figure) -> str:
 
     A week of hours redrawn with different hours is a different board, and a
     chart is often the only thing on a section that changed - so a chart named
-    only "chart" would leave last view's file on offer. The points are read, not
-    the whole figure: a figure serialised in full carries its layout, its
-    template and its palette, and hashing that on every rerun would cost every
-    reader the export nobody asked for.
+    only "chart" would leave last view's file on offer. Every point is read, not
+    the ends of the series: a fortnight whose middle days move and whose first
+    and last stay put is the commonest change of all. The points only, though,
+    and not the figure whole: serialised in full it carries its layout, template
+    and palette with it, which do not change and are the bulk of it.
     """
     marks = []
     for trace in getattr(figure, "data", ()) or ():
@@ -233,9 +234,16 @@ def _chart_name(figure) -> str:
             if points is None:
                 continue
             with contextlib.suppress(Exception):
-                marks.append(f"{axis}{len(points)}:{points[0]}:{points[-1]}")
+                marks.append(f"{axis}{len(points)}:{_digest(points)}")
         marks.append(str(getattr(trace, "name", "")))
     return "chart(" + "|".join(marks) + ")"
+
+
+def _digest(points) -> str:
+    """A short name for a series of points, whatever they are held as."""
+    raw = getattr(points, "tobytes", None)
+    named = raw() if callable(raw) else str(list(points)).encode("utf-8")
+    return hashlib.sha256(named).hexdigest()[:12]
 
 
 def _block(call: str, args: tuple, kwargs: dict):

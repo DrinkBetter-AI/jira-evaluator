@@ -455,3 +455,14 @@ def test_a_board_whose_only_change_is_a_chart_is_a_different_board():
 
     assert drawn([4, 12]).fingerprint() == drawn([4, 12]).fingerprint()
     assert drawn([4, 12]).fingerprint() != drawn([4, 40]).fingerprint()
+
+
+def test_a_chart_whose_middle_moved_is_a_different_board():
+    import plotly.express as px
+
+    def drawn(hours):
+        frame = pd.DataFrame({"day": list("abcde"), "hours": hours})
+        return board(("plotly_chart", (px.line(frame, x="day", y="hours"),), {}))
+
+    # Same first and last point, a different week underneath.
+    assert drawn([1, 2, 3, 4, 5]).fingerprint() != drawn([1, 9, 9, 9, 5]).fingerprint()

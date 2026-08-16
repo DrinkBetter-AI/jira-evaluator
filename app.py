@@ -973,6 +973,7 @@ def _page_name(page) -> str:
 
 def _build_board_file(recorded: board.Snapshot, tab: str) -> dict:
     """The board as a file to hand over: a PDF, or the page where none can be made."""
+    drawn = _dt.datetime.now().strftime("%H:%M")
     with st.spinner("Drawing the board into a PDF..."):
         # Drawn once: every chart on it is an image somebody has to render, and
         # the fallback below is the same page, not another one.
@@ -986,6 +987,7 @@ def _build_board_file(recorded: board.Snapshot, tab: str) -> dict:
             "data": printed,
             "name": recorded.filename("pdf"),
             "mime": "application/pdf",
+            "drawn": drawn,
             "help": "Press Whole board as PDF again for a board drawn now.",
         }
     # No PDF library where this is deployed: the same page, as the page, for a
@@ -997,6 +999,7 @@ def _build_board_file(recorded: board.Snapshot, tab: str) -> dict:
         "data": page.encode("utf-8"),
         "name": recorded.filename("html"),
         "mime": "text/html",
+        "drawn": drawn,
         "help": "This deployment has no PDF library. Open it and print to PDF.",
     }
 
@@ -1026,8 +1029,13 @@ def _deliver_board_snapshot(recorded: board.Snapshot) -> None:
         held = None
     if not held:
         return
+    # Named by the minute it was drawn, because a section that reruns on its own -
+    # a plan re-ticked, a chart's own control - redraws under the button without
+    # the page being drawn again, and nothing here would know. The reader can see
+    # whether the file is older than what they are looking at.
+    stamped = held.get("drawn")
     slot.download_button(
-        held["label"],
+        f"{held['label']} (drawn {stamped})" if stamped else held["label"],
         data=held["data"],
         file_name=held["name"],
         mime=held["mime"],
