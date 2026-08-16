@@ -124,6 +124,31 @@ def test_a_column_is_called_what_the_screen_calls_it_and_hidden_where_it_hides()
     assert "key_url" not in page and "http://j/MB-1" not in page
 
 
+def test_only_the_columns_the_screen_lists_are_printed_and_in_that_order():
+    frame = pd.DataFrame({"key_url": ["http://j/MB-1"], "summary": ["A bug"], "key": ["MB-1"]})
+    page = board(
+        ("dataframe", (frame,), {"hide_index": True, "column_order": ["key", "summary"]})
+    ).html(now=WHEN)
+
+    assert "key_url" not in page and "http://j/MB-1" not in page
+    assert page.index(">key<") < page.index(">summary<")
+
+
+def test_a_ticket_titled_as_a_link_to_a_script_is_not_a_link():
+    page = board(
+        ("markdown", ("[click](javascript:alert(1)) and [Jira](https://j/MB-1)",), {})
+    ).html(now=WHEN)
+
+    assert 'href="javascript' not in page
+    assert "[click](javascript:alert(1))" in page  # the words it is, not a link
+    assert 'href="https://j/MB-1"' in page
+
+
+def test_black_on_a_chart_stays_black_when_it_is_printed():
+    assert snapshot._coloured("#000000") == "#000000"
+    assert snapshot._coloured("#000001") == snapshot.STREAMLIT_COLOURS[0]
+
+
 def test_a_table_longer_than_the_page_says_how_much_of_it_is_shown():
     frame = pd.DataFrame({"key": [f"MB-{n}" for n in range(snapshot.MAX_ROWS + 40)]})
     page = board(("dataframe", (frame,), {})).html(now=WHEN)

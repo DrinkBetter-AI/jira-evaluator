@@ -130,6 +130,8 @@ class Table:
     hide_index: bool = False
     # What the screen calls each column, and which it does not show at all.
     columns: dict = field(default_factory=dict)
+    # The columns the screen shows, in the order it shows them, where it says so.
+    order: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -206,6 +208,7 @@ def _block(call: str, args: tuple, kwargs: dict):
             _arg(args, kwargs, 0, "data"),
             bool(kwargs.get("hide_index")),
             kwargs.get("column_config") or {},
+            kwargs.get("column_order") or (),
         )
     if call == "plotly_chart":
         figure = _arg(args, kwargs, 0, "figure_or_data")
@@ -246,11 +249,16 @@ def _plain(value) -> str:
     return "" if value is None else str(value).strip()
 
 
-def _table_block(data, hide_index: bool = False, columns: dict | None = None) -> Table | None:
+def _table_block(
+    data,
+    hide_index: bool = False,
+    columns: dict | None = None,
+    order: object = (),
+) -> Table | None:
     """A table the page drew, if what it drew was a table at all."""
     if _frame_of(data) is None:
         return None
-    return Table(data, hide_index, dict(columns or {}))
+    return Table(data, hide_index, dict(columns or {}), tuple(order or ()))
 
 
 def _frame_of(data) -> pd.DataFrame | None:
@@ -272,12 +280,17 @@ def _table_html(block: Table) -> str:
         return ""
     rows = len(frame)
     styler = block.data if hasattr(block.data, "to_html") and hasattr(block.data, "data") else None
-    hidden, named = _column_plan(block, frame)
+    hidden, shown, named = _column_plan(block, frame)
+    if not shown:
+        return ""
+    # A styler can be told to leave a column out but not to move one, so a table
+    # whose columns the screen reordered is printed plain in the screen's order.
+    reordered = [name for name in frame.columns if name in shown] != shown
     # A styler writes its cells as they are, so a ticket summary that happens to
     # contain a tag would be markup on the page rather than the text the screen
     # shows. That table is printed plain instead: one table's tint is a smaller
     # loss than a board rearranged by somebody's ticket title.
-    if rows <= MAX_ROWS and styler is not None and not _has_markup(frame):
+    if rows <= MAX_ROWS and styler is not None and not reordered and not _has_markup(frame):
         # Hiding and relabelling are the styler's own instructions to itself,
         # given after the screen has already drawn from it, so nothing on screen
         # is redrawn by them.
@@ -286,32 +299,38 @@ def _table_html(block: Table) -> str:
                 styler = styler.hide(axis="index")
             if hidden:
                 styler = styler.hide(subset=hidden, axis="columns")
-            shown = [column for column in frame.columns if column not in hidden]
             if any(named.get(column, column) != column for column in shown):
                 styler = styler.relabel_index(
                     [named.get(column, column) for column in shown], axis="columns"
                 )
             return styler.to_html()
-    printed = frame.drop(columns=hidden, errors="ignore").rename(columns=named)
+    printed = frame[shown].rename(columns=named)
     note = f'<p class="caption">First {MAX_ROWS} of {rows} rows.</p>' if rows > MAX_ROWS else ""
     return printed.head(MAX_ROWS).to_html(index=not block.hide_index, border=0, escape=True) + note
 
 
-def _column_plan(block: Table, frame: pd.DataFrame) -> tuple[list, dict]:
-    """Which columns the screen hides, and what it calls the rest.
+def _column_plan(block: Table, frame: pd.DataFrame) -> tuple[list, list, dict]:
+    """Which columns the screen hides, which it shows in which order, and their names.
 
     ``st.dataframe`` is given a `column_config` naming its columns for the
     reader - "Idle (days)" rather than `idle_days` - and dropping the ones it
     keeps only to work with. A printed board that showed `key_url` beside
-    Summary would not be the board on screen.
+    Summary would not be the board on screen. It is also given a `column_order`,
+    which is the other way of saying the same thing: everything not named in it
+    is a column the page keeps and does not show.
     """
     hidden = [name for name, spec in block.columns.items() if spec is None and name in frame.columns]
+    if block.order:
+        shown = [name for name in block.order if name in frame.columns and name not in hidden]
+        hidden = [name for name in frame.columns if name not in shown]
+    else:
+        shown = [name for name in frame.columns if name not in hidden]
     named = {
         name: str(spec["label"])
         for name, spec in block.columns.items()
         if isinstance(spec, dict) and spec.get("label") and name in frame.columns
     }
-    return hidden, named
+    return hidden, shown, named
 
 
 def _has_markup(frame: pd.DataFrame) -> bool:
@@ -501,7 +520,9 @@ STREAMLIT_COLOURS = (
     "#6d3fc0",
     "#d5dae5",
 )
-_PLACEHOLDER = re.compile(r"^#0{5}([0-9a-fA-F])$")
+# Black itself is a colour a chart is entitled to use, and is not a placeholder:
+# the placeholders start at one.
+_PLACEHOLDER = re.compile(r"^#0{5}([1-9a-fA-F])$")
 
 
 def _coloured(value):
@@ -556,6 +577,10 @@ _BOLD = re.compile(r"\*\*(.+?)\*\*")
 _ITALIC = re.compile(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])")
 _CODE = re.compile(r"`([^`\n]+)`")
 _LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+# Where a link on the board is allowed to lead. Jira, GitHub and an address to
+# write to are the whole of it; a ticket titled as a link to a script is a link
+# to nowhere, because the file is opened in a browser.
+_ADDRESS = re.compile(r"^(https?:|mailto:|[^:]*$)", re.IGNORECASE)
 # A dollar sign is escaped on the way to Streamlit, whose markdown would
 # otherwise read a pair of them as maths. Nothing here reads maths, so the
 # backslash is the page's business and not the reader's.
@@ -573,9 +598,12 @@ def _rich(text: str) -> str:
     pieces: list[str] = []
     written = 0
     for link in _LINK.finditer(text):
+        address = link.group(2).strip()
+        if not _ADDRESS.match(address):
+            continue  # printed as the text it is, below, and not as a link
         pieces.append(html.escape(text[written : link.start()]))
         pieces.append(
-            f'<a href="{html.escape(link.group(2), quote=True)}">{html.escape(link.group(1))}</a>'
+            f'<a href="{html.escape(address, quote=True)}">{html.escape(link.group(1))}</a>'
         )
         written = link.end()
     pieces.append(html.escape(text[written:]))
