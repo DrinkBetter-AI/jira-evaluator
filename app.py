@@ -16,6 +16,7 @@ from urllib.parse import quote, unquote
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 from dotenv import load_dotenv
@@ -69,6 +70,7 @@ from teams import (
     parse_team_projects,
     team_summary,
 )
+import theme
 from theme import inject_styles, kpi_strip
 import report as reporting
 from hygiene import (
@@ -5131,7 +5133,9 @@ def _band_pictures(bands: pd.DataFrame, merchant: str) -> None:
             color=slices["band"].astype(str),
             color_discrete_map=colours,
             hole=0.35,
-            title=f"{merchant}: compared wines, by price against the market",
+            # Kept short: the text is drawn larger than it used to be, and a
+            # title long enough to be clipped is worse than a terse one.
+            title=f"{merchant}: wines by price against the market",
         )
         ring.update_traces(textinfo="percent", hovertemplate="%{label}: %{value} wines")
         ring.update_layout(margin=dict(t=54, b=0, l=0, r=0), legend_title_text="")
@@ -5147,7 +5151,7 @@ def _band_pictures(bands: pd.DataFrame, merchant: str) -> None:
             orientation="h",
             color=rated["band"].astype(str),
             color_discrete_map=colours,
-            title="Bottles sold per 100 shoppers who looked",
+            title="Bottles sold per 100 shoppers",
             text=rated["per_100_clicks"].map(lambda value: f"{value:.0f}"),
         )
         bars.update_layout(
@@ -5158,6 +5162,231 @@ def _band_pictures(bands: pd.DataFrame, merchant: str) -> None:
             yaxis=dict(autorange="reversed"),
         )
         st.plotly_chart(bars, width="stretch")
+
+
+# How many wines the price ladder draws. A merchant reads a page of bottles and
+# argues with it; a hundred rows is a spreadsheet they close.
+_LADDER_WINES = 20
+
+# Chart text, shared with every other figure through the plotly template these
+# come from; named here so a chart that sets its own layout font keeps the size.
+_CHART_FONT = theme.CHART_FONT
+_CHART_TITLE_FONT = theme.CHART_TITLE_FONT
+
+
+def _price_sales_scatter(points: pd.DataFrame, merchant: str, money: str) -> None:
+    """Every clicked wine as a dot: what it costs against the market, what it sold.
+
+    The chart a merchant asked for. The bands beside it already say that keener
+    prices sell more, but a band is four numbers and can be dismissed as our
+    grouping; a dot per bottle is their own catalogue, and the slope through it
+    is the argument in one line.
+    """
+    rho, sampled = merchant_client.price_sales_correlation(points)
+    # The money is written into the hover rather than formatted by plotly, which
+    # would need a currency symbol hard-coded into the template.
+    plotted = points.assign(
+        ours=points["price"].map(lambda value: _money(value, money)),
+        market=points["benchmark"].map(lambda value: _money(value, money)),
+    )
+    figure = px.scatter(
+        plotted,
+        x=plotted["gap"] * 100,
+        y="per_100_clicks",
+        size="clicks",
+        color="band",
+        color_discrete_map={
+            band: merchant_letter.BAND_COLOURS[index]
+            for index, band in enumerate(merchant_client.BAND_NAMES)
+        },
+        custom_data=["title", "ours", "market", "clicks", "bottles"],
+        title=f"{merchant}: price against the market, and sales",
+        labels={"x": "", "per_100_clicks": ""},
+    )
+    figure.update_traces(
+        hovertemplate=(
+            "%{customdata[0]}<br>Our price %{customdata[1]} · "
+            "market %{customdata[2]}<br>%{x:.0f}% against the market<br>"
+            "%{customdata[3]} clicks, %{customdata[4]} bottles"
+            "<extra></extra>"
+        )
+    )
+    # The market itself, so a dot's side of the line is readable without doing
+    # arithmetic on the axis.
+    figure.add_vline(x=0, line_dash="dash", line_color="#6b7280")
+    # Only where the coefficient is quotable. A fitted line through nine dots
+    # looks as confident as one through ninety, and drawn beside a figure that
+    # says "not enough wines" it is the chart contradicting its own caption.
+    fit = (
+        _least_squares(points["gap"] * 100, points["per_100_clicks"])
+        if rho is not None
+        else None
+    )
+    if fit is not None:
+        figure.add_trace(
+            go.Scatter(
+                x=fit[0],
+                y=fit[1],
+                mode="lines",
+                name="Trend",
+                line=dict(color="#111827", width=3),
+                hoverinfo="skip",
+            )
+        )
+    figure.update_layout(
+        margin=dict(t=56, b=48, l=8, r=8),
+        xaxis_title="Percent against the market price",
+        yaxis_title=f"Bottles sold per 100 shoppers ({merchant_client.SALES_DAYS}d)",
+        legend_title_text="",
+        font=dict(size=_CHART_FONT),
+        title_font=dict(size=_CHART_TITLE_FONT),
+    )
+    st.plotly_chart(figure, width="stretch")
+
+    left, right = st.columns(2)
+    left.metric(
+        "Wines plotted",
+        f"{len(points):,}",
+        help=(
+            "Wines with a Google benchmark and at least "
+            f"{merchant_client.SCATTER_MIN_CLICKS} clicks, so each dot is a rate "
+            "rather than a coincidence."
+        ),
+    )
+    right.metric(
+        "Correlation, price against sales",
+        "not enough wines" if rho is None else f"{rho:+.2f}",
+        help=(
+            "Spearman correlation of the gap to the market against bottles per "
+            "100 shoppers. Negative means the more expensive a wine is, the less "
+            "of it sells."
+        ),
+    )
+    if rho is not None and rho < 0:
+        st.markdown(
+            f"**Across {sampled:,} of {merchant}'s own wines, the more a bottle "
+            f"is priced above the market, the fewer of it sells ({rho:+.2f}).** "
+            "Same shop, same shoppers, their own order book."
+        )
+    st.caption(
+        f"One dot per wine, sized by how many shoppers chose it. Prices are "
+        f"against Google's benchmark for the same bottle; sales are the shop's "
+        f"own paid orders over {merchant_client.SALES_DAYS} days against "
+        f"{merchant_client.DEMAND_DAYS} days of clicks. It is a correlation and "
+        "not an experiment: a keenly priced wine may also be a wine people want, "
+        "and the way to separate the two is to try the market price on a few of "
+        "these bottles and read this chart again."
+    )
+    st.download_button(
+        "Download the wines behind this chart",
+        data=points.to_csv(index=False).encode("utf-8"),
+        file_name=f"price-vs-sales-{merchant_client.as_of()}.csv",
+        mime="text/csv",
+        key="price_scatter_download",
+        help="The same dots as a spreadsheet, to send with the chart.",
+    )
+
+
+def _least_squares(x: pd.Series, y: pd.Series) -> tuple[list[float], list[float]] | None:
+    """The straight line through the dots, as two endpoints to draw.
+
+    Fitted here rather than by ``px.scatter(trendline="ols")``, which needs
+    statsmodels; this is two points from numpy and one fewer dependency in the
+    deployment.
+    """
+    left = pd.to_numeric(x, errors="coerce")
+    right = pd.to_numeric(y, errors="coerce")
+    both = pd.concat([left, right], axis=1).dropna()
+    if len(both) < 3 or both.iloc[:, 0].nunique() < 2:
+        return None
+    slope, intercept = np.polyfit(both.iloc[:, 0], both.iloc[:, 1], 1)
+    ends = [float(both.iloc[:, 0].min()), float(both.iloc[:, 0].max())]
+    return ends, [float(slope * end + intercept) for end in ends]
+
+
+def _distinct_labels(titles: pd.Series) -> pd.Series:
+    """Shortened wine names, kept different from each other.
+
+    A row of the ladder is a category, and plotly draws two identical
+    categories on one line: two vintages of the same wine agree for the first
+    forty-six characters, so truncation alone would pile their prices on top of
+    each other and show nineteen wines in a chart claiming twenty.
+    """
+    short = titles.fillna("").astype(str).str.slice(0, 46)
+    seen: dict[str, int] = {}
+    out = []
+    for label in short:
+        seen[label] = seen.get(label, 0) + 1
+        out.append(label if seen[label] == 1 else f"{label} ({seen[label]})")
+    return pd.Series(out, index=titles.index)
+
+
+def _price_ladder(points: pd.DataFrame, merchant: str, money: str) -> None:
+    """Their price beside the market's, wine by wine, most-clicked first.
+
+    The scatter makes the general case; this one names bottles. A merchant who
+    will not discuss a catalogue will discuss the twenty wines their own
+    shoppers looked at most, with the gap drawn as the distance between two dots.
+    """
+    ladder = points.sort_values("clicks", ascending=False).head(_LADDER_WINES)
+    if ladder.empty:
+        return
+    ladder = ladder.iloc[::-1]
+    labels = _distinct_labels(ladder["title"])
+    figure = go.Figure()
+    for row in range(len(ladder)):
+        figure.add_trace(
+            go.Scatter(
+                x=[
+                    float(ladder["benchmark"].iloc[row]),
+                    float(ladder["price"].iloc[row]),
+                ],
+                y=[labels.iloc[row], labels.iloc[row]],
+                mode="lines",
+                line=dict(
+                    color="#b91c1c"
+                    if float(ladder["gap"].iloc[row]) > 0
+                    else "#15803d",
+                    width=3,
+                ),
+                showlegend=False,
+                hoverinfo="skip",
+            )
+        )
+    figure.add_trace(
+        go.Scatter(
+            x=ladder["benchmark"],
+            y=labels,
+            mode="markers",
+            name="The market",
+            marker=dict(size=11, color="#6b7280", symbol="diamond"),
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=ladder["price"],
+            y=labels,
+            mode="markers",
+            name="Our price",
+            marker=dict(size=13, color="#1d4ed8"),
+        )
+    )
+    figure.update_layout(
+        title=f"{merchant}: the {len(ladder)} most looked-at wines",
+        margin=dict(t=56, b=40, l=8, r=8),
+        height=max(360, 26 * len(ladder) + 130),
+        xaxis_title=f"Price per bottle ({money or 'USD'})",
+        yaxis_title="",
+        legend_title_text="",
+        font=dict(size=_CHART_FONT),
+        title_font=dict(size=_CHART_TITLE_FONT),
+    )
+    st.plotly_chart(figure, width="stretch")
+    st.caption(
+        "Ordered by the shoppers who chose the bottle, so the wines at the top "
+        "are the ones a price change would be felt on. A red line is the amount "
+        "a shopper saves by buying the same wine somewhere else."
+    )
 
 
 def _merchant_letter(bands: pd.DataFrame, merchant: str, sales_days: int) -> None:
@@ -5807,6 +6036,22 @@ def _render_evidence(read: BenchmarkRead, merchant: str = _EVERY_MERCHANT) -> No
         return
     named = "The shop" if merchant == _EVERY_MERCHANT else merchant
     _band_pictures(bands, named)
+
+    # Per wine rather than per band: the bands are the summary, and a merchant
+    # who disputes our grouping can be shown their own bottles instead.
+    points = merchant_client.wine_points(read.prices, demand, sales)
+    if points.empty:
+        st.caption(
+            "No single wine has both a benchmark and enough clicks "
+            f"({merchant_client.SCATTER_MIN_CLICKS}) for its own sales rate, so "
+            "the bands above are as fine as this evidence goes."
+        )
+    else:
+        _price_sales_scatter(points, named, read.prices.currency)
+        st.divider()
+        _price_ladder(points, named, read.prices.currency)
+        st.divider()
+
     shown = bands.assign(
         per_100_clicks=bands["per_100_clicks"].map(
             lambda value: "\u2014" if pd.isna(value) else f"{value:.0f}"

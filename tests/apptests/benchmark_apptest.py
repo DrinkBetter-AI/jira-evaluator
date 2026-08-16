@@ -491,6 +491,19 @@ assert "sold 10." in sold_body, sold_body[-1500:]
 assert "comparison rather than an experiment" in sold_body, sold_body[-1500:]
 print("the evidence tab and verdict compare sales per click by price band: ok")
 
+# The same evidence per wine: the scatter a merchant is shown, and the honesty
+# under it. Two wines here clear the click floor, which is a chart and not a
+# correlation - the coefficient has to say so rather than quote a number
+# computed from two dots.
+sold_metrics = {m.label: m.value for m in sold_run.metric}
+assert sold_metrics["Wines plotted"] == "2", sold_metrics
+assert sold_metrics["Correlation, price against sales"] == "not enough wines", sold_metrics
+assert "Download the wines behind this chart" in [
+    b.label for b in sold_run.download_button
+], [b.label for b in sold_run.download_button]
+assert "correlation and not an experiment" in sold_body, sold_body[-1500:]
+print("the price-against-sales scatter is drawn and refuses to over-claim: ok")
+
 # The page a merchant is actually sent: their name on it, and the same bands.
 letters = [b.label for b in sold_run.download_button if "page for" in b.label]
 assert letters == ["Download a page for The shop"], [

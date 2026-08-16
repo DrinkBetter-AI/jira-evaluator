@@ -358,6 +358,88 @@ def price_bands(prices: Prices, demand: Demand, sales: Sales) -> pd.DataFrame:
     return grouped[list(_BAND_COLUMNS)]
 
 
+# How many clicks a wine needs before its own sales rate is worth plotting. A
+# bottle sold on two clicks is a rate of fifty per hundred, which is arithmetic
+# rather than evidence; ten shoppers is the floor at which the dot means
+# something and most of the clicked catalogue still qualifies.
+SCATTER_MIN_CLICKS = 10
+
+# Below this many wines a correlation is a coincidence with a decimal point.
+_CORRELATION_FLOOR = 20
+
+_POINT_COLUMNS = (
+    "offer",
+    "title",
+    "price",
+    "benchmark",
+    "gap",
+    "clicks",
+    "bottles",
+    "per_100_clicks",
+    "band",
+)
+
+
+def wine_points(
+    prices: Prices,
+    demand: Demand,
+    sales: Sales,
+    min_clicks: int = SCATTER_MIN_CLICKS,
+) -> pd.DataFrame:
+    """One row per wine: what it costs against the market, and what it sold.
+
+    The per-wine form of :func:`price_bands`, for the scatter rather than the
+    table. Bands exist because a single wine's conversion rate is noisy, so the
+    noise is bounded here instead: a wine has to have been chosen by
+    ``min_clicks`` shoppers before its own rate is plotted at all.
+    """
+    if not prices.counted:
+        return pd.DataFrame(columns=list(_POINT_COLUMNS))
+    frame = sales.against(demand.against(prices.offers))
+    for column in ("gap", "clicks", "bottles"):
+        if column not in frame.columns:
+            return pd.DataFrame(columns=list(_POINT_COLUMNS))
+    frame = frame[
+        (pd.to_numeric(frame["clicks"], errors="coerce").fillna(0) >= int(min_clicks))
+        & frame["gap"].notna()
+        & frame["bottles"].notna()
+    ].copy()
+    if frame.empty:
+        return pd.DataFrame(columns=list(_POINT_COLUMNS))
+    frame["per_100_clicks"] = 100 * frame["bottles"] / frame["clicks"]
+    frame["band"] = band_of(frame["gap"]).astype(str)
+    for column in _POINT_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = pd.NA
+    return frame[list(_POINT_COLUMNS)].reset_index(drop=True)
+
+
+def price_sales_correlation(points: pd.DataFrame) -> tuple[float | None, int]:
+    """Spearman correlation of price gap against sales rate, and its sample size.
+
+    Spearman rather than Pearson: the question is whether the expensive wines
+    sell less, not whether they do so along a straight line, and one wine that
+    sold twenty bottles would drag a Pearson fit on its own. Returns ``None``
+    when there are too few wines, or no spread in either column, for a
+    coefficient to mean anything - a number computed from four dots would be
+    quoted at a merchant as if it were a finding.
+    """
+    if points.empty or len(points) < _CORRELATION_FLOOR:
+        return None, int(len(points))
+    gap = pd.to_numeric(points["gap"], errors="coerce")
+    rate = pd.to_numeric(points["per_100_clicks"], errors="coerce")
+    both = pd.concat([gap, rate], axis=1).dropna()
+    if len(both) < _CORRELATION_FLOOR:
+        return None, int(len(both))
+    left, right = both.iloc[:, 0], both.iloc[:, 1]
+    if left.nunique() < 2 or right.nunique() < 2:
+        return None, int(len(both))
+    # Ranks then Pearson is Spearman, and keeps this to pandas rather than
+    # adding scipy to the deployment for one coefficient.
+    rho = left.rank().corr(right.rank())
+    return (None if pd.isna(rho) else round(float(rho), 2)), int(len(both))
+
+
 def sales_verdicts(prices: Prices, demand: Demand, sales: Sales) -> list[str]:
     """Whether the shop's own sales say a keener price sells more of it."""
     if not prices.counted:

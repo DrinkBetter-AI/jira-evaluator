@@ -735,3 +735,48 @@ def test_a_merchant_whose_bottles_never_matched_gets_no_verdict():
     theirs = priced([("theirs-cheap", 8.0, 10.0), ("theirs-dear", 20.0, 10.0)])
     clicks = demand([("theirs-cheap", 100, 1000), ("theirs-dear", 100, 1000)])
     assert mc.sales_verdicts(theirs, clicks, sold([("mine", 30, 240.0)])) == []
+
+def test_a_wine_needs_enough_shoppers_before_its_own_rate_is_plotted():
+    """One bottle on two clicks is arithmetic, not a fifty percent sales rate."""
+    prices = priced([("busy", 12.0, 10.0), ("quiet", 12.0, 10.0)])
+    points = mc.wine_points(
+        prices,
+        demand([("busy", 40, 400), ("quiet", 2, 20)]),
+        sold([("busy", 4, 48.0), ("quiet", 1, 12.0)]),
+    )
+    assert list(points["offer"]) == ["busy"]
+    assert points["per_100_clicks"].iloc[0] == 10.0
+    assert points["band"].iloc[0] == mc.BAND_NAMES[2]
+    # A wine nobody bought is a real dot at zero, not a missing one.
+    quiet_too = mc.wine_points(prices, demand([("busy", 40, 400)]),
+                               sold([("other", 4, 48.0)]), min_clicks=1)
+    assert list(quiet_too["per_100_clicks"]) == [0.0]
+
+
+def test_a_correlation_needs_enough_wines_to_be_worth_quoting():
+    """Four dots produce a coefficient; quoting it at a merchant is the harm."""
+    few = pd.DataFrame({"gap": [0.1, 0.2, 0.3], "per_100_clicks": [3.0, 2.0, 1.0]})
+    assert mc.price_sales_correlation(few) == (None, 3)
+    assert mc.price_sales_correlation(pd.DataFrame()) == (None, 0)
+
+
+def test_expensive_wines_selling_less_is_a_negative_correlation():
+    """The shape the scatter is drawn to show, as a number under it."""
+    rows = 24
+    frame = pd.DataFrame(
+        {
+            "gap": [index / 100 for index in range(rows)],
+            # Falling as the gap grows, with a wobble so it is not a straight line.
+            "per_100_clicks": [
+                float(rows - index) + (1.5 if index % 3 else 0.0) for index in range(rows)
+            ],
+        }
+    )
+    rho, sampled = mc.price_sales_correlation(frame)
+    assert sampled == rows
+    assert rho is not None and rho < -0.9
+
+    # And a catalogue priced identically everywhere has no correlation to find,
+    # rather than a coefficient computed from one repeated value.
+    flat = frame.assign(gap=0.1)
+    assert mc.price_sales_correlation(flat) == (None, rows)
