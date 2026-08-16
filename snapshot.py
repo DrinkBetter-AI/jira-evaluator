@@ -195,17 +195,15 @@ class Snapshot:
 
         A board built from one set of filters must not be handed over beside a
         page drawn from another, so the file made earlier is kept only while the
-        page it was made from is still the page on screen. Tables are named by
-        their shape and columns rather than their contents: reading a hundred
-        thousand cells to name a file nobody asked for is a cost every reader
-        would pay on every rerun.
+        page it was made from is still the page on screen. A table is read as far
+        as it is printed and no further: the same count of tickets with different
+        keys in them is a different board, but a table nobody sees the foot of
+        cannot make the file stale by changing there.
         """
         named = []
         for block in self.blocks:
             if isinstance(block, (Table, SimpleChart)):
-                frame = _frame_of(block.data)
-                shape = None if frame is None else (frame.shape, tuple(str(c) for c in frame.columns))
-                named.append(f"{type(block).__name__}{shape}")
+                named.append(f"{type(block).__name__}{_frame_name(_frame_of(block.data))}")
             elif isinstance(block, Chart):
                 named.append(_chart_name(block.figure))
             else:
@@ -216,6 +214,18 @@ class Snapshot:
         stamp = (now or _dt.datetime.now(_dt.timezone.utc)).strftime("%Y-%m-%d")
         slug = re.sub(r"[^a-z0-9]+", "-", self.page.lower()).strip("-")
         return f"{slug}-board-{stamp}.{suffix}"
+
+
+def _frame_name(frame: pd.DataFrame | None) -> str:
+    """A short name for the rows a table is showing, as far as they are shown."""
+    if frame is None:
+        return "none"
+    shown = frame.head(MAX_ROWS)
+    named = f"{frame.shape}{tuple(str(column) for column in frame.columns)}"
+    with contextlib.suppress(Exception):
+        cells = pd.util.hash_pandas_object(shown, index=True).to_numpy()
+        named += ":" + hashlib.sha256(cells.tobytes()).hexdigest()[:12]
+    return named
 
 
 def _chart_name(figure) -> str:

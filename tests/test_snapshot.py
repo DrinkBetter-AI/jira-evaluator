@@ -182,6 +182,17 @@ def test_a_board_drawn_from_other_figures_is_a_different_board():
     assert one.fingerprint() != other.fingerprint()
 
 
+def test_a_table_of_other_tickets_the_same_size_is_a_different_board():
+    def drawn(keys):
+        frame = pd.DataFrame({"key": keys, "idle_days": [3, 40]})
+        return board(("dataframe", (frame,), {"hide_index": True}))
+
+    assert drawn(["MB-1", "MB-2"]).fingerprint() == drawn(["MB-1", "MB-2"]).fingerprint()
+    assert drawn(["MB-1", "MB-2"]).fingerprint() != drawn(["MB-3", "MB-4"]).fingerprint()
+    # The same tickets, re-sorted, are a differently drawn board too.
+    assert drawn(["MB-1", "MB-2"]).fingerprint() != drawn(["MB-2", "MB-1"]).fingerprint()
+
+
 def test_a_column_called_data_is_not_mistaken_for_a_styled_table():
     frame = pd.DataFrame({"data": ["BigQuery"], "cost": ["$40"]})
     page = board(("dataframe", (frame,), {"hide_index": True})).html(now=WHEN)

@@ -1000,8 +1000,9 @@ def _build_board_file(recorded: board.Snapshot, tab: str) -> dict | None:
             "drawn": drawn,
             "help": "Press Whole board as PDF again for a board drawn now.",
         }
-    # No PDF library where this is deployed: the same page, as the page, for a
-    # browser to print - rather than nothing at all.
+    # No PDF made here - no library where this is deployed, or a board that would
+    # not lay out: the same page, as the page, for a browser to print, rather
+    # than nothing at all.
     return {
         "tab": tab,
         "board": recorded.fingerprint(),
@@ -1010,7 +1011,7 @@ def _build_board_file(recorded: board.Snapshot, tab: str) -> dict | None:
         "name": recorded.filename("html"),
         "mime": "text/html",
         "drawn": drawn,
-        "help": "This deployment has no PDF library. Open it and print to PDF.",
+        "help": "This board could not be made into a PDF here. Open it and print to PDF.",
     }
 
 
