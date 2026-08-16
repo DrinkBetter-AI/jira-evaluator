@@ -75,7 +75,9 @@ DRAWING_CALLS = (
     "divider",
     "code",
     # An editable table is a widget, but the sprint plan inside one is the
-    # section: printed as the table it shows, not as the editing it allows.
+    # section, so it is printed rather than left out. The plan as proposed,
+    # though: what is recorded is the frame handed to the editor, and a reader's
+    # own ticks live in the value it hands back.
     "data_editor",
     # Not drawings but structure: what a section is called when it is folded
     # away behind a label, and what the tabs beside it offer.
