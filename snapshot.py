@@ -453,6 +453,21 @@ def _weasyprint():
         return None
 
 
+def _inline_only(url: str):
+    """Fetch nothing: the board carries everything it needs inside itself.
+
+    A typesetter given an address will go and get it, from the internet or from
+    the disk it is running on, and the board is assembled partly from markup the
+    page wrote. The charts are already inline, the styling is already inline, so
+    there is nothing left to fetch and no reason to allow it.
+    """
+    from weasyprint.urls import default_url_fetcher  # noqa: PLC0415 - optional
+
+    if url.startswith("data:"):
+        return default_url_fetcher(url)
+    raise ValueError("the printed board fetches nothing from outside itself")
+
+
 def to_pdf(page: str) -> bytes | None:
     """The page as PDF bytes, or None where it could not be made into one.
 
@@ -463,7 +478,7 @@ def to_pdf(page: str) -> bytes | None:
     if render is None:
         return None
     try:
-        return render(string=page).write_pdf()
+        return render(string=page, url_fetcher=_inline_only).write_pdf()
     except Exception:  # noqa: BLE001 - the board is offered as HTML instead
         logger.warning("The board could not be laid out as a PDF", exc_info=True)
         return None
@@ -614,8 +629,9 @@ def _blocks_html(snapshot: Snapshot) -> str:
         metrics.clear()
 
     for block in snapshot.blocks:
-        if isinstance(block, Rule) and out and out[-1] == "<hr>":
-            # Rules with only widgets between them are one line on paper.
+        if isinstance(block, Rule) and not metrics and out and out[-1] == "<hr>":
+            # Rules with only widgets between them are one line on paper. Tiles
+            # waiting to be written are content, so the line before them stays.
             continue
         if isinstance(block, Metric):
             metrics.append(block)

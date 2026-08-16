@@ -882,6 +882,8 @@ REPORTS_KEY = "tab_reports"
 # ask is recorded here and answered into the same corner afterwards.
 BOARD_ASKED_KEY = "board_snapshot_asked"
 BOARD_SLOT_KEY = "board_snapshot_slot"
+# The file once it has been made, kept so that taking it does not withdraw it.
+BOARD_FILE_KEY = "board_snapshot_file_held"
 
 
 def _report(tab: str) -> reporting.Report:
@@ -953,7 +955,7 @@ def _offer_board_snapshot(slot, tab: str) -> None:
     the dashboard - an advisor, a model being asked what to change - cannot be
     handed a screen.
     """
-    st.session_state[BOARD_SLOT_KEY] = slot
+    st.session_state[BOARD_SLOT_KEY] = (slot, tab)
     if slot.button(
         "Whole board as PDF",
         key=f"snapshot_{tab.lower()}",
@@ -967,35 +969,59 @@ def _page_name(page) -> str:
     return str(getattr(page, "title", "") or "Dashboard")
 
 
-def _deliver_board_snapshot(recorded: board.Snapshot) -> None:
-    """Hand over the recording of the page that has just finished drawing."""
-    asked = st.session_state.pop(BOARD_ASKED_KEY, None)
-    slot = st.session_state.pop(BOARD_SLOT_KEY, None)
-    if not asked or slot is None or recorded.empty:
-        return
+def _build_board_file(recorded: board.Snapshot, tab: str) -> dict:
+    """The board as a file to hand over: a PDF, or the page where none can be made."""
     with st.spinner("Drawing the board into a PDF..."):
         # Drawn once: every chart on it is an image somebody has to render, and
         # the fallback below is the same page, not another one.
         page = recorded.html()
         printed = board.to_pdf(page)
     if printed:
-        slot.download_button(
-            "Download PDF",
-            data=printed,
-            file_name=recorded.filename("pdf"),
-            mime="application/pdf",
-            key="board_snapshot_pdf",
-        )
-        return
+        return {
+            "tab": tab,
+            "label": "Download PDF",
+            "data": printed,
+            "name": recorded.filename("pdf"),
+            "mime": "application/pdf",
+            "help": "Press Whole board as PDF again for a board drawn now.",
+        }
     # No PDF library where this is deployed: the same page, as the page, for a
     # browser to print - rather than nothing at all.
+    return {
+        "tab": tab,
+        "label": "Download board",
+        "data": page.encode("utf-8"),
+        "name": recorded.filename("html"),
+        "mime": "text/html",
+        "help": "This deployment has no PDF library. Open it and print to PDF.",
+    }
+
+
+def _deliver_board_snapshot(recorded: board.Snapshot) -> None:
+    """Hand over the recording of the page that has just finished drawing.
+
+    The file stays on offer once it has been made. Taking a download is itself a
+    rerun of the page, so an offer withdrawn as soon as it is accepted is an
+    offer that can be pulled out from under the reader mid-download - and asking
+    again would mean drawing every chart on the board a second time.
+    """
+    asked = st.session_state.pop(BOARD_ASKED_KEY, None)
+    registered = st.session_state.pop(BOARD_SLOT_KEY, None)
+    if registered is None:
+        return
+    slot, tab = registered
+    if asked and not recorded.empty:
+        st.session_state[BOARD_FILE_KEY] = _build_board_file(recorded, asked)
+    held = st.session_state.get(BOARD_FILE_KEY)
+    if not held or held["tab"] != tab:
+        return
     slot.download_button(
-        "Download board",
-        data=page.encode("utf-8"),
-        file_name=recorded.filename("html"),
-        mime="text/html",
-        key="board_snapshot_html",
-        help="This deployment has no PDF library. Open it and print to PDF.",
+        held["label"],
+        data=held["data"],
+        file_name=held["name"],
+        mime=held["mime"],
+        key="board_snapshot_file",
+        help=held["help"],
     )
 
 

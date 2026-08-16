@@ -22,6 +22,20 @@ import snapshot  # noqa: E402
 WHEN = dt.datetime(2026, 8, 6, 9, 30, tzinfo=dt.timezone.utc)
 
 
+def _has_browser() -> bool:
+    """Whether a browser the chart renderer can drive is on this machine."""
+    import os
+    import shutil
+
+    named = os.environ.get("BROWSER_PATH")
+    if named and os.path.exists(named):
+        return True
+    return any(
+        shutil.which(name)
+        for name in ("chromium", "chromium-browser", "google-chrome", "chrome")
+    )
+
+
 def board(*calls) -> snapshot.Snapshot:
     """A recording of the given ``(call, args, kwargs)`` drawings."""
     recorded = snapshot.Snapshot("Engineering")
@@ -161,6 +175,11 @@ def test_a_section_folded_behind_a_label_still_says_what_it_was_called():
 
 
 def test_a_chart_is_drawn_into_the_page_as_a_picture():
+    # A chart image is drawn by a headless browser, which is in the deployed
+    # image but not on every machine that runs the checks.
+    pytest.importorskip("kaleido")
+    if not _has_browser():
+        pytest.skip("no browser for the chart renderer to draw in")
     frame = pd.DataFrame({"day": [1, 2, 3], "orders": [4, 9, 2]})
     page = board(("bar_chart", (frame,), {"x": "day", "y": "orders"})).html(now=WHEN)
 
@@ -200,6 +219,25 @@ def test_the_board_is_a_pdf_a_reader_can_open():
     ).pdf(now=WHEN)
 
     assert printed and printed.startswith(b"%PDF-")
+
+
+def test_the_printed_board_fetches_nothing_from_outside_itself():
+    """A typesetter given an address goes and gets it; the board carries its own."""
+    with pytest.raises(ValueError):
+        snapshot._inline_only("file:///etc/passwd")
+    with pytest.raises(ValueError):
+        snapshot._inline_only("http://169.254.169.254/")
+
+
+def test_a_line_between_sections_survives_the_tiles_above_it():
+    page = board(
+        ("divider", (), {}),
+        ("metric", ("Open tickets", 13), {}),
+        ("divider", (), {}),
+        ("header", ("Ticket health",), {}),
+    ).html(now=WHEN)
+
+    assert page.count("<hr>") == 2
 
 
 def test_a_board_that_cannot_be_laid_out_is_offered_as_the_page(monkeypatch):
