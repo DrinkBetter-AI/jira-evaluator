@@ -11,7 +11,7 @@ import re
 import threading
 import time
 from typing import Any, Callable, NamedTuple
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlencode
 
 import numpy as np
 import pandas as pd
@@ -60,6 +60,7 @@ from capacity import (
 )
 import cleanup
 from cleanup import is_unowned
+import engineer_letter
 import epic_organization
 from epics import epic_health_flags, epic_rollup
 from teams import (
@@ -1040,6 +1041,44 @@ def _roster_matches(roster: list[str], assignees: list[str]) -> list[str]:
     ]
 
 
+# A link an engineer can be sent, so their page opens on them rather than on
+# whoever the dashboard happens to default to.
+_PERSON_PARAM = "person"
+
+
+def requested_person(assignees: list[str]) -> str | None:
+    """The engineer a shared link asks for, if it named one of ours.
+
+    Matched loosely, like every other name here: a link written by hand, or one
+    whose name came back from Jira cased differently, still has to land on the
+    person rather than silently on somebody else.
+    """
+    wanted = str(st.query_params.get(_PERSON_PARAM) or "").strip()
+    if not wanted:
+        return None
+    for name in assignees:
+        if str(name).strip().lower() == wanted.lower():
+            return name
+    for name in assignees:
+        if same_person(wanted, name):
+            return name
+    return None
+
+
+def person_link(person: str) -> str:
+    """The URL that opens this person's own page.
+
+    Built from the browser's own address rather than a configured hostname: the
+    dashboard is reached by several (Cloud Run, a proxy, localhost) and a link
+    that names the wrong one is worse than no link.
+    """
+    query = urlencode({_PERSON_PARAM: str(person)})
+    current = str(getattr(st.context, "url", "") or "")
+    if not current:
+        return f"?{query}"
+    return f"{current.split('?')[0]}?{query}"
+
+
 def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | None:
     """Return the assignees to filter on for the selected scope.
 
@@ -1061,7 +1100,9 @@ def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | No
         st.warning("No assignees available in the current data.")
         return []
     matches = _roster_matches(ORG_TEAM_MEMBERS, assignees)
-    default_individual = matches[0] if matches else assignees[0]
+    default_individual = (
+        requested_person(assignees) or (matches[0] if matches else assignees[0])
+    )
     selected = st.selectbox(
         "Assignee",
         options=assignees,
@@ -1281,8 +1322,13 @@ def _render_workload_metrics(owned: pd.DataFrame) -> None:
         )
 
 
-def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
-    """The per-person ticket board: tier-coloured and sortable."""
+def annotated_board(df: pd.DataFrame, assignee: str) -> pd.DataFrame:
+    """One person's tickets with the board's derived columns on them.
+
+    Shared with the page that is downloaded rather than drawn, so a tier or a
+    sprint label cannot mean one thing on screen and another in the file the
+    engineer is sent.
+    """
     owners = df["assignee"].fillna("").astype(str).str.strip()
     target = str(assignee).strip()
     if target.lower() in _NO_OWNER_NAMES or target.lower() == "(no owner)":
@@ -1291,8 +1337,7 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
         mask = owners == target
     owned = df[mask].copy()
     if owned.empty:
-        st.info(f"No tickets for {assignee} in the current scope.")
-        return
+        return owned
 
     if "has_estimate" not in owned.columns or "estimate_hours" not in owned.columns:
         owned = estimate_policy(owned, BACKLOG_STATUSES)
@@ -1311,6 +1356,132 @@ def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
                 .dt.strftime("%Y-%m-%d")
                 .fillna("")
             )
+    return owned
+
+
+def engineer_page(
+    person: str,
+    owned: pd.DataFrame,
+    *,
+    score: float | None = None,
+    badges: list[tuple[str, str]] | None = None,
+) -> engineer_letter.Page:
+    """The engineer's own page, as the thing that gets sent to them.
+
+    The same numbers and the same tier colours as the screen, because the point
+    of sending it is that the conversation and the file agree.
+    """
+    load = _workload_hours(owned) if not owned.empty else {}
+    tiles = [
+        engineer_letter.Tile("Open tickets", str(len(owned))),
+        engineer_letter.Tile(
+            "Estimated hours", f"{float(load.get('total', 0.0)):.1f} h", "all open work"
+        ),
+        engineer_letter.Tile(
+            "Current sprint", f"{float(load.get('sprint', 0.0)):.1f} h", "active sprint"
+        ),
+        engineer_letter.Tile(
+            "Urgent (High+)", f"{float(load.get('urgent', 0.0)):.1f} h", "High and above"
+        ),
+        engineer_letter.Tile(
+            "No estimate",
+            str(int(load.get("unestimated", 0))),
+            "invisible in the hours above",
+        ),
+    ]
+
+    tickets = []
+    if not owned.empty:
+        ordered = owned.sort_values(
+            ["_tier_order", "priority_score"]
+            if "priority_score" in owned.columns
+            else ["_tier_order"],
+            ascending=[True, False] if "priority_score" in owned.columns else [True],
+            kind="stable",
+        )
+        for _, row in ordered.iterrows():
+            tickets.append(
+                engineer_letter.Ticket(
+                    key=str(row.get("key") or ""),
+                    url=str(row.get("key_url") or ""),
+                    summary=str(row.get("summary") or ""),
+                    status=str(row.get("status") or ""),
+                    priority=str(row.get("priority") or ""),
+                    tier=str(row.get("tier") or ""),
+                    sprint=str(row.get("sprint_label") or ""),
+                    idle_days=_as_number(row.get("idle_days")),
+                    # Blank rather than 0.0 where nobody estimated it: a zero
+                    # reads as a ticket judged to cost no work.
+                    estimate_hours=(
+                        _as_number(row.get("estimate_hours"))
+                        if bool(row.get("has_estimate", True))
+                        else None
+                    ),
+                    devin=str(row.get("devin") or ""),
+                )
+            )
+
+    return engineer_letter.Page(
+        person=str(person),
+        tiles=tiles,
+        tickets=tickets,
+        score="" if score is None else f"{score:.0f} / 100",
+        score_note="" if score is None else "weighted across the scored components",
+        badges=[f"{badge} {why}" for badge, why in (badges or [])],
+    )
+
+
+def _as_number(value) -> float | None:
+    """A float, or None where the field was missing rather than zero."""
+    number = pd.to_numeric(value, errors="coerce")
+    return None if pd.isna(number) else float(number)
+
+
+def _render_engineer_handout(
+    person: str,
+    owned: pd.DataFrame,
+    score: float | None,
+    badges: list[tuple[str, str]],
+) -> None:
+    """The engineer's page as a file to send them, and a link to open it live."""
+    st.subheader("Send this to them")
+    page = engineer_page(person, owned, score=score, badges=badges)
+    left, right = st.columns([1, 3])
+    left.download_button(
+        f"Download {person}'s page",
+        data=engineer_letter.one_pager(page).encode("utf-8"),
+        file_name=engineer_letter.filename(person),
+        mime="text/html",
+        key=f"engineer_letter_{person}",
+        help=(
+            "One page with their tickets, hours and score, coloured by attention "
+            "tier, every key a link into Jira. Opens anywhere and prints to PDF."
+        ),
+    )
+    right.text_input(
+        "Or send them this link",
+        value=person_link(person),
+        key=f"engineer_link_{person}",
+        help=(
+            "Opens the dashboard on this person's own page. They still need the "
+            "dashboard password."
+        ),
+    )
+    stale = engineer_letter.needs_updating(page.tickets)
+    if stale:
+        st.caption(
+            f"The page asks {person} by name about "
+            f"{len(stale)} ticket(s) untouched for "
+            f"{engineer_letter.STALE_UPDATE_DAYS}+ days."
+        )
+
+
+def _render_assignee_detail(df: pd.DataFrame, assignee: str) -> None:
+    """The per-person ticket board: tier-coloured and sortable."""
+    owned = annotated_board(df, assignee)
+    if owned.empty:
+        st.info(f"No tickets for {assignee} in the current scope.")
+        return
 
     st.markdown(f"#### {assignee} — {len(owned)} open ticket(s)")
     _render_workload_metrics(owned)
@@ -8660,8 +8831,12 @@ def _render_scorecard(
     gradable_source: pd.DataFrame,
     personal_open_prs: pd.DataFrame,
     github_ready: bool,
-) -> None:
-    """The KPI scorecard: components, badges and the 7/30/90-day trend."""
+) -> tuple[float | None, list[tuple[str, str]]]:
+    """The KPI scorecard: components, badges and the 7/30/90-day trend.
+
+    Returns the score and the badges earned, so the page that gets sent to the
+    engineer carries the same two rather than computing its own.
+    """
     st.subheader("Scorecard")
 
     who = _jql_identity(owned, person)
@@ -8719,6 +8894,7 @@ def _render_scorecard(
         earned = kpi.badges(
             parts, owned, gradable, resolved_7, resolved_30, resolved_90, reopened_90, prs
         )
+        badges_earned = list(earned)
         if earned:
             st.markdown("**Badges this week**")
             for badge, why in earned:
@@ -8785,6 +8961,7 @@ def _render_scorecard(
             "short-window rates mean improving; a 7-day rate under the 90-day "
             "baseline means slowing down."
         )
+    return score, badges_earned
 
 
 def _jql_identity(owned: pd.DataFrame, person: str) -> str:
@@ -8942,7 +9119,14 @@ def _render_individual_page(
     whole_board = _metrics_df(organization[owners == name], include_backlogs=False)
 
     st.divider()
-    _render_scorecard(person, whole_board.copy(), theirs, personal_prs, github_ready)
+    score, badges_earned = _render_scorecard(
+        person, whole_board.copy(), theirs, personal_prs, github_ready
+    )
+
+    st.divider()
+    _render_engineer_handout(
+        person, annotated_board(whole_board, person), score, badges_earned
+    )
 
     st.divider()
     _render_weekly_delivery(person, _jql_identity(whole_board, person))
@@ -9059,6 +9243,9 @@ def _render_engineering_page() -> None:
         scope = st.radio(
             "View",
             options=[SCOPE_ORG, SCOPE_TEAM, SCOPE_INDIVIDUAL],
+            # A link that names an engineer opens on that engineer, or the page
+            # they were sent would greet them with the whole organization.
+            index=2 if requested_person(assignees) else 0,
             help=(
                 "Organization shows every assignee in the JQL scope; "
                 "Team pre-selects the configured team members; "
