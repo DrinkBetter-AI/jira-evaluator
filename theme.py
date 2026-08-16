@@ -76,6 +76,25 @@ def inject_styles() -> None:
     chart_fonts()
 
 
+def _current_template():
+    """The template plotly is drawing with, whatever form the default is in.
+
+    ``pio.templates.default`` is a name, a ``Template``, or names joined by
+    ``+``; only the first form can be looked up, so the others are handled here
+    rather than falling back to plotly's plain template and losing the app's
+    own chart colours.
+    """
+    default = pio.templates.default
+    if default is None:
+        return pio.templates["plotly"]
+    if not isinstance(default, str):
+        return default
+    for name in default.split("+"):
+        if name in pio.templates:
+            return pio.templates[name]
+    return pio.templates["plotly"]
+
+
 def chart_fonts() -> None:
     """Make every chart in the app draw its text at a size a room can read.
 
@@ -83,8 +102,11 @@ def chart_fonts() -> None:
     legible without anyone remembering this.
     """
     if _TEMPLATE not in pio.templates:
-        template = pio.templates["plotly"]
-        larger = template.to_plotly_json()
+        # Built on whatever template is in force rather than plotly's plain one:
+        # Streamlit installs its own and makes it the default, and its frontend
+        # recolours a figure that carries it. Copying "plotly" instead would
+        # change every chart's colours to buy a larger font.
+        larger = _current_template().to_plotly_json()
         layout = larger.setdefault("layout", {})
         layout["font"] = {**layout.get("font", {}), "size": CHART_FONT}
         layout["title"] = {

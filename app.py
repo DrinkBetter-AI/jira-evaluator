@@ -5214,7 +5214,14 @@ def _price_sales_scatter(points: pd.DataFrame, merchant: str, money: str) -> Non
     # The market itself, so a dot's side of the line is readable without doing
     # arithmetic on the axis.
     figure.add_vline(x=0, line_dash="dash", line_color="#6b7280")
-    fit = _least_squares(points["gap"] * 100, points["per_100_clicks"])
+    # Only where the coefficient is quotable. A fitted line through nine dots
+    # looks as confident as one through ninety, and drawn beside a figure that
+    # says "not enough wines" it is the chart contradicting its own caption.
+    fit = (
+        _least_squares(points["gap"] * 100, points["per_100_clicks"])
+        if rho is not None
+        else None
+    )
     if fit is not None:
         figure.add_trace(
             go.Scatter(
@@ -5297,6 +5304,23 @@ def _least_squares(x: pd.Series, y: pd.Series) -> tuple[list[float], list[float]
     return ends, [float(slope * end + intercept) for end in ends]
 
 
+def _distinct_labels(titles: pd.Series) -> pd.Series:
+    """Shortened wine names, kept different from each other.
+
+    A row of the ladder is a category, and plotly draws two identical
+    categories on one line: two vintages of the same wine agree for the first
+    forty-six characters, so truncation alone would pile their prices on top of
+    each other and show nineteen wines in a chart claiming twenty.
+    """
+    short = titles.fillna("").astype(str).str.slice(0, 46)
+    seen: dict[str, int] = {}
+    out = []
+    for label in short:
+        seen[label] = seen.get(label, 0) + 1
+        out.append(label if seen[label] == 1 else f"{label} ({seen[label]})")
+    return pd.Series(out, index=titles.index)
+
+
 def _price_ladder(points: pd.DataFrame, merchant: str, money: str) -> None:
     """Their price beside the market's, wine by wine, most-clicked first.
 
@@ -5308,7 +5332,7 @@ def _price_ladder(points: pd.DataFrame, merchant: str, money: str) -> None:
     if ladder.empty:
         return
     ladder = ladder.iloc[::-1]
-    labels = ladder["title"].fillna("").astype(str).str.slice(0, 46)
+    labels = _distinct_labels(ladder["title"])
     figure = go.Figure()
     for row in range(len(ladder)):
         figure.add_trace(
