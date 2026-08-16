@@ -39,6 +39,19 @@ steps:
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
       - .
 
+  # Print one board inside the image that is about to be deployed. Both ways it
+  # can fail - typesetting libraries missing, or a browser that will not start as
+  # root - are silent at runtime: the reader is simply given HTML, or a board
+  # whose charts are gaps. Caught here, the deploy stops instead.
+  - id: prints-a-board
+    name: gcr.io/cloud-builders/docker
+    args:
+      - run
+      - --rm
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+      - python
+      - board_container_smoke.py
+
   # Push the SHA tag explicitly (deploy needs it in the registry before it runs);
   # the :latest tag is pushed by the images: block at the end of the build.
   # Avoids `docker push --all-tags`, which requires Docker CLI 20.10+.
