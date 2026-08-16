@@ -89,6 +89,6 @@ GITHUB_LOGIN_MAP="Tam=Phelan164;Shawn=tungph;David=ahref13;Mehdi Ordikhani=Morse
 Every login above is now **confirmed by Angel** except `lawrnsfeng` and
 `VossBackend`, which remain unowned. Devin reviews **every PR in every repo**,
 so AI-review findings can be a *scored* component for all code roles, not
-evidence-only. Integrity-page access: Angel said "everyone — maybe we should
-change that"; recommendation recorded in DEVIN_PLAN (two-tier access), decision
-pending.
+evidence-only. Integrity-page access: **decided — Angel only.** WP6 implements a second
+admin credential (the shared dashboard password stays for everyone else); the
+integrity computations must not run at all for non-admin sessions.
