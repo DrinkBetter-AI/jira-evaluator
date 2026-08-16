@@ -96,3 +96,28 @@ Type: 13/14/15/17/20/32px (meta/label/body/lead/section/display), base font 17px
 3. What the engineers see: their own scorecard only (current assumption) — do they also see their own *rank within role*?
 4. Integrity thresholds — how many masked days / cosmetic-per-transition before a flag shows? (I propose: no fixed threshold; always show top 3 by magnitude with evidence.)
 5. Whether invoiced hours can be imported monthly (CSV) — it is the only true cross-check for `hours_per_delivered_line`.
+
+---
+
+## 5. Communication signals (added 16 Aug after Slack/Fireflies verification)
+
+Angel's context: #team-snippets weekly goals are mandatory and mostly ignored; daily standup (no Fri), ML meeting 2×/wk, marketplace meeting daily (no Thu); Fireflies and Coworker record meetings; some people are slow to respond on Slack.
+
+**Measured baseline — #team-snippets (C098TCRRV2Q), last 8 full weeks (W25–W32):**
+Farid 8/8 · Tam 7 · Mohsen 7 · Mehdi 7 · Mihai 6 · David 4 · Igor 4 · Anouar 3 · Santi 2 · Alesya 2 · Ali 1 · Shawn 0 · Jal 0 (once ever, in Feb) · **Gaston 0 — never posted in the channel's history** · Dina 0 · Robert 0. The channel died in March, was revived in June, and is decaying again (W31: 4 posters, W32: 2). Parse counts top-level posts only; thread replies would need including.
+
+### WP9 — Snippet compliance (small; needs a Slack bot token)
+Read one channel via `conversations.history` (+ thread replies), attribute by author, week-bucket, join to `JIRA_ROLES`. Scorecard: this **replaces** the old "Weekly updates" component (idle_days ≤ 7 — the most gameable signal in the system) with an observable act: weeks-posted / weeks-active. People page shows the streak; Today page shows this week's poster count vs roster.
+*Accept:* thread replies counted; people on holiday excluded via a simple absence list; the metric names its blind spot (a posted snippet is presence, not truth).
+
+### WP10 — Standup truth-check (Phase 3; the strongest padding evidence available)
+Fireflies transcripts carry per-person action items with timestamps (verified on the 8/10–8/14 meetings). Join a person's stated commitments against the Jira changelog over the following days: "said X at standup three days running, ticket untouched" is the direct, quotable form of hour-padding evidence — far stronger than any proxy. Also derive *actual* attendance from transcript speakers, **never** from the participants field (verified: that field is the calendar invite list — departed staff appear on every standup).
+*Accept:* per-person weekly table: commitments stated, matching board movement, unmatched commitments with meeting deep-links (`app.fireflies.ai/view/{id}?t={seconds}`). Integrity-page only.
+
+### Slack responsiveness — deliberately NOT scored
+Measuring reply latency org-wide is surveillance, and it's noisy across Vietnam/Uruguay/Tunisia/EU timezones. If wanted later: evidence-only, limited to direct @-mentions containing a question in work channels, business-hours-adjusted per person's timezone, shown as a median with links. Not a scorecard component.
+
+### New names surfaced (Angel to confirm)
+- **Praveen Rai** — posted snippets in June; not in Jira assignee data.
+- **Dat (Đào Nguyễn Anh, dat@vinovoss.com)** — gives QA/staging updates at standup; not in the roster Angel sorted.
+- Standup summary mentions "Tina" — probably Fireflies mishearing "Dina"; treat name-matching in WP10 with an alias table.
