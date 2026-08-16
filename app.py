@@ -74,6 +74,7 @@ from teams import (
 import theme
 from theme import inject_styles, kpi_strip
 import report as reporting
+import snapshot as board
 from hygiene import (
     CONTAINER_ISSUE_TYPES,
     DEFAULT_STALE_DAYS,
@@ -876,6 +877,13 @@ def _metrics_df(df: pd.DataFrame, include_backlogs: bool) -> pd.DataFrame:
 TAB_ENGINEERING = "Engineering"
 TAB_BUSINESS = "Business"
 REPORTS_KEY = "tab_reports"
+# Which page was asked for as a file, and where on it the button that asked
+# sits: the file can only be built once the page has finished drawing, so the
+# ask is recorded here and answered into the same corner afterwards.
+BOARD_ASKED_KEY = "board_snapshot_asked"
+BOARD_SLOT_KEY = "board_snapshot_slot"
+# The file once it has been made, kept so that taking it does not withdraw it.
+BOARD_FILE_KEY = "board_snapshot_file_held"
 
 
 def _report(tab: str) -> reporting.Report:
@@ -925,15 +933,127 @@ def _download_report(slot, tab: str) -> None:
     reader looks for it, and holds what the whole tab ended up saying.
     """
     built = _report(tab)
-    if built.empty:
+    if not built.empty:
+        slot.download_button(
+            "Download report",
+            data=built.html(),
+            file_name=built.filename(),
+            mime="text/html",
+            key=f"download_{tab.lower()}",
+            help="A one-page summary of this tab. Open it and print to PDF.",
+        )
+    # Offered whatever the summary came to. A tab whose figures failed to read is
+    # still a tab full of sections, and its own emptiness is the design somebody
+    # wants to look at.
+    _offer_board_snapshot(slot, tab)
+
+
+def _offer_board_snapshot(slot, tab: str) -> None:
+    """Offer the page itself - all of it - as a PDF someone else can read.
+
+    The report above is a summary; this is the board: every section in the
+    order it is drawn, tables in the colours they are tinted, charts as the
+    charts they are. A design can only be judged whole, and a reader outside
+    the dashboard - an advisor, a model being asked what to change - cannot be
+    handed a screen.
+    """
+    st.session_state[BOARD_SLOT_KEY] = (slot, tab)
+    if slot.button(
+        "Whole board as PDF",
+        key=f"snapshot_{tab.lower()}",
+        help="Every section of this page, drawn as it looks, in one PDF.",
+    ):
+        st.session_state[BOARD_ASKED_KEY] = tab
+
+
+def _page_name(page) -> str:
+    """What the file calls the page, whatever Streamlit has named it."""
+    return str(getattr(page, "title", "") or "Dashboard")
+
+
+def _build_board_file(recorded: board.Snapshot, tab: str) -> dict | None:
+    """The board as a file to hand over: a PDF, or the page where none can be made.
+
+    Nothing about wanting a file is worth the page the reader is looking at, so a
+    board that cannot be laid out says so where the button is and leaves the
+    dashboard standing.
+    """
+    drawn = _dt.datetime.now().strftime("%H:%M")
+    try:
+        with st.spinner("Drawing the board into a PDF..."):
+            # Drawn once: every chart on it is an image somebody has to render,
+            # and the fallback below is the same page, not another one.
+            page = recorded.html()
+            printed = board.to_pdf(page)
+    except Exception:  # noqa: BLE001 - a board nobody can print is not a broken page
+        logger.warning("The board could not be drawn into a file", exc_info=True)
+        st.warning("This board could not be drawn into a file.")
+        return None
+    if printed:
+        return {
+            "tab": tab,
+            "board": recorded.fingerprint(),
+            "label": "Download PDF",
+            "data": printed,
+            "name": recorded.filename("pdf"),
+            "mime": "application/pdf",
+            "drawn": drawn,
+            "help": "Press Whole board as PDF again for a board drawn now.",
+        }
+    # No PDF made here - no library where this is deployed, or a board that would
+    # not lay out: the same page, as the page, for a browser to print, rather
+    # than nothing at all.
+    return {
+        "tab": tab,
+        "board": recorded.fingerprint(),
+        "label": "Download board",
+        "data": page.encode("utf-8"),
+        "name": recorded.filename("html"),
+        "mime": "text/html",
+        "drawn": drawn,
+        "help": "This board could not be made into a PDF here. Open it and print to PDF.",
+    }
+
+
+def _deliver_board_snapshot(recorded: board.Snapshot) -> None:
+    """Hand over the recording of the page that has just finished drawing.
+
+    The file stays on offer once it has been made. Taking a download is itself a
+    rerun of the page, so an offer withdrawn as soon as it is accepted is an
+    offer that can be pulled out from under the reader mid-download - and asking
+    again would mean drawing every chart on the board a second time.
+
+    It stays on offer only while it is still this page, though: change a filter
+    or the scope and the board beside the button is not the board inside it, so
+    the offer is withdrawn rather than handing over last time's figures.
+    """
+    asked = st.session_state.pop(BOARD_ASKED_KEY, None)
+    registered = st.session_state.pop(BOARD_SLOT_KEY, None)
+    if registered is None:
         return
+    slot, tab = registered
+    if asked and not recorded.empty:
+        made = _build_board_file(recorded, asked)
+        if made is not None:
+            st.session_state[BOARD_FILE_KEY] = made
+    held = st.session_state.get(BOARD_FILE_KEY)
+    if held and (held["tab"] != tab or held.get("board") != recorded.fingerprint()):
+        st.session_state.pop(BOARD_FILE_KEY, None)
+        held = None
+    if not held:
+        return
+    # Named by the minute it was drawn, because a section that reruns on its own -
+    # a plan re-ticked, a chart's own control - redraws under the button without
+    # the page being drawn again, and nothing here would know. The reader can see
+    # whether the file is older than what they are looking at.
+    stamped = held.get("drawn")
     slot.download_button(
-        "Download report",
-        data=built.html(),
-        file_name=built.filename(),
-        mime="text/html",
-        key=f"download_{tab.lower()}",
-        help="A one-page summary of this tab. Open it and print to PDF.",
+        f"{held['label']} (drawn {stamped})" if stamped else held["label"],
+        data=held["data"],
+        file_name=held["name"],
+        mime=held["mime"],
+        key="board_snapshot_file",
+        help=held["help"],
     )
 
 
@@ -9770,7 +9890,12 @@ def main() -> None:
     # Gathered fresh on every run, because every figure the active page draws
     # is. Only one page runs per rerun, so this resets just its own report.
     _reset_reports()
-    page.run()
+    # The page draws exactly as it did before; the recorder only listens, so
+    # that the reader who asks for the board as a file gets the board they are
+    # looking at rather than a second rendering of it.
+    with board.recording(_page_name(page)) as recorded:
+        page.run()
+    _deliver_board_snapshot(recorded)
 
 
 if __name__ == "__main__":
