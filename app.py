@@ -933,16 +933,18 @@ def _download_report(slot, tab: str) -> None:
     reader looks for it, and holds what the whole tab ended up saying.
     """
     built = _report(tab)
-    if built.empty:
-        return
-    slot.download_button(
-        "Download report",
-        data=built.html(),
-        file_name=built.filename(),
-        mime="text/html",
-        key=f"download_{tab.lower()}",
-        help="A one-page summary of this tab. Open it and print to PDF.",
-    )
+    if not built.empty:
+        slot.download_button(
+            "Download report",
+            data=built.html(),
+            file_name=built.filename(),
+            mime="text/html",
+            key=f"download_{tab.lower()}",
+            help="A one-page summary of this tab. Open it and print to PDF.",
+        )
+    # Offered whatever the summary came to. A tab whose figures failed to read is
+    # still a tab full of sections, and its own emptiness is the design somebody
+    # wants to look at.
     _offer_board_snapshot(slot, tab)
 
 

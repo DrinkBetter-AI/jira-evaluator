@@ -199,6 +199,25 @@ def test_a_ticket_titled_as_a_link_to_a_script_is_not_a_link():
     assert 'href="https://j/MB-1"' in page
 
 
+def test_a_chart_of_one_series_is_printed_in_the_app_s_own_colours():
+    import plotly.express as px
+
+    figure = px.bar(pd.DataFrame({"week": ["-1w", "now"], "hours": [4, 12]}), x="week", y="hours")
+    printed = snapshot._printable(figure)
+
+    assert list(printed.layout.colorway) == list(snapshot.STREAMLIT_COLOURS)
+
+
+def test_a_chart_that_names_its_own_colours_keeps_them():
+    import plotly.express as px
+
+    figure = px.bar(pd.DataFrame({"week": ["now"], "hours": [12]}), x="week", y="hours")
+    figure.update_layout(colorway=["#123456"])
+    printed = snapshot._printable(figure)
+
+    assert list(printed.layout.colorway) == ["#123456"]
+
+
 def test_black_on_a_chart_stays_black_when_it_is_printed():
     assert snapshot._coloured("#000000") == "#000000"
     assert snapshot._coloured("#000001") == snapshot.STREAMLIT_COLOURS[0]

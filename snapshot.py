@@ -657,12 +657,27 @@ def _printable(figure):
     printable = go.Figure(_coloured(figure.to_plotly_json()))
     printable.update_layout(
         template="plotly_white",
+        # Named on the figure, because the template that carried Streamlit's
+        # palette is the one being replaced: a chart of one series takes its
+        # colour from the palette rather than from anything written on the trace,
+        # and would otherwise print in plotly's own blue instead of the app's.
+        colorway=_palette(printable),
         font=dict(size=theme.CHART_FONT),
         title_font=dict(size=theme.CHART_TITLE_FONT),
         paper_bgcolor="#ffffff",
         plot_bgcolor="#ffffff",
     )
     return printable
+
+
+def _palette(figure) -> list:
+    """The colours the screen draws this chart's series in.
+
+    A figure that names its own is left with them; otherwise it is drawn from
+    the palette the browser fills Streamlit's placeholders with.
+    """
+    named = getattr(figure.layout, "colorway", None)
+    return list(named) if named else list(STREAMLIT_COLOURS)
 
 
 def _chart_image(block) -> str:
