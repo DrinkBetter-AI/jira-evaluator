@@ -8,16 +8,16 @@ Everyone is hourly **except** Angel (CEO) and Arsalan (CTO).
 | Person | Role | Notes |
 |---|---|---|
 | Tam | platform (backend + search + MLOps + DevOps) | touches every repo · GitHub **Phelan164** (confirmed) — #1 producer, 153 merged/30d |
-| Shawn | backend | |
-| Mohsen Davoudi | frontend | GitHub MohsenStack (unconfirmed) |
+| Shawn | backend | GitHub **tungph** (confirmed) |
+| Mohsen Davoudi | frontend | GitHub **MohsenStack** (confirmed) |
 | David | frontend | GitHub **ahref13** (confirmed) |
-| Farid Shahidi | frontend + mobile | GitHub faridsh69 (unconfirmed) |
-| Ali | mobile (React Native) | GitHub alivinovoss (unconfirmed) |
-| Jal Haidar | CRM/Medusa backend + merchant data | works with Actenzo (NL data provider) · GitHub jal-vino (unconfirmed) |
-| Anouar Kacem | CRM/Medusa backend (marketplace) | Tunisia · GitHub anouar-source (unconfirmed) |
-| Santi Caamaño | QA — automated | Uruguay · transparency concern (Angel) · GitHub SantiVinoVoss (unconfirmed) |
-| Mehdi Ordikhani | AI recommendation (ML team) | very expensive/hr |
-| Gaston | infrastructure | expensive/hr · padding concern (Angel) · GitHub gsalgado-cloudacio (unconfirmed) |
+| Farid Shahidi | frontend + mobile | GitHub **faridsh69** (confirmed) |
+| Ali | mobile (React Native) | GitHub **alivinovoss** (confirmed) |
+| Jal Haidar | CRM/Medusa backend + merchant data | works with Actenzo (NL data provider) · GitHub **jal-vino** (confirmed) |
+| Anouar Kacem | CRM/Medusa backend (marketplace) | Tunisia · GitHub **anouar-source** (confirmed) |
+| Santi Caamaño | QA — automated | Uruguay · transparency concern (Angel) · GitHub **SantiVinoVoss** (confirmed) |
+| Mehdi Ordikhani | AI recommendation (ML team) | very expensive/hr · GitHub **Morse-vv** (confirmed) |
+| Gaston | infrastructure | expensive/hr · padding concern (Angel) · GitHub **gsalgado-cloudacio** (confirmed) |
 | Dina QA | QA — manual | Vietnam · cheap, very good |
 
 ## Active — non-engineering
@@ -25,14 +25,14 @@ Everyone is hourly **except** Angel (CEO) and Arsalan (CTO).
 | Person | Role | Notes |
 |---|---|---|
 | Mihai Manea | PM — all boards (ML/Marketplace/App/Mobile) | owns the departed-staff cleanup below |
-| Robert Surpateanu | designer | very expensive/hr · GitHub robertsurpe (unconfirmed) |
+| Robert Surpateanu | designer | very expensive/hr · GitHub **robertsurpe** (confirmed) |
 | Alesya Kasovich | designer | cheap/hr |
 | Igor Taborsak | SEO | |
 | Evmorfia Kostaki, Matthew, Sylvia | wine experts team | |
 | zoe | advisor | |
 | Jim | ML advisor | not in Jira assignee data |
 | Angel Vossough | CEO | GitHub **avosmod8** (confirmed) — #2 producer, 132 merged/30d · exempt |
-| Arsalan | CTO | GitHub arsalanvm (unconfirmed) · exempt from hourly-incentive metrics |
+| Arsalan | CTO | GitHub **arsalanvm** (confirmed) · exempt from hourly-incentive metrics |
 
 ## Former / inactive — 21 names still present in board data
 
@@ -53,16 +53,16 @@ attribution flaw, demonstrated by the data itself.
 
 ## Unmapped GitHub logins (confirm or retire)
 
-`tungph`, `Morse-vv`, `lawrnsfeng`, `VossBackend` — real PR authors, no owner
-named. `VossQABot`, `devin-ai-integration`, `github-actions` are bots (already
-filtered).
+`lawrnsfeng` and `VossBackend` — real PR authors, still no owner named; likely
+former staff or service accounts, confirm or retire their access. `VossQABot`,
+`devin-ai-integration`, `github-actions` are bots (already filtered).
 
 ## Env values (paste-ready; unconfirmed logins marked)
 
 ```
 JIRA_ROLES="platform=Tam;backend=Shawn;frontend=Mohsen Davoudi,David;frontend-mobile=Farid Shahidi;mobile=Ali;crm-backend=Jal Haidar,Anouar Kacem;qa-automated=Santi Caamaño;qa-manual=Dina QA;ai-recommendation=Mehdi Ordikhani;infrastructure=Gaston;designer=Robert Surpateanu,Alesya Kasovich;pm=Mihai Manea;seo=Igor Taborsak;wine=Evmorfia Kostaki,Matthew,Sylvia;advisor=zoe;exec=Angel Vossough,Arsalan"
 
-GITHUB_LOGIN_MAP="Tam=Phelan164;David=ahref13;Angel Vossough=avosmod8;Arsalan=arsalanvm;Mohsen Davoudi=MohsenStack;Farid Shahidi=faridsh69;Ali=alivinovoss;Jal Haidar=jal-vino;Anouar Kacem=anouar-source;Santi Caamaño=SantiVinoVoss;Gaston=gsalgado-cloudacio;Robert Surpateanu=robertsurpe"
+GITHUB_LOGIN_MAP="Tam=Phelan164;Shawn=tungph;David=ahref13;Mehdi Ordikhani=Morse-vv;Angel Vossough=avosmod8;Arsalan=arsalanvm;Mohsen Davoudi=MohsenStack;Farid Shahidi=faridsh69;Ali=alivinovoss;Jal Haidar=jal-vino;Anouar Kacem=anouar-source;Santi Caamaño=SantiVinoVoss;Gaston=gsalgado-cloudacio;Robert Surpateanu=robertsurpe"  # all confirmed by Angel 16 Aug 2026
 ```
 
 ## Consequences for the plan (feeds DEVIN_PLAN.md)
@@ -83,3 +83,12 @@ GITHUB_LOGIN_MAP="Tam=Phelan164;David=ahref13;Angel Vossough=avosmod8;Arsalan=ar
    fold frontend+mobile for comparison purposes).
 5. Angel and Arsalan appear in output charts but are exempt from
    contractor-incentive metrics (estimate padding, hours ratios).
+
+## Late confirmations (16 Aug, second pass)
+
+Every login above is now **confirmed by Angel** except `lawrnsfeng` and
+`VossBackend`, which remain unowned. Devin reviews **every PR in every repo**,
+so AI-review findings can be a *scored* component for all code roles, not
+evidence-only. Integrity-page access: Angel said "everyone — maybe we should
+change that"; recommendation recorded in DEVIN_PLAN (two-tier access), decision
+pending.
