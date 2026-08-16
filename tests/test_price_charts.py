@@ -68,7 +68,21 @@ def test_every_chart_states_its_own_text_size():
     finally:
         theme.st = st_module
     assert figure.layout.font.size == theme.CHART_FONT
-    assert figure.layout.title.font.size == theme.CHART_TITLE_FONT
+    # A title size is set on a chart that has a title, and only then. Setting it
+    # unconditionally used to leave a ``title`` object carrying a font and no
+    # text, which Streamlit's frontend rewrote into the literal word
+    # "undefined" above the Ticket Composition chart in production.
+    assert figure.layout.title.text is None
+    titled = go.Figure()
+    titled.update_layout(title=dict(text="Open tickets by status"))
+    theme.st = type(
+        "capture", (), {"plotly_chart": staticmethod(lambda fig, **kw: None)}
+    )
+    try:
+        theme.plot(titled, width="stretch")
+    finally:
+        theme.st = st_module
+    assert titled.layout.title.font.size == theme.CHART_TITLE_FONT
     # And the caller's own arguments still reach Streamlit untouched.
     assert drawn == {"width": "stretch", "key": "anything"}
 

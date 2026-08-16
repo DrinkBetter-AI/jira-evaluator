@@ -5,3 +5,30 @@ backgroundColor = "#ffffff"
 secondaryBackgroundColor = "#f8fafc"
 textColor = "#111827"
 font = "sans serif"
+# The root font size, and the only lever that reaches a dataframe. `st.dataframe`
+# is drawn on a canvas by glide-data-grid, so no stylesheet can touch its cell
+# text; the grid sizes itself at 0.875 of the root, which at the default 16px is
+# the 14px that made every table on this dashboard smaller than the prose
+# explaining it. 17 puts a cell at just under 15px and lifts Streamlit's own
+# widget text with it, which is the "fonts are too small" complaint answered at
+# the root rather than one selector at a time. theme.py's own sizes are declared
+# in pixels precisely so they are not scaled a second time by this.
+baseFontSize = 17
+# The header row cannot be given a heavier weight from here - it, too, is canvas -
+# so it is separated from the data by a tint instead.
+dataframeHeaderBackgroundColor = "#f1f5f9"
+dataframeBorderColor = "#e5e7eb"
+# The same eight hues as theme.CATEGORICAL, in the same order. Streamlit applies
+# these to Plotly, Altair and Vega-Lite alike, which is what makes an
+# `st.bar_chart` and a `theme.plot` figure on the same page agree; keep the two
+# lists in step, since nothing checks one against the other at runtime.
+chartCategoricalColors = [
+    "#2563eb",
+    "#e69f00",
+    "#009e73",
+    "#5b21b6",
+    "#56b4e9",
+    "#d55e00",
+    "#cc79a7",
+    "#6b7280",
+]
