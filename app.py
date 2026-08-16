@@ -1343,8 +1343,10 @@ def annotated_board(df: pd.DataFrame, assignee: str) -> pd.DataFrame:
         owned = estimate_policy(owned, BACKLOG_STATUSES)
     owned["tier"] = owned.apply(_attention_tier, axis=1)
     owned["devin"] = owned.apply(_devin_can_handle, axis=1)
+    # A nullable boolean column hands back pd.NA, which cannot be asked whether
+    # it is true; an unknown estimate is not one.
     owned["has_estimate_label"] = owned["has_estimate"].map(
-        lambda value: "Yes" if bool(value) else "No"
+        lambda value: "Yes" if not pd.isna(value) and bool(value) else "No"
     )
     owned["sprint_label"] = owned.apply(_sprint_label, axis=1)
     owned["key_url"] = owned["key"].map(_jira_ticket_url)
@@ -1414,7 +1416,7 @@ def engineer_page(
                     # reads as a ticket judged to cost no work.
                     estimate_hours=(
                         _as_number(row.get("estimate_hours"))
-                        if bool(row.get("has_estimate", True))
+                        if _estimated(row)
                         else None
                     ),
                     devin=str(row.get("devin") or ""),
@@ -1435,6 +1437,16 @@ def _as_number(value) -> float | None:
     """A float, or None where the field was missing rather than zero."""
     number = pd.to_numeric(value, errors="coerce")
     return None if pd.isna(number) else float(number)
+
+
+def _estimated(row: pd.Series) -> bool:
+    """Whether a ticket carries an estimate, reading a missing flag as no.
+
+    ``has_estimate`` can arrive as ``pd.NA`` from a nullable boolean column,
+    which cannot be asked whether it is true, and an unknown estimate is not one.
+    """
+    flag = row.get("has_estimate", True)
+    return False if pd.isna(flag) else bool(flag)
 
 
 def _render_engineer_handout(

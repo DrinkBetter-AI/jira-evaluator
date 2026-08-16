@@ -167,6 +167,19 @@ def test_a_ticket_with_no_estimate_shows_blank_rather_than_a_zero():
     assert "<td class=\"key\">MB-2</td>" in html
 
 
+def test_an_unknown_estimate_flag_is_read_as_no_estimate():
+    """A nullable boolean column hands back pd.NA, which cannot be asked."""
+    rows = board().assign(
+        has_estimate=pd.array([True, pd.NA, False], dtype="boolean"),
+        estimate_hours=[2.0, 5.0, 1.0],
+    )
+    page = dashboard.engineer_page("Santi Caamaño", dashboard.annotated_board(rows, "Santi Caamaño"))
+    assert {t.key: t.estimate_hours for t in page.tickets} == {
+        "MB-8834": 2.0,
+        "MB-8594": None,
+    }
+
+
 def test_a_summary_that_contains_markup_is_escaped():
     nasty = engineer_letter.Ticket(
         key="MB-3",
