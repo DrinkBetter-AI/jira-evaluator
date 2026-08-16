@@ -1059,10 +1059,11 @@ def requested_person(assignees: list[str]) -> str | None:
     for name in assignees:
         if str(name).strip().lower() == wanted.lower():
             return name
-    for name in assignees:
-        if same_person(wanted, name):
-            return name
-    return None
+    # Loose matching only where it names one person: "Mehdi" fits everyone
+    # called Mehdi, and a link that opens a colleague's page is worse than one
+    # that opens the usual default.
+    loose = [name for name in assignees if same_person(wanted, name)]
+    return loose[0] if len(loose) == 1 else None
 
 
 def person_link(person: str) -> str:

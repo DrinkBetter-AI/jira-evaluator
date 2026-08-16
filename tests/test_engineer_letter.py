@@ -218,6 +218,16 @@ def test_a_link_that_names_an_engineer_is_matched_to_them(monkeypatch):
     assert dashboard.requested_person(people) is None
 
 
+def test_a_first_name_two_people_share_opens_neither_page(monkeypatch):
+    """Better the usual default than a colleague's tickets, hours and score."""
+    people = ["Mehdi Karimi", "Mehdi Ordikhani Fard"]
+    monkeypatch.setattr(dashboard.st, "query_params", {"person": "Mehdi"})
+    assert dashboard.requested_person(people) is None
+    # Named in full, the same link is unambiguous again.
+    monkeypatch.setattr(dashboard.st, "query_params", {"person": "Mehdi Karimi"})
+    assert dashboard.requested_person(people) == "Mehdi Karimi"
+
+
 def test_the_shared_link_keeps_the_address_the_reader_reached_us_on(monkeypatch):
     monkeypatch.setattr(
         dashboard.st,
