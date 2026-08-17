@@ -55,6 +55,8 @@ import kpi
 import integrity
 import next_actions
 import pr_hygiene
+import pr_quality
+import theme_html
 from capacity import (
     capacity_table,
     same_person,
@@ -10626,34 +10628,346 @@ def _render_delivery_page() -> None:
     _download_report(slot, TAB_ENGINEERING)
 
 
-def _render_code_page() -> None:
-    """Pull requests: what is stuck, what nobody looked at, and how it was written."""
+def _exclude_repos() -> tuple[frozenset[str], str]:
+    """The repos config removes from PR metrics, and the caption naming them.
+
+    Angel's scratch repos are not team output, but dropping them silently would
+    let a filtered figure read as a complete one — the disabled-merchant mistake.
+    The caption is the contract: wherever the filter applies, the page says so.
+    """
+    raw = os.getenv("GITHUB_EXCLUDE_REPOS", "")
+    names = frozenset(n.strip() for n in raw.split(",") if n.strip())
+    caption = (
+        "Excludes " + ", ".join(f"`{n}`" for n in sorted(names)) + " — "
+        "founder scratch repos, stated here so a filtered number is never read "
+        "as a complete one."
+        if names
+        else ""
+    )
+    return names, caption
+
+
+def _team_prs(prs: pd.DataFrame) -> pd.DataFrame:
+    """PRs that count: excluded repos out, drafts kept but flagged for callers."""
+    if prs.empty:
+        return prs
+    excluded, _ = _exclude_repos()
+    if excluded and "repo" in prs.columns:
+        prs = prs[~prs["repo"].astype(str).isin(excluded)]
+    return prs
+
+
+def _repo_review_coverage(open_prs: pd.DataFrame) -> pd.DataFrame:
+    """Per repo: how much open work carries no approving review.
+
+    The org-wide 92% says the review culture is missing; this says where. A repo
+    at 100% is one with no assigned reviewer, which is a different fix from
+    chasing individuals — and the fix is per-repo, so the cut must be too.
+    """
+    if open_prs.empty or "repo" not in open_prs.columns:
+        return pd.DataFrame(
+            columns=["repo", "open_prs", "unreviewed", "unreviewed_share",
+                     "never_reviewed", "median_age_days"]
+        )
+    live = open_prs
+    if "is_draft" in live.columns:
+        live = live[~live["is_draft"].fillna(False).astype(bool)]
+    if live.empty:
+        return pd.DataFrame(
+            columns=["repo", "open_prs", "unreviewed", "unreviewed_share",
+                     "never_reviewed", "median_age_days"]
+        )
+    approvals = live.get("approving_reviews", pd.Series(0, index=live.index)).fillna(0).astype(int)
+    reviews = live.get("total_reviews", pd.Series(0, index=live.index)).fillna(0).astype(int)
+    age = live.get("age_days", pd.Series(0.0, index=live.index)).fillna(0.0)
+    frame = pd.DataFrame(
+        {
+            "repo": live["repo"].astype(str),
+            "unreviewed": (approvals == 0).astype(int),
+            "never_reviewed": (reviews == 0).astype(int),
+            "age_days": age,
+        }
+    )
+    out = (
+        frame.groupby("repo")
+        .agg(
+            open_prs=("unreviewed", "size"),
+            unreviewed=("unreviewed", "sum"),
+            never_reviewed=("never_reviewed", "sum"),
+            median_age_days=("age_days", "median"),
+        )
+        .reset_index()
+    )
+    out["unreviewed_share"] = out["unreviewed"] / out["open_prs"]
+    # Worst first: the repo with the least review is the point of the chart.
+    return out.sort_values(
+        ["unreviewed_share", "open_prs"], ascending=[False, False]
+    ).reset_index(drop=True)
+
+
+def _render_code_kpis(open_prs: pd.DataFrame, merged_prs: pd.DataFrame) -> None:
+    """The five numbers the mockup opens with, from the frames already fetched."""
+    signals = _open_pr_signals(open_prs, None)
+    drafts_total = int(len(open_prs))
+    share = (signals["unapproved"] / signals["total"]) if signals["total"] else 0.0
+    oldest = signals["oldest_unreviewed_days"]
+
+    oldest_repo = ""
+    if not open_prs.empty and "repo" in open_prs.columns:
+        live = open_prs
+        if "is_draft" in live.columns:
+            live = live[~live["is_draft"].fillna(False).astype(bool)]
+        reviews = live.get("total_reviews", pd.Series(0, index=live.index)).fillna(0).astype(int)
+        never = live[reviews == 0]
+        if not never.empty:
+            oldest_repo = str(never.loc[never["age_days"].idxmax()].get("repo", ""))
+
+    selfm = pr_quality.self_merge(merged_prs)
+    self_merged = int(selfm["self_merged"].sum()) if not selfm.empty else 0
+    merged_total = int(selfm["merged_prs"].sum()) if not selfm.empty else 0
+    self_share = (self_merged / merged_total) if merged_total else 0.0
+
+    theme_html.tiles(
+        [
+            (
+                "Open PRs",
+                str(signals["total"]),
+                f"non-draft · of {drafts_total} including drafts",
+                "neutral",
+            ),
+            (
+                "No approving review",
+                str(signals["unapproved"]),
+                f"{share:.0%} of open · {signals['never_reviewed']} never reviewed",
+                "danger" if share > 0.5 else "warning",
+            ),
+            (
+                "Nobody asked",
+                str(signals["no_reviewer_asked"]),
+                f"> {TODAY_NO_REVIEWER_DAYS:.0f} days old · no request, no review",
+                "danger" if signals["no_reviewer_asked"] else "good",
+            ),
+            (
+                "Oldest unreviewed",
+                f"{oldest:.0f}d" if oldest else "—",
+                oldest_repo or "no unreviewed PRs",
+                "warning" if oldest else "good",
+            ),
+            (
+                "Self-merged · 30d",
+                str(self_merged),
+                f"{self_share:.0%} of merges · author approved own work" if merged_total else "no merges in window",
+                "danger" if self_share > 0.25 else "neutral",
+            ),
+        ]
+    )
+
+
+def _render_repo_coverage(open_prs: pd.DataFrame) -> None:
+    st.subheader("Review coverage by repo")
     st.caption(
-        "Every repository in the org. A draft is excluded from the review counts — "
-        "it has not been handed to a reviewer yet."
+        "Share of open PRs with no approving review — worst first. This is where "
+        "review culture is missing, not who is slow."
+    )
+    coverage = _repo_review_coverage(open_prs)
+    if coverage.empty:
+        st.info("No open pull requests to measure.")
+        return
+    never = coverage[coverage["unreviewed_share"] >= 1.0]
+    footer = (
+        f"{len(never)} repo(s) have no approving review on any open PR: "
+        + ", ".join(never["repo"].tolist())
+        + ". Those are the ones with no assigned reviewer, not the ones with bad code."
+        if len(never)
+        else ""
+    )
+    theme_html.hbars(
+        [
+            (row.repo, float(row.unreviewed_share * 100), f"{row.unreviewed_share:.0%}")
+            for row in coverage.itertuples()
+        ],
+        title="",
+        footer=footer,
+        severity=True,
+    )
+
+
+def _share_rank_bar(shares: pd.Series):
+    """A rank bar over precomputed percentages, colored by severity."""
+    import plotly.graph_objects as go
+
+    values = shares.sort_values()
+    colors = [
+        "#e34948" if v >= 95 else "#eb6834" if v >= 70 else "#eda100" if v >= 40 else "#1baf7a"
+        for v in values
+    ]
+    figure = go.Figure(
+        go.Bar(
+            x=values.values,
+            y=[str(i) for i in values.index],
+            orientation="h",
+            marker_color=colors,
+            text=[f"{v:.0f}%" for v in values.values],
+            textposition="outside",
+        )
+    )
+    figure.update_layout(
+        height=max(240, 34 * len(values) + 90),
+        margin=dict(t=16, b=40, l=8, r=56),
+        showlegend=False,
+        bargap=0.28,
+    )
+    figure.update_xaxes(title_text="% of open PRs with no approving review", range=[0, 112])
+    figure.update_yaxes(title_text="", tickangle=0, automargin=True, type="category")
+    return figure
+
+
+def _render_stuck_queue(open_prs: pd.DataFrame, tickets: pd.DataFrame) -> None:
+    st.subheader("Stuck queue — open, no approving review, oldest first")
+    st.caption(
+        'Drafts excluded. A rejecting review still counts as attention, so '
+        '"reviews" of 0 is the harsher column.'
+    )
+    if open_prs.empty:
+        st.info("No open pull requests.")
+        return
+    live = open_prs
+    if "is_draft" in live.columns:
+        live = live[~live["is_draft"].fillna(False).astype(bool)]
+    approvals = live.get("approving_reviews", pd.Series(0, index=live.index)).fillna(0).astype(int)
+    stuck = live[approvals == 0].copy()
+    if stuck.empty:
+        st.success("Every open PR has an approving review.")
+        return
+    stuck = pr_hygiene.add_hygiene_fields(stuck, _known_project_keys(tickets))
+    stuck["asked"] = (
+        stuck.get("review_requests", pd.Series(0, index=stuck.index)).fillna(0).astype(int) > 0
+    ).map({True: "yes", False: "no"})
+    stuck = stuck.sort_values("age_days", ascending=False)
+    theme_html.table(
+        stuck,
+        [
+            ("url", "PR", "link"),
+            ("title", "Title", "text"),
+            ("author", "Author", "text"),
+            ("repo", "Repo", "text"),
+            ("age_days", "Age (d)", "num"),
+            ("total_reviews", "Reviews", "strong-num"),
+            ("asked", "Asked", "text"),
+            ("jira_key", "Ticket", "text"),
+        ],
+        title="",
+    )
+
+
+def _render_findings_and_citizenship(merged_prs: pd.DataFrame, open_prs: pd.DataFrame) -> None:
+    left, right = st.columns(2)
+    judged_pool = pd.concat([merged_prs, open_prs], ignore_index=True) if not merged_prs.empty or not open_prs.empty else pd.DataFrame()
+
+    with left:
+        st.subheader("Devin findings per author")
+        st.caption(
+            'Share of **judged** PRs where Devin requested changes. Judged is shown '
+            'so that "no findings" is never confused with "not reviewed".'
+        )
+        findings = pr_quality.devin_findings_by_author(judged_pool)
+        if findings.empty:
+            st.info("No AI-review data in the fetched PRs — needs the extended PR payload.")
+        else:
+            findings = findings.sort_values("prs_judged", ascending=False)
+            low_n = findings["prs_judged"] < 5
+            findings = findings.assign(
+                changes_requested_share=(findings["changes_requested_share"] * 100).round(0)
+            )
+            findings.loc[low_n, "changes_requested_share"] = float("nan")
+            st.dataframe(
+                findings[["author", "prs_judged", "prs_changes_requested", "changes_requested_share"]],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "author": st.column_config.TextColumn("Author"),
+                    "prs_judged": st.column_config.NumberColumn("Judged"),
+                    "prs_changes_requested": st.column_config.NumberColumn("Changes asked"),
+                    "changes_requested_share": st.column_config.NumberColumn(
+                        "Share", format="%d%%", help="Blank below 5 judged PRs — insufficient data."
+                    ),
+                },
+            )
+
+    with right:
+        st.subheader("Review citizenship")
+        st.caption(
+            "Reviews **given**. Two people carrying the review load for twelve "
+            "engineers is the 92% in one sentence."
+        )
+        citizens = pr_quality.review_citizenship(judged_pool)
+        if citizens.empty:
+            st.info("No review events in the fetched PRs — needs the extended PR payload.")
+        else:
+            citizens = citizens.sort_values("reviews_given", ascending=False)
+            st.dataframe(
+                citizens[
+                    ["reviewer", "reviews_given", "distinct_authors_reviewed",
+                     "median_hours_to_first_review"]
+                ],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "reviewer": st.column_config.TextColumn("Person"),
+                    "reviews_given": st.column_config.NumberColumn("Given"),
+                    "distinct_authors_reviewed": st.column_config.NumberColumn("Authors"),
+                    "median_hours_to_first_review": st.column_config.NumberColumn(
+                        "TTFR (h)", format="%.0f"
+                    ),
+                },
+            )
+
+
+def _render_code_page() -> None:
+    """PR health across the team's repos, in the mockup's order.
+
+    Five numbers, then where review is missing, then the queue of what is stuck,
+    then how the work was written. The old PR sections remain reachable on
+    /engineering; this page is the designed view of the same data.
+    """
+    theme_html.css()
+    _, exclusion_caption = _exclude_repos()
+    st.caption(
+        "PR health across all team repos. Drafts are excluded from review counts — "
+        "a draft has not been handed to a reviewer yet."
+        + (f" {exclusion_caption}" if exclusion_caption else "")
     )
     bundle, view, slot = _engineering_context()
     if _one_person_instead(bundle, view, slot):
         return
 
-    df = bundle.df
-    _render_pr_section(
-        bundle.open_prs, bundle.github_ready, bundle.github_error, bundle.open_count_exact
-    )
+    if not bundle.github_ready:
+        st.error(
+            "GitHub is unavailable, so this page cannot be drawn. "
+            + (f"({bundle.github_error})" if bundle.github_error else "Set DASHBOARD_GITHUB_TOKEN.")
+        )
+        _download_report(slot, TAB_ENGINEERING)
+        return
+
+    open_prs = _team_prs(bundle.open_prs)
+    merged_prs = _team_prs(bundle.merged_prs)
+
+    _render_code_kpis(open_prs, merged_prs)
     st.divider()
-    # Every ticket, not the scoped slice: a PR belongs to the org whichever team or
-    # person the reader is currently looking at.
+    _render_repo_coverage(open_prs)
+    st.divider()
+    _render_stuck_queue(open_prs, bundle.df)
+    st.divider()
+    _render_findings_and_citizenship(merged_prs, open_prs)
+    st.divider()
+    # Traceability of tickets to PRs stays: it is the bridge to the Jira side.
     _render_pr_hygiene(
-        bundle.open_prs,
+        open_prs,
         bundle.github_ready,
         bundle.github_error,
-        _known_project_keys(df),
-        tickets=df,
+        _known_project_keys(bundle.df),
+        tickets=bundle.df,
     )
-    st.divider()
-    # Backlog-inclusive on purpose: a backlog ticket is the best kind to hand off,
-    # and it is where badly written tickets accumulate unseen.
-    _render_ticket_quality(view.filtered)
     _download_report(slot, TAB_ENGINEERING)
 
 
