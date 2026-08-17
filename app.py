@@ -9946,10 +9946,24 @@ def _render_attention_band(
     )
 
 
+_ACTION_QUEUE_NAMES = {
+    "review": "the open PRs",
+    "triage": "the triage queue",
+    "ownership": "the unowned tickets",
+    "stalled": "the stalled tickets",
+}
+
+
 def _action_queues(
     bundle: "_EngineeringData", board: pd.DataFrame
-) -> dict[str, list[next_actions.Action]]:
-    """Every tile's number turned into the named work behind it."""
+) -> tuple[dict[str, list[next_actions.Action]], set[str]]:
+    """Every tile's number turned into the named work behind it, and what could not be read.
+
+    A failed read leaves no key in ``data`` at all, which makes an empty queue
+    and "there is nothing to do" indistinguishable. The second value keeps them
+    apart: an outage announced as an all-clear is the one failure of this section
+    a reader has no way of detecting.
+    """
     stalled, _ = _stalled_rows(board)
     # The triage read is the raw Jira frame - it has never been through
     # add_ticket_health_fields, so it carries a created date and no age. Enriched
@@ -9958,6 +9972,11 @@ def _action_queues(
     triage = _as_frame(bundle.data.get("triage_stuck"))
     if not triage.empty:
         triage = add_ticket_health_fields(triage)
+    unknown = set()
+    if not bundle.github_ready:
+        unknown.add("review")
+    if bundle.data.get("triage_stuck") is None:
+        unknown.add("triage")
     return {
         "review": (
             next_actions.review_actions(bundle.open_prs) if bundle.github_ready else []
@@ -9967,7 +9986,7 @@ def _action_queues(
             _ownerless_rows(board), url_for=_jira_ticket_url
         ),
         "stalled": next_actions.stalled_actions(stalled, url_for=_jira_ticket_url),
-    }
+    }, unknown
 
 
 def _render_action_list(actions: list[next_actions.Action]) -> None:
@@ -10000,7 +10019,10 @@ def _render_action_queue(
     """
     with st.expander(f"{label} ({'unknown' if unknown else len(actions)})"):
         if unknown:
-            st.warning("This could not be read, so it is unknown - not clear.")
+            st.warning(
+                "This could not be read, so it is unknown rather than clear — "
+                "try Refresh Data."
+            )
             return
         if not actions:
             st.success(empty)
@@ -10017,7 +10039,9 @@ def _render_action_queue(
 
 
 def _render_next_actions(
-    queues: dict[str, list[next_actions.Action]], *, github_ready: bool = True
+    queues: dict[str, list[next_actions.Action]],
+    *,
+    unknown: set[str] | None = None,
 ) -> None:
     """What to do, before any number saying why.
 
@@ -10028,17 +10052,21 @@ def _render_next_actions(
     every item is the link to the thing itself.
     """
     st.subheader("Do these next")
+    unknown = set(unknown or ())
     top = next_actions.rank(queues, limit=5)
     if not top:
-        if github_ready:
-            st.success("Nothing is waiting on a decision: no unreviewed PR, no untriaged ticket, nothing ownerless or stalled.")
-        else:
-            # An unreadable GitHub is not an empty review queue, and saying so
-            # would hand a reader an all-clear built out of an outage.
-            st.warning(
-                "No Jira ticket needs a decision. The PRs could not be read, so "
-                "whether any is waiting on a review is unknown."
+        if unknown:
+            # An unreadable source is not an empty queue: presenting an outage as
+            # an all-clear is the one thing here a reader cannot check.
+            missing = " and ".join(
+                sorted(_ACTION_QUEUE_NAMES[kind] for kind in unknown)
             )
+            st.warning(
+                f"Nothing found that needs a decision — but {missing} could not "
+                "be read, so this list is incomplete rather than empty."
+            )
+        else:
+            st.success("Nothing is waiting on a decision: no unreviewed PR, no untriaged ticket, nothing ownerless or stalled.")
         return
     st.caption("Ranked by how long each has been waiting, one per problem before a second from any.")
     _render_action_list(top)
@@ -10046,17 +10074,14 @@ def _render_next_actions(
     _render_action_queue(
         "Open PRs with no approving review",
         queues["review"],
-        empty=(
-            "Every open PR has an approving review."
-            if github_ready
-            else ""
-        ),
-        unknown=not github_ready,
+        empty="Every open PR has an approving review.",
+        unknown="review" in unknown,
     )
     _render_action_queue(
         f"Tickets stuck in triage > {TRIAGE_STUCK_HOURS:.0f}h",
         queues["triage"],
         empty="Nothing has been sitting in triage.",
+        unknown="triage" in unknown,
     )
     _render_action_queue(
         "Open tickets with no owner",
@@ -10102,9 +10127,8 @@ def _render_today_page() -> None:
     )
 
     st.divider()
-    _render_next_actions(
-        _action_queues(bundle, df), github_ready=bool(bundle.github_ready)
-    )
+    queues, unreadable = _action_queues(bundle, df)
+    _render_next_actions(queues, unknown=unreadable)
 
     st.divider()
     st.subheader("This week")

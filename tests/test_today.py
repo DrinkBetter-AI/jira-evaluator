@@ -7,6 +7,7 @@ emptying the stalled queue, backlog tickets dragging estimate coverage down.
 
 from __future__ import annotations
 
+import types
 import pandas as pd
 import pytest
 
@@ -342,3 +343,34 @@ def test_a_stalled_row_carries_the_clock_it_was_selected_on():
     assert rows[next_actions.STALLED_AGE_COLUMN].iloc[0] > 30
     action = next_actions.stalled_actions(rows, url_for=lambda key: f"https://j/{key}")[0]
     assert "no movement in 1d" not in action.detail
+
+
+def test_a_failed_read_is_unknown_and_not_an_all_clear():
+    """An outage must not be handed to a reader as "nothing to do".
+
+    ``_gather`` leaves a failed read out of ``data`` entirely, so the empty
+    queue it produces is indistinguishable from a clear one unless the page is
+    told which sources it could not read.
+    """
+    bundle = types.SimpleNamespace(
+        data={},  # every read failed, triage_stuck included
+        github_ready=False,
+        open_prs=pd.DataFrame(),
+    )
+    board = pd.DataFrame(
+        {"key": ["ENG-1"], "assignee": ["Tam"], "status": ["In Progress"]}
+    )
+    queues, unknown = app._action_queues(bundle, board)
+    assert unknown == {"review", "triage"}
+    assert queues["review"] == [] and queues["triage"] == []
+    assert set(app._ACTION_QUEUE_NAMES) == set(queues)
+
+
+def test_a_triage_read_that_worked_and_found_nothing_is_not_unknown():
+    bundle = types.SimpleNamespace(
+        data={"triage_stuck": pd.DataFrame()},
+        github_ready=True,
+        open_prs=pd.DataFrame(),
+    )
+    _, unknown = app._action_queues(bundle, pd.DataFrame())
+    assert unknown == set()
