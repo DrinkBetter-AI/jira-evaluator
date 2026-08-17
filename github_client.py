@@ -120,13 +120,20 @@ def _hold_off(seconds: float) -> None:
         _NOT_BEFORE = max(_NOT_BEFORE, time.monotonic() + seconds)
 
 
-def _await_turn(allowance: float) -> float:
-    """Sleep until the shared door opens, spending no more than ``allowance``."""
+def _await_turn(allowance: float) -> float | None:
+    """Sleep until the shared door opens, or ``None`` if ``allowance`` is too small.
+
+    A reader that cannot afford the whole wait does not spend part of it and then
+    ask anyway: that is a request made during the ban, which is what shut the door
+    in the first place. It gives up its turn instead, and the page says so.
+    """
     with _STATE_LOCK:
         delay = _NOT_BEFORE - time.monotonic()
-    delay = min(max(delay, 0.0), max(allowance, 0.0))
-    if delay:
-        time.sleep(delay)
+    if delay <= 0:
+        return 0.0
+    if delay > allowance:
+        return None
+    time.sleep(delay)
     return delay
 
 
@@ -198,15 +205,21 @@ def _graphql(token: str, query: str, variables: dict) -> dict:
     guessing between exactly those.
 
     The wait is shared rather than private: a refusal shuts the door for every
-    reader until the instant GitHub named, and the door is checked while holding
-    the lock, immediately before the request goes out. Checking it earlier would
-    let the dozen readers already queued past a door that shut while they waited,
-    and each would spend an attempt learning what the first one already knew.
+    reader until the instant GitHub named - including when this read is the one
+    giving up, because the window outlives the reader that found it - and the door
+    is checked while holding the lock, immediately before the request goes out.
+    Checking it earlier would let the dozen readers already queued past a door
+    that shut while they waited, and each would spend an attempt learning what the
+    first one already knew.
     """
     spent = 0.0
+    response = None
     for attempt in range(_RETRY_ATTEMPTS):
         with _REQUEST_LOCK:
-            spent += _await_turn(_RETRY_BUDGET_SECONDS - spent)
+            waited = _await_turn(_RETRY_BUDGET_SECONDS - spent)
+            if waited is None:
+                break
+            spent += waited
             response = requests.post(
                 GITHUB_GRAPHQL_URL,
                 json={"query": query, "variables": variables},
@@ -216,12 +229,21 @@ def _graphql(token: str, query: str, variables: dict) -> dict:
                 },
                 timeout=30,
             )
-        if not _throttled(response) or attempt == _RETRY_ATTEMPTS - 1:
+        if not _throttled(response):
             break
         pause = _retry_after(response, attempt)
-        if pause is None or spent + pause > _RETRY_BUDGET_SECONDS:
+        _hold_off(pause if pause is not None else _RETRY_CEILING_SECONDS)
+        if (
+            pause is None
+            or attempt == _RETRY_ATTEMPTS - 1
+            or spent + pause > _RETRY_BUDGET_SECONDS
+        ):
             break
-        _hold_off(pause)
+    if response is None:
+        raise GitHubConfigError(
+            "GitHub is throttling this token; the reads were abandoned rather "
+            "than sent during the wait it asked for. Reload in a minute."
+        )
     if response.status_code >= 400:
         reason = " ".join(response.text.split())[:300]
         raise GitHubConfigError(

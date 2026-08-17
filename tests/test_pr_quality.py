@@ -737,3 +737,33 @@ def test_a_reader_already_queued_does_not_ask_through_a_shut_door(monkeypatch, c
     )
     github_client._graphql("t", "{}", {})
     assert clock == [pytest.approx(11.0)]
+
+
+def test_giving_up_still_shuts_the_door_behind_it(monkeypatch, clock):
+    """The window outlives the reader that found it, so the others must see it."""
+    monkeypatch.setattr(
+        github_client.requests,
+        "post",
+        lambda *a, **k: _Response(
+            403, '{"message":"secondary rate limit"}', {"retry-after": "60"}
+        ),
+    )
+    with pytest.raises(github_client.GitHubConfigError):
+        github_client._graphql("t", "{}", {})
+    with github_client._STATE_LOCK:
+        assert github_client._NOT_BEFORE > github_client.time.monotonic()
+
+
+def test_a_reader_who_cannot_afford_the_wait_does_not_ask_anyway(monkeypatch, clock):
+    """Half a wait then a request is a request made during the ban."""
+    asked: list[int] = []
+    monkeypatch.setattr(
+        github_client.requests,
+        "post",
+        lambda *a, **k: asked.append(1) or _Response(200),
+    )
+    github_client._hold_off(github_client._RETRY_BUDGET_SECONDS + 30)
+    with pytest.raises(github_client.GitHubConfigError, match="throttling"):
+        github_client._graphql("t", "{}", {})
+    assert asked == []
+    assert clock == []
