@@ -13,6 +13,7 @@ import pytest
 import app
 import hygiene
 import theme
+import next_actions
 
 
 def _prs(**columns) -> pd.DataFrame:
@@ -304,3 +305,40 @@ def test_stalled_is_still_status_age_after_the_backlog_rows_are_dropped():
     rows, clock = app._stalled_rows(board)
     assert clock == "status age"
     assert rows["key"].tolist() == ["ENG-2"]
+
+
+def test_a_stalled_row_carries_the_clock_it_was_selected_on():
+    """A ticket picked for 60 days of no movement must not claim one day.
+
+    ``idle_days`` is reset by any field edit, which is exactly why the tile
+    measures status age - so the age travels with the rows.
+    """
+    df = pd.DataFrame(
+        {
+            "key": ["ENG-1"],
+            "assignee": ["Tam"],
+            "status": ["In Progress"],
+            "idle_days": [1.0],
+            "created": [pd.Timestamp("2026-01-01T00:00:00Z")],
+            "changelog": [
+                [
+                    {
+                        "created": "2026-01-02T00:00:00.000+0000",
+                        "items": [
+                            {
+                                "field": "status",
+                                "fromString": "To Do",
+                                "toString": "In Progress",
+                            }
+                        ],
+                        "author": {"displayName": "Tam"},
+                    }
+                ]
+            ],
+        }
+    )
+    rows, clock = app._stalled_rows(df)
+    assert clock == "status age"
+    assert rows[next_actions.STALLED_AGE_COLUMN].iloc[0] > 30
+    action = next_actions.stalled_actions(rows, url_for=lambda key: f"https://j/{key}")[0]
+    assert "no movement in 1d" not in action.detail

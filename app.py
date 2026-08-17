@@ -9805,11 +9805,17 @@ def _stalled_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
             # Backlog row was dropped. Asked by label, pandas refuses the mask
             # and the whole measurement silently fell through to edit age.
             keep = (column >= TODAY_STALLED_DAYS).fillna(False).to_numpy()
-            return df[keep], "status age"
+            rows = df[keep].copy()
+            # The age these rows were *chosen* on travels with them, so anything
+            # reporting the wait quotes the same clock the tile measured.
+            rows[next_actions.STALLED_AGE_COLUMN] = column.to_numpy()[keep]
+            return rows, "status age"
     except Exception:  # noqa: BLE001 - a changelog we cannot parse must not blank the page
         logger.exception("status_age_days failed; falling back to edit age")
     idle = df.get("idle_days", pd.Series(0.0, index=df.index)).fillna(0.0)
-    return df[idle >= TODAY_STALLED_DAYS], "edit age (no changelog)"
+    rows = df[idle >= TODAY_STALLED_DAYS].copy()
+    rows[next_actions.STALLED_AGE_COLUMN] = idle[idle >= TODAY_STALLED_DAYS]
+    return rows, "edit age (no changelog)"
 
 
 def _stalled_count(df: pd.DataFrame) -> tuple[int, str]:
@@ -9980,10 +9986,22 @@ def _render_action_list(actions: list[next_actions.Action]) -> None:
 
 
 def _render_action_queue(
-    label: str, actions: list[next_actions.Action], *, empty: str
+    label: str,
+    actions: list[next_actions.Action],
+    *,
+    empty: str,
+    unknown: bool = False,
 ) -> None:
-    """One tile's work, in an expander, with every row clickable."""
-    with st.expander(f"{label} ({len(actions)})"):
+    """One tile's work, in an expander, with every row clickable.
+
+    ``unknown`` is the difference between "there is none" and "we could not
+    look": a queue that is empty because its source failed must not be reported
+    as clear.
+    """
+    with st.expander(f"{label} ({'unknown' if unknown else len(actions)})"):
+        if unknown:
+            st.warning("This could not be read, so it is unknown - not clear.")
+            return
         if not actions:
             st.success(empty)
             return
@@ -9998,7 +10016,9 @@ def _render_action_queue(
         )
 
 
-def _render_next_actions(queues: dict[str, list[next_actions.Action]]) -> None:
+def _render_next_actions(
+    queues: dict[str, list[next_actions.Action]], *, github_ready: bool = True
+) -> None:
     """What to do, before any number saying why.
 
     The tiles above are counts, and a count is not a move: a reader was told 75
@@ -10010,7 +10030,15 @@ def _render_next_actions(queues: dict[str, list[next_actions.Action]]) -> None:
     st.subheader("Do these next")
     top = next_actions.rank(queues, limit=5)
     if not top:
-        st.success("Nothing is waiting on a decision: no unreviewed PR, no untriaged ticket, nothing ownerless or stalled.")
+        if github_ready:
+            st.success("Nothing is waiting on a decision: no unreviewed PR, no untriaged ticket, nothing ownerless or stalled.")
+        else:
+            # An unreadable GitHub is not an empty review queue, and saying so
+            # would hand a reader an all-clear built out of an outage.
+            st.warning(
+                "No Jira ticket needs a decision. The PRs could not be read, so "
+                "whether any is waiting on a review is unknown."
+            )
         return
     st.caption("Ranked by how long each has been waiting, one per problem before a second from any.")
     _render_action_list(top)
@@ -10018,7 +10046,12 @@ def _render_next_actions(queues: dict[str, list[next_actions.Action]]) -> None:
     _render_action_queue(
         "Open PRs with no approving review",
         queues["review"],
-        empty="Every open PR has an approving review.",
+        empty=(
+            "Every open PR has an approving review."
+            if github_ready
+            else ""
+        ),
+        unknown=not github_ready,
     )
     _render_action_queue(
         f"Tickets stuck in triage > {TRIAGE_STUCK_HOURS:.0f}h",
@@ -10069,7 +10102,9 @@ def _render_today_page() -> None:
     )
 
     st.divider()
-    _render_next_actions(_action_queues(bundle, df))
+    _render_next_actions(
+        _action_queues(bundle, df), github_ready=bool(bundle.github_ready)
+    )
 
     st.divider()
     st.subheader("This week")

@@ -179,11 +179,23 @@ def ownership_actions(ownerless: pd.DataFrame, *, url_for) -> list[Action]:
     return sorted(actions, key=lambda action: action.days, reverse=True)
 
 
+STALLED_AGE_COLUMN = "stalled_age_days"
+
+
 def stalled_actions(stalled: pd.DataFrame, *, url_for) -> list[Action]:
-    """Owned tickets that have not moved: their owner owes an answer."""
+    """Owned tickets that have not moved: their owner owes an answer.
+
+    Timed on the clock the rows were *selected* on, where the caller attached it:
+    ``idle_days`` is reset by any field edit, so a ticket picked out for not
+    having moved in sixty days would have claimed one day and been ranked last -
+    the page would have contradicted the tile that sent the reader to it.
+    """
     if stalled.empty:
         return []
-    idle = _days(stalled, "idle_days")
+    idle = _days(
+        stalled,
+        STALLED_AGE_COLUMN if STALLED_AGE_COLUMN in stalled.columns else "idle_days",
+    )
     actions = []
     for index, row in stalled.iterrows():
         key = str(row.get("key") or "").strip()

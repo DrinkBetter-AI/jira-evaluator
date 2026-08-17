@@ -189,3 +189,19 @@ def test_a_triage_frame_that_carries_no_age_column_still_yields_actions():
     actions = next_actions.triage_actions(triage, url_for=_url)
     assert [action.subject for action in actions] == ["MB-9"]
     assert actions[0].days == 0.0
+
+
+def test_stalled_wording_prefers_the_selection_clock_over_the_edit_clock():
+    stalled = pd.DataFrame(
+        [
+            {
+                "key": "ENG-1",
+                "assignee": "Tam",
+                "idle_days": 1.0,
+                next_actions.STALLED_AGE_COLUMN: 61.0,
+            }
+        ]
+    )
+    action = next_actions.stalled_actions(stalled, url_for=_url)[0]
+    assert action.detail == "no movement in 61d"
+    assert action.days == 61.0
