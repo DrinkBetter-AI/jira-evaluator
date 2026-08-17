@@ -46,6 +46,20 @@ def test_a_carried_scope_that_is_not_on_offer_falls_back():
     assert app._carried("scope", app.SCOPE_ORG, scopes) == app.SCOPE_ORG
 
 
+def test_a_team_whose_carried_names_have_left_falls_back_to_the_roster():
+    """An empty list means "no filter" for Status and "nobody" for a team.
+
+    Trimmed to nothing, the Team view would have opened showing no tickets at all
+    and asked the reader to re-pick everyone by hand.
+    """
+    _clear()
+    app._carry("team_members", ["Someone who closed everything"])
+    roster = ["Tam", "Mehdi"]
+    carried = app._carried("team_members", roster, roster)
+    assert carried == []
+    assert (carried or roster) == roster
+
+
 def test_a_number_carries_as_itself():
     _clear()
     app._carry("min_idle", 30)

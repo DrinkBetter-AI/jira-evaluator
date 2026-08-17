@@ -1362,10 +1362,14 @@ def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | No
 
     if scope == SCOPE_TEAM:
         defaults = _roster_matches(ORG_TEAM_MEMBERS, assignees)
+        # An emptied carry falls back to the roster rather than to nobody: an
+        # empty list means "no filter" for Status and the opposite here, and a
+        # team whose carried names have all left the board would otherwise open
+        # on a page showing no tickets at all.
         selected = st.multiselect(
             "Team members",
             options=assignees,
-            default=_carried("team_members", defaults, assignees),
+            default=_carried("team_members", defaults, assignees) or defaults,
         )
         _carry("team_members", selected)
         if not selected:
