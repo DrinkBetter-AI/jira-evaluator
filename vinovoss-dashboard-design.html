@@ -593,60 +593,98 @@
 </section>
 
 <section class="page" id="p-planning">
-  <h2 class="sec" style="margin-top:6px">Planning <span class="chip gray">commitments, capacity, and board hygiene</span></h2>
+  <h2 class="sec" style="margin-top:6px">Planning <span class="chip gray">three sprints, one board each</span></h2>
+  <p class="chart-sub" style="margin:0 0 14px">App · Marketplace · ML run in parallel. Every number below is stated
+  <b>per sprint</b> — a person working across two boards appears in both, and is never folded into one.</p>
 
-  <div class="card" style="margin-top:6px;border-left:4px solid var(--warn)">
-    <span class="chip warn">⚠ Blocked on config</span>
-    <p style="margin:8px 0 0;font-size:var(--t-lead)"><b>The active sprint has no start or end date.</b></p>
-    <p class="chart-sub" style="margin:4px 0 0">Availability, utilisation and carry-over cannot be computed without them.
-    This is a Jira board setting, not a code change — set the dates and every number below fills in.</p>
+  <div class="grid" style="grid-template-columns:repeat(3,1fr);margin-top:6px">
+    <div class="card" style="border-left:4px solid var(--s1)">
+      <div class="kicker" style="font-size:var(--t-meta);font-weight:650;letter-spacing:.04em;color:var(--s1);text-transform:uppercase">App</div>
+      <p style="margin:6px 0 2px;font-size:var(--t-lead);font-weight:650">Sprint 24</p>
+      <p class="chart-sub" style="margin:0">11 Aug → 22 Aug · <b>day 5 of 10</b></p>
+      <table style="margin-top:10px">
+        <tr><td style="padding-left:0">Tickets</td><td style="text-align:right;padding-right:0"><b>34</b></td></tr>
+        <tr><td style="padding-left:0">Committed</td><td style="text-align:right;padding-right:0"><b>128h</b></td></tr>
+        <tr><td style="padding-left:0">Unestimated</td><td style="text-align:right;padding-right:0"><b style="color:var(--warn)">9</b></td></tr>
+        <tr><td style="padding-left:0">Carried over</td><td style="text-align:right;padding-right:0"><b>7</b> <span class="nnote">21%</span></td></tr>
+        <tr><td style="padding-left:0;border:0">People</td><td style="text-align:right;padding-right:0;border:0"><b>5</b></td></tr>
+      </table>
+    </div>
+    <div class="card" style="border-left:4px solid var(--s2)">
+      <div class="kicker" style="font-size:var(--t-meta);font-weight:650;letter-spacing:.04em;color:var(--s2);text-transform:uppercase">Marketplace</div>
+      <p style="margin:6px 0 2px;font-size:var(--t-lead);font-weight:650">Sprint 24</p>
+      <p class="chart-sub" style="margin:0">11 Aug → 22 Aug · <b>day 5 of 10</b></p>
+      <table style="margin-top:10px">
+        <tr><td style="padding-left:0">Tickets</td><td style="text-align:right;padding-right:0"><b>41</b></td></tr>
+        <tr><td style="padding-left:0">Committed</td><td style="text-align:right;padding-right:0"><b>96h</b></td></tr>
+        <tr><td style="padding-left:0">Unestimated</td><td style="text-align:right;padding-right:0"><b style="color:var(--crit)">17</b></td></tr>
+        <tr><td style="padding-left:0">Carried over</td><td style="text-align:right;padding-right:0"><b style="color:var(--warn)">14</b> <span class="nnote">34%</span></td></tr>
+        <tr><td style="padding-left:0;border:0">People</td><td style="text-align:right;padding-right:0;border:0"><b>4</b></td></tr>
+      </table>
+    </div>
+    <div class="card" style="border-left:4px solid var(--warn)">
+      <div class="kicker" style="font-size:var(--t-meta);font-weight:650;letter-spacing:.04em;color:var(--warn);text-transform:uppercase">ML</div>
+      <p style="margin:6px 0 2px;font-size:var(--t-lead);font-weight:650">Sprint 24</p>
+      <p class="chart-sub" style="margin:0"><span class="chip warn">⚠ no dates set</span></p>
+      <table style="margin-top:10px">
+        <tr><td style="padding-left:0">Tickets</td><td style="text-align:right;padding-right:0"><b>22</b></td></tr>
+        <tr><td style="padding-left:0">Committed</td><td style="text-align:right;padding-right:0"><span class="nnote">—</span></td></tr>
+        <tr><td style="padding-left:0">Unestimated</td><td style="text-align:right;padding-right:0"><b style="color:var(--crit)">20</b></td></tr>
+        <tr><td style="padding-left:0">Carried over</td><td style="text-align:right;padding-right:0"><span class="nnote">needs dates</span></td></tr>
+        <tr><td style="padding-left:0;border:0">People</td><td style="text-align:right;padding-right:0;border:0"><b>3</b></td></tr>
+      </table>
+    </div>
   </div>
 
-  <div class="kpis" style="margin-top:14px">
-    <div class="tile"><div class="lbl">No priority set</div><div class="row"><div class="val" style="color:var(--warn)">97</div></div>
-      <div class="delta flat">27% of open</div><div class="note">nobody has decided they matter</div></div>
-    <div class="tile"><div class="lbl">Epics needing attention</div><div class="row"><div class="val" style="color:var(--warn)">45</div></div>
-      <div class="delta flat">—</div><div class="note">orphans, empties, no owner</div></div>
-    <div class="tile"><div class="lbl">Stuck in triage</div><div class="row"><div class="val">5</div></div>
-      <div class="delta flat">&gt; 48h</div><div class="note">2 unassigned</div></div>
-    <div class="tile"><div class="lbl">Estimate coverage</div><div class="row"><div class="val">61<small style="font-size:var(--t-label)">%</small></div></div>
-      <div class="delta up">▲ +3pp</div><div class="note">past-Backlog only, epics exempt</div></div>
-    <div class="tile"><div class="lbl">Ready for Devin</div><div class="row"><div class="val" style="color:var(--good)">274</div></div>
-      <div class="delta flat">—</div><div class="note">fully specced, no conversation needed</div></div>
+  <div class="card" style="margin-top:14px;border-left:4px solid var(--warn)">
+    <span class="chip warn">⚠ Blocked on config</span>
+    <p style="margin:8px 0 0;font-size:var(--t-lead)"><b>The ML sprint has no start or end date.</b></p>
+    <p class="chart-sub" style="margin:4px 0 0">Availability, utilisation and carry-over cannot be computed for it, and it is
+    excluded from the totals above rather than counted as zero. A Jira board setting, not a code change.</p>
   </div>
 
   <div class="card" style="margin-top:14px">
-    <h3 class="chart-title">Capacity — contracted vs committed</h3>
-    <p class="chart-sub">Contracted hours come from <code>JIRA_WEEKLY_HOURS</code>. Committed is the sum of estimates
-    on this person's sprint tickets. A blank estimate is shown as blank, never as zero.</p>
+    <h3 class="chart-title">Capacity — contracted vs committed, per sprint</h3>
+    <p class="chart-sub">Contracted hours come from <code>JIRA_WEEKLY_HOURS</code>. Someone on two boards is listed twice,
+    and their load is the <b>sum</b> — the row that matters is the total, not either sprint alone.</p>
     <table>
-      <thead><tr><th>Person</th><th>Role</th><th style="text-align:right">Contracted</th>
+      <thead><tr><th>Person</th><th>Sprint</th><th style="text-align:right">Contracted</th>
         <th style="text-align:right">Committed</th><th style="text-align:right">Unestimated</th><th>Load</th></tr></thead>
       <tbody>
-        <tr><td class="who"><span class="av" style="background:#2563eb">TA</span>Tam</td><td><span class="rolechip">platform</span></td>
+        <tr><td class="who"><span class="av" style="background:#2563eb">TA</span>Tam</td>
+          <td><span class="chip info">App</span> <span class="chip warn">ML</span></td>
           <td style="text-align:right">40</td><td style="text-align:right">36</td><td style="text-align:right">2</td>
           <td><span class="scorebar"><span class="tr"><i style="width:90%;background:var(--good)"></i></span>90%</span></td></tr>
-        <tr><td class="who"><span class="av" style="background:#eb6834">FS</span>Farid Shahidi</td><td><span class="rolechip">frontend</span></td>
+        <tr><td class="who"><span class="av" style="background:#eb6834">FS</span>Farid Shahidi</td>
+          <td><span class="chip info">App</span></td>
           <td style="text-align:right">20</td><td style="text-align:right">27</td><td style="text-align:right">1</td>
           <td><span class="scorebar"><span class="tr"><i style="width:100%;background:var(--crit)"></i></span>135%</span></td></tr>
-        <tr><td class="who"><span class="av" style="background:#4a3aa7">JH</span>Jal Haidar</td><td><span class="rolechip">crm</span></td>
+        <tr><td class="who"><span class="av" style="background:#4a3aa7">JH</span>Jal Haidar</td>
+          <td><span class="chip" style="background:var(--warn-bg);color:var(--s2)">Marketplace</span></td>
           <td style="text-align:right">20</td><td style="text-align:right">11</td><td style="text-align:right"><b style="color:var(--warn)">9</b></td>
           <td><span class="scorebar"><span class="tr"><i style="width:55%;background:var(--warn)"></i></span>55%</span></td></tr>
-        <tr><td class="who"><span class="av" style="background:#1baf7a">MO</span>Mehdi O.</td><td><span class="rolechip">ML</span></td>
-          <td style="text-align:right">20</td><td style="text-align:right">—</td><td style="text-align:right"><b style="color:var(--warn)">14</b></td>
-          <td><span class="nnote">no estimates — cannot compute</span></td></tr>
-        <tr><td class="who"><span class="av" style="background:#e87ba4">GA</span>Gaston</td><td><span class="rolechip">infra</span></td>
-          <td style="text-align:right">20</td><td style="text-align:right">—</td><td style="text-align:right"><b style="color:var(--warn)">6</b></td>
-          <td><span class="nnote">no estimates — cannot compute</span></td></tr>
+        <tr><td class="who"><span class="av" style="background:#008300">AK</span>Anouar Kacem</td>
+          <td><span class="chip" style="background:var(--warn-bg);color:var(--s2)">Marketplace</span></td>
+          <td style="text-align:right">20</td><td style="text-align:right">18</td><td style="text-align:right">3</td>
+          <td><span class="scorebar"><span class="tr"><i style="width:90%;background:var(--good)"></i></span>90%</span></td></tr>
+        <tr><td class="who"><span class="av" style="background:#1baf7a">MO</span>Mehdi Ordikhani</td>
+          <td><span class="chip warn">ML</span></td>
+          <td style="text-align:right">20</td><td style="text-align:right">—</td><td style="text-align:right"><b style="color:var(--crit)">14</b></td>
+          <td><span class="nnote">unknown — no estimates</span></td></tr>
+        <tr><td class="who"><span class="av" style="background:#e87ba4">GA</span>Gaston</td>
+          <td><span class="nnote">no sprint</span></td>
+          <td style="text-align:right">20</td><td style="text-align:right">—</td><td style="text-align:right"><b style="color:var(--crit)">6</b></td>
+          <td><span class="nnote">unknown — no sprint, no estimates</span></td></tr>
       </tbody>
     </table>
-    <p class="chart-sub" style="margin:12px 0 0">Two of the five most expensive contractors have no estimate on any sprint ticket.
-    Utilisation for them is not low — it is unknown, which is a different problem and needs a different conversation.</p>
+    <p class="chart-sub" style="margin:12px 0 0"><b>Unknown is not low.</b> Mehdi and Gaston are two of the five most expensive
+    people on the team and neither has an estimate on a single sprint ticket, so their utilisation cannot be computed at all.
+    Gaston has no sprint work whatsoever. That is a conversation, not a metric.</p>
   </div>
 
   <div class="charts2" style="margin-top:14px">
     <div class="card">
-      <h3 class="chart-title">Board hygiene</h3>
+      <h3 class="chart-title">Board hygiene <span class="chip gray">all three boards</span></h3>
       <p class="chart-sub">Every count here is the PM function made legible, not an engineer's failing</p>
       <div class="hbars">
         <div class="hbar"><div class="name">No priority</div><div class="track" style="width:100%;background:var(--s4)"></div><div class="v">97</div></div>
@@ -654,17 +692,18 @@
         <div class="hbar"><div class="name">Unassigned</div><div class="track" style="width:57%;background:var(--s4)"></div><div class="v">55</div></div>
         <div class="hbar"><div class="name">Epics needing attention</div><div class="track" style="width:46%;background:var(--s4)"></div><div class="v">45</div></div>
         <div class="hbar"><div class="name">Orphan tickets (no epic)</div><div class="track" style="width:39%"></div><div class="v">38</div></div>
+        <div class="hbar"><div class="name">Outside any sprint</div><div class="track" style="width:27%;background:var(--s4)"></div><div class="v">263</div></div>
         <div class="hbar"><div class="name">Empty epics</div><div class="track" style="width:12%"></div><div class="v">12</div></div>
         <div class="hbar"><div class="name">Stuck in triage</div><div class="track" style="width:5%"></div><div class="v">5</div></div>
       </div>
-      <p class="chart-sub" style="margin:12px 0 0"><b>Ghost-assigned is worse than unassigned:</b> 61 open tickets belong to people who
-      have left, so they are invisible in every per-person view while looking owned.</p>
+      <p class="chart-sub" style="margin:12px 0 0"><b>Ghost-assigned is worse than unassigned:</b> 61 open tickets belong to
+      people who have left, so they look owned while being invisible in every per-person view.</p>
     </div>
     <div class="card">
       <h3 class="chart-title">Triage — one decision per card</h3>
       <p class="chart-sub">The best interaction in the old dashboard, kept as-is</p>
       <div class="card" style="padding:14px 16px;margin-top:8px;background:var(--page)">
-        <span class="chip crit">⚠ 3 days in triage</span>
+        <span class="chip crit">⚠ 3 days in triage</span> <span class="chip info">App</span>
         <p style="margin:8px 0 2px;font-size:var(--t-label);font-weight:600"><a href="#">VIN-1402</a> Checkout fails on Safari 17 with saved card</p>
         <p class="chart-sub" style="margin:0">Reported by Dina QA · no priority · no owner · no epic</p>
         <div class="filters" style="margin:10px 0 0">
@@ -673,7 +712,7 @@
         </div>
       </div>
       <div class="card" style="padding:14px 16px;margin-top:10px;background:var(--page)">
-        <span class="chip warn">⚠ 2 days in triage</span>
+        <span class="chip warn">⚠ 2 days in triage</span> <span class="chip warn">ML</span>
         <p style="margin:8px 0 2px;font-size:var(--t-label);font-weight:600"><a href="#">VIN-1399</a> Recommendation returns duplicates for logged-out users</p>
         <p class="chart-sub" style="margin:0">Reported by Angel · no priority · unassigned</p>
         <div class="filters" style="margin:10px 0 0">
