@@ -424,31 +424,264 @@
 
 <!-- ============================================================ STUBS -->
 <section class="page" id="p-delivery">
-  <h2 class="sec" style="margin-top:6px">Delivery <span class="chip gray">existing sections, restyled — no metric changes</span></h2>
-  <div class="stub">
-    <div class="card"><h3>Ticket composition</h3><p>Ranked bars by status / team / priority / epic — the fixed "undefined" chart lives here.</p></div>
-    <div class="card"><h3>Epics</h3><p>Remaining work per epic, orphans, empty epics, suggested parents.</p></div>
-    <div class="card"><h3>Prioritized queue</h3><p>Score-ranked worklist, unchanged formula, linked to sprint planner.</p></div>
-    <div class="card"><h3>Stale &amp; abandoned</h3><p>Now driven by <b>status age</b>, so a label edit no longer rescues a dead ticket.</p></div>
-    <div class="card"><h3>Backlog cleanup</h3><p>The one-ticket-at-a-time triage cards, kept as-is — it's the best interaction in the app.</p></div>
+  <h2 class="sec" style="margin-top:6px">Delivery <span class="chip gray">what finished, and how long it took</span></h2>
+  <p class="chart-sub" style="margin:0 0 14px">Org-wide. Counts are telemetry — nobody is ranked on this page.</p>
+
+  <div class="kpis">
+    <div class="tile"><div class="lbl">Resolved · 7d</div><div class="row"><div class="val">96</div></div>
+      <div class="delta up">▲ +8 vs prior week</div><div class="note">credited to whoever moved it</div></div>
+    <div class="tile"><div class="lbl">Median cycle time</div><div class="row"><div class="val">9.5<small style="font-size:var(--t-label)">d</small></div></div>
+      <div class="delta up">▲ 1.1d faster vs 90d</div><div class="note">In Progress → resolved, from changelog</div></div>
+    <div class="tile"><div class="lbl">Staging round-trips</div><div class="row"><div class="val">18</div></div>
+      <div class="delta down">▲ 6 vs prior week</div><div class="note">entered a resolved status twice+</div></div>
+    <div class="tile"><div class="lbl">Reopened · 30d</div><div class="row"><div class="val">11</div></div>
+      <div class="delta flat">— flat</div><div class="note">3.1% of resolved</div></div>
+    <div class="tile"><div class="lbl">Unattributed</div><div class="row"><div class="val">7</div></div>
+      <div class="delta flat">—</div><div class="note">no changelog — credited to nobody</div></div>
+  </div>
+
+  <div class="charts2" style="margin-top:14px">
+    <div class="card">
+      <h3 class="chart-title">Where open work sits, by team</h3>
+      <p class="chart-sub">360 open tickets — ranked, never sliced</p>
+      <div class="hbars">
+        <div class="hbar"><div class="name">Marketplace / CRM</div><div class="track" style="width:88%"></div><div class="v">104</div></div>
+        <div class="hbar"><div class="name">Frontend</div><div class="track" style="width:71%"></div><div class="v">84</div></div>
+        <div class="hbar"><div class="name">ML / Recommendation</div><div class="track" style="width:52%"></div><div class="v">61</div></div>
+        <div class="hbar"><div class="name">Platform / Search</div><div class="track" style="width:38%"></div><div class="v">45</div></div>
+        <div class="hbar"><div class="name">Mobile</div><div class="track" style="width:26%"></div><div class="v">31</div></div>
+        <div class="hbar"><div class="name">QA</div><div class="track" style="width:17%"></div><div class="v">20</div></div>
+        <div class="hbar dim"><div class="name">No team set</div><div class="track" style="width:13%"></div><div class="v">15</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3 class="chart-title">Cycle time by status</h3>
+      <p class="chart-sub">Median days a ticket sits before it moves on</p>
+      <div class="hbars">
+        <div class="hbar"><div class="name">Review in Staging</div><div class="track" style="width:92%;background:var(--s8)"></div><div class="v">14.2</div></div>
+        <div class="hbar"><div class="name">Code Review</div><div class="track" style="width:74%;background:var(--s8)"></div><div class="v">11.3</div></div>
+        <div class="hbar"><div class="name">In Progress</div><div class="track" style="width:41%"></div><div class="v">6.4</div></div>
+        <div class="hbar"><div class="name">IN DEV ENV</div><div class="track" style="width:33%"></div><div class="v">5.1</div></div>
+        <div class="hbar"><div class="name">To Do</div><div class="track" style="width:22%"></div><div class="v">3.4</div></div>
+      </div>
+      <p class="chart-sub" style="margin:12px 0 0">Two of the three slowest statuses are review, not build. The bottleneck is
+      attention, not capacity.</p>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h3 class="chart-title">Stale &amp; abandoned <span class="chip warn">by status age</span></h3>
+    <p class="chart-sub">Days since the ticket actually <b>moved</b>. <b>Masked</b> is how much apparent
+    freshness came from edits that moved no work — a label edit resets "last touched", never this.</p>
+    <table>
+      <thead><tr><th>Ticket</th><th>Owner</th><th>Status</th><th style="text-align:right">Status age</th>
+        <th style="text-align:right">Last touched</th><th style="text-align:right">Masked</th></tr></thead>
+      <tbody>
+        <tr><td><a href="#">VIN-1142</a> Merchant CSV importer</td><td class="who"><span class="av" style="background:#4a3aa7">JH</span>Jal Haidar</td><td>In Progress</td>
+          <td style="text-align:right">186</td><td style="text-align:right">2</td><td style="text-align:right"><b>184</b></td></tr>
+        <tr><td><a href="#">VIN-0987</a> Redesign filter drawer</td><td class="who"><span class="av" style="background:#e87ba4">RS</span>Robert S.</td><td>Design Review</td>
+          <td style="text-align:right">131</td><td style="text-align:right">1</td><td style="text-align:right"><b>130</b></td></tr>
+        <tr><td><a href="#">VIN-1301</a> Ranker A/B harness</td><td class="who"><span class="av" style="background:#1baf7a">MO</span>Mehdi O.</td><td>IN DEV ENV</td>
+          <td style="text-align:right">98</td><td style="text-align:right">14</td><td style="text-align:right">84</td></tr>
+        <tr><td><a href="#">VIN-0774</a> Order webhook retries</td><td class="who"><span class="av" style="background:#94a3b8">—</span>Unassigned</td><td>Blocked</td>
+          <td style="text-align:right">92</td><td style="text-align:right">92</td><td style="text-align:right">0</td></tr>
+        <tr><td><a href="#">VIN-1255</a> Push notification opt-in</td><td class="who"><span class="av" style="background:#eda100">AL</span>Ali</td><td>Code Review</td>
+          <td style="text-align:right">61</td><td style="text-align:right">3</td><td style="text-align:right">58</td></tr>
+      </tbody>
+    </table>
+    <p class="chart-sub" style="margin:12px 0 0">The innocent reading: a comment or a linked ticket is a real edit. The pattern
+    worth asking about is a large masked figure appearing across many tickets in the same week.</p>
   </div>
 </section>
 
 <section class="page" id="p-code">
-  <h2 class="sec" style="margin-top:6px">Code <span class="chip gray">PR health + the new quality metrics</span></h2>
-  <div class="stub">
-    <div class="card"><h3>Open &amp; stuck PRs</h3><p>Today's headline drills into here: stuck, never-reviewed, no-reviewer queues.</p></div>
-    <div class="card"><h3>AI review findings</h3><p>Devin's changes-requested share per author — share of judged PRs, never a raw total.</p></div>
-    <div class="card"><h3>Size &amp; hygiene</h3><p>Size bands per person, Jira-key traceability of <b>merged</b> work, abandoned-PR rate.</p></div>
-    <div class="card"><h3>Review citizenship</h3><p>Reviews given, time-to-first-review, distinct authors reviewed.</p></div>
+  <h2 class="sec" style="margin-top:6px">Code <span class="chip gray">PR health across all ten team repos</span></h2>
+  <p class="chart-sub" style="margin:0 0 14px">Excludes <code>angel-mobileapp-mvp</code> and <code>angel-merchant-dashboard-v1</code>
+  — founder scratch repos, stated here so a filtered number is never read as a complete one.</p>
+
+  <div class="kpis">
+    <div class="tile"><div class="lbl">Open PRs</div><div class="row"><div class="val">79</div></div>
+      <div class="delta flat">— non-draft</div><div class="note">of 96 including drafts</div></div>
+    <div class="tile"><div class="lbl">No approving review</div><div class="row"><div class="val" style="color:var(--crit)">73</div></div>
+      <div class="delta down">▲ 92% of open</div><div class="note">21 never reviewed at all</div></div>
+    <div class="tile"><div class="lbl">Nobody asked</div><div class="row"><div class="val" style="color:var(--crit)">13</div></div>
+      <div class="delta down">&gt; 2 days old</div><div class="note">no request, no review</div></div>
+    <div class="tile"><div class="lbl">Oldest unreviewed</div><div class="row"><div class="val">825<small style="font-size:var(--t-label)">d</small></div></div>
+      <div class="delta flat">—</div><div class="note">vinovoss-crm</div></div>
+    <div class="tile"><div class="lbl">Self-merged · 30d</div><div class="row"><div class="val">41</div></div>
+      <div class="delta down">32% of merges</div><div class="note">author approved own work</div></div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h3 class="chart-title">Review coverage by repo</h3>
+    <p class="chart-sub">Share of open PRs with no approving review — worst first. This is where review culture
+    is missing, not who is slow.</p>
+    <div class="hbars">
+      <div class="hbar"><div class="name">vinovoss-crm</div><div class="track" style="width:100%;background:var(--s8)"></div><div class="v">100%</div></div>
+      <div class="hbar"><div class="name">admin-frontend</div><div class="track" style="width:100%;background:var(--s8)"></div><div class="v">100%</div></div>
+      <div class="hbar"><div class="name">query-understanding</div><div class="track" style="width:100%;background:var(--s8)"></div><div class="v">100%</div></div>
+      <div class="hbar"><div class="name">vinovoss-frontend</div><div class="track" style="width:96%;background:var(--s8)"></div><div class="v">96%</div></div>
+      <div class="hbar"><div class="name">mobile-app</div><div class="track" style="width:91%;background:var(--s2)"></div><div class="v">91%</div></div>
+      <div class="hbar"><div class="name">wine-recommender-backend</div><div class="track" style="width:88%;background:var(--s2)"></div><div class="v">88%</div></div>
+      <div class="hbar"><div class="name">ranker_service</div><div class="track" style="width:80%;background:var(--s2)"></div><div class="v">80%</div></div>
+      <div class="hbar"><div class="name">wine-recommender</div><div class="track" style="width:75%;background:var(--s2)"></div><div class="v">75%</div></div>
+      <div class="hbar"><div class="name">vinovoss-skills</div><div class="track" style="width:50%;background:var(--s4)"></div><div class="v">50%</div></div>
+      <div class="hbar"><div class="name">jira-evaluator</div><div class="track" style="width:12%;background:var(--s3)"></div><div class="v">12%</div></div>
+    </div>
+    <p class="chart-sub" style="margin:12px 0 0">Three repos have never had an approving review on an open PR. Those are the ones
+    with no assigned reviewer, not the ones with bad code.</p>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h3 class="chart-title">Stuck queue — open, no approving review, oldest first</h3>
+    <p class="chart-sub">Drafts excluded. A rejecting review still counts as attention, so "reviews" of 0 is the harsher column.</p>
+    <table>
+      <thead><tr><th>PR</th><th>Author</th><th>Repo</th><th style="text-align:right">Age</th>
+        <th style="text-align:right">Reviews</th><th style="text-align:right">Asked</th><th>Ticket</th></tr></thead>
+      <tbody>
+        <tr><td><a href="#">#212</a> Medusa v2 product sync</td><td>jal-vino</td><td>vinovoss-crm</td>
+          <td style="text-align:right">825</td><td style="text-align:right"><b style="color:var(--crit)">0</b></td><td style="text-align:right">no</td><td><a href="#">VIN-0431</a></td></tr>
+        <tr><td><a href="#">#88</a> Intent classifier rewrite</td><td>Phelan164</td><td>query-understanding</td>
+          <td style="text-align:right">311</td><td style="text-align:right"><b style="color:var(--crit)">0</b></td><td style="text-align:right">no</td><td><span class="nnote">none</span></td></tr>
+        <tr><td><a href="#">#455</a> Cart drawer refactor</td><td>MohsenStack</td><td>vinovoss-frontend</td>
+          <td style="text-align:right">147</td><td style="text-align:right">2</td><td style="text-align:right">yes</td><td><a href="#">VIN-1088</a></td></tr>
+        <tr><td><a href="#">#61</a> Offline cache layer</td><td>alivinovoss</td><td>mobile-app</td>
+          <td style="text-align:right">96</td><td style="text-align:right"><b style="color:var(--crit)">0</b></td><td style="text-align:right">no</td><td><a href="#">VIN-1255</a></td></tr>
+        <tr><td><a href="#">#134</a> Admin bulk price editor</td><td>ahref13</td><td>admin-frontend</td>
+          <td style="text-align:right">74</td><td style="text-align:right">1</td><td style="text-align:right">yes</td><td><span class="nnote">none</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="score2" style="margin-top:14px">
+    <div class="card">
+      <h3 class="chart-title">Devin findings per author</h3>
+      <p class="chart-sub">Share of <b>judged</b> PRs where Devin requested changes. <b>Judged</b> is shown so that
+      "no findings" is never confused with "not reviewed".</p>
+      <table>
+        <thead><tr><th>Author</th><th style="text-align:right">Merged 30d</th><th style="text-align:right">Judged</th>
+          <th style="text-align:right">Changes asked</th></tr></thead>
+        <tbody>
+          <tr><td>Phelan164</td><td style="text-align:right">153</td><td style="text-align:right">151</td><td style="text-align:right">18%</td></tr>
+          <tr><td>avosmod8 <span class="rolechip">exempt</span></td><td style="text-align:right">132</td><td style="text-align:right">130</td><td style="text-align:right">9%</td></tr>
+          <tr><td>MohsenStack</td><td style="text-align:right">34</td><td style="text-align:right">34</td><td style="text-align:right"><b style="color:var(--warn)">47%</b></td></tr>
+          <tr><td>anouar-source</td><td style="text-align:right">28</td><td style="text-align:right">27</td><td style="text-align:right"><b style="color:var(--warn)">52%</b></td></tr>
+          <tr><td>alivinovoss</td><td style="text-align:right">19</td><td style="text-align:right">19</td><td style="text-align:right">21%</td></tr>
+          <tr><td>gsalgado-cloudacio</td><td style="text-align:right">6</td><td style="text-align:right"><span class="nnote">2 — insufficient</span></td><td style="text-align:right">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3 class="chart-title">Review citizenship</h3>
+      <p class="chart-sub">Reviews <b>given</b>, and whether they were asked for. Unprompted reviews are the
+      proactivity signal — the rest is compliance.</p>
+      <table>
+        <thead><tr><th>Person</th><th style="text-align:right">Given</th><th style="text-align:right">Unprompted</th>
+          <th style="text-align:right">TTFR</th><th style="text-align:right">Authors</th></tr></thead>
+        <tbody>
+          <tr><td>Tam</td><td style="text-align:right">14</td><td style="text-align:right">9</td><td style="text-align:right">11h</td><td style="text-align:right">6</td></tr>
+          <tr><td>Farid Shahidi</td><td style="text-align:right">11</td><td style="text-align:right">4</td><td style="text-align:right">9h</td><td style="text-align:right">4</td></tr>
+          <tr><td>Mohsen Davoudi</td><td style="text-align:right">7</td><td style="text-align:right">1</td><td style="text-align:right">31h</td><td style="text-align:right">2</td></tr>
+          <tr><td>Jal Haidar</td><td style="text-align:right">3</td><td style="text-align:right">0</td><td style="text-align:right">48h</td><td style="text-align:right">1</td></tr>
+          <tr><td>Ali</td><td style="text-align:right">2</td><td style="text-align:right">0</td><td style="text-align:right">41h</td><td style="text-align:right">1</td></tr>
+          <tr><td>Gaston</td><td style="text-align:right"><b style="color:var(--crit)">0</b></td><td style="text-align:right">0</td><td style="text-align:right">—</td><td style="text-align:right">0</td></tr>
+        </tbody>
+      </table>
+      <p class="chart-sub" style="margin:12px 0 0">Two people carry the review load for twelve engineers. That is the 92% in one sentence.</p>
+    </div>
   </div>
 </section>
 
 <section class="page" id="p-planning">
-  <h2 class="sec" style="margin-top:6px">Planning <span class="chip gray">existing planner + capacity, restyled</span></h2>
-  <div class="stub">
-    <div class="card"><h3>Sprint planner</h3><p>Goal-first planning, editable rows — kept. Needs sprint dates set in Jira for availability.</p></div>
-    <div class="card"><h3>Sprint capacity</h3><p>Committed vs available hours; estimate revisions made mid-sprint get a marker here.</p></div>
+  <h2 class="sec" style="margin-top:6px">Planning <span class="chip gray">commitments, capacity, and board hygiene</span></h2>
+
+  <div class="card" style="margin-top:6px;border-left:4px solid var(--warn)">
+    <span class="chip warn">⚠ Blocked on config</span>
+    <p style="margin:8px 0 0;font-size:var(--t-lead)"><b>The active sprint has no start or end date.</b></p>
+    <p class="chart-sub" style="margin:4px 0 0">Availability, utilisation and carry-over cannot be computed without them.
+    This is a Jira board setting, not a code change — set the dates and every number below fills in.</p>
+  </div>
+
+  <div class="kpis" style="margin-top:14px">
+    <div class="tile"><div class="lbl">No priority set</div><div class="row"><div class="val" style="color:var(--warn)">97</div></div>
+      <div class="delta flat">27% of open</div><div class="note">nobody has decided they matter</div></div>
+    <div class="tile"><div class="lbl">Epics needing attention</div><div class="row"><div class="val" style="color:var(--warn)">45</div></div>
+      <div class="delta flat">—</div><div class="note">orphans, empties, no owner</div></div>
+    <div class="tile"><div class="lbl">Stuck in triage</div><div class="row"><div class="val">5</div></div>
+      <div class="delta flat">&gt; 48h</div><div class="note">2 unassigned</div></div>
+    <div class="tile"><div class="lbl">Estimate coverage</div><div class="row"><div class="val">61<small style="font-size:var(--t-label)">%</small></div></div>
+      <div class="delta up">▲ +3pp</div><div class="note">past-Backlog only, epics exempt</div></div>
+    <div class="tile"><div class="lbl">Ready for Devin</div><div class="row"><div class="val" style="color:var(--good)">274</div></div>
+      <div class="delta flat">—</div><div class="note">fully specced, no conversation needed</div></div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h3 class="chart-title">Capacity — contracted vs committed</h3>
+    <p class="chart-sub">Contracted hours come from <code>JIRA_WEEKLY_HOURS</code>. Committed is the sum of estimates
+    on this person's sprint tickets. A blank estimate is shown as blank, never as zero.</p>
+    <table>
+      <thead><tr><th>Person</th><th>Role</th><th style="text-align:right">Contracted</th>
+        <th style="text-align:right">Committed</th><th style="text-align:right">Unestimated</th><th>Load</th></tr></thead>
+      <tbody>
+        <tr><td class="who"><span class="av" style="background:#2563eb">TA</span>Tam</td><td><span class="rolechip">platform</span></td>
+          <td style="text-align:right">40</td><td style="text-align:right">36</td><td style="text-align:right">2</td>
+          <td><span class="scorebar"><span class="tr"><i style="width:90%;background:var(--good)"></i></span>90%</span></td></tr>
+        <tr><td class="who"><span class="av" style="background:#eb6834">FS</span>Farid Shahidi</td><td><span class="rolechip">frontend</span></td>
+          <td style="text-align:right">20</td><td style="text-align:right">27</td><td style="text-align:right">1</td>
+          <td><span class="scorebar"><span class="tr"><i style="width:100%;background:var(--crit)"></i></span>135%</span></td></tr>
+        <tr><td class="who"><span class="av" style="background:#4a3aa7">JH</span>Jal Haidar</td><td><span class="rolechip">crm</span></td>
+          <td style="text-align:right">20</td><td style="text-align:right">11</td><td style="text-align:right"><b style="color:var(--warn)">9</b></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:55%;background:var(--warn)"></i></span>55%</span></td></tr>
+        <tr><td class="who"><span class="av" style="background:#1baf7a">MO</span>Mehdi O.</td><td><span class="rolechip">ML</span></td>
+          <td style="text-align:right">20</td><td style="text-align:right">—</td><td style="text-align:right"><b style="color:var(--warn)">14</b></td>
+          <td><span class="nnote">no estimates — cannot compute</span></td></tr>
+        <tr><td class="who"><span class="av" style="background:#e87ba4">GA</span>Gaston</td><td><span class="rolechip">infra</span></td>
+          <td style="text-align:right">20</td><td style="text-align:right">—</td><td style="text-align:right"><b style="color:var(--warn)">6</b></td>
+          <td><span class="nnote">no estimates — cannot compute</span></td></tr>
+      </tbody>
+    </table>
+    <p class="chart-sub" style="margin:12px 0 0">Two of the five most expensive contractors have no estimate on any sprint ticket.
+    Utilisation for them is not low — it is unknown, which is a different problem and needs a different conversation.</p>
+  </div>
+
+  <div class="charts2" style="margin-top:14px">
+    <div class="card">
+      <h3 class="chart-title">Board hygiene</h3>
+      <p class="chart-sub">Every count here is the PM function made legible, not an engineer's failing</p>
+      <div class="hbars">
+        <div class="hbar"><div class="name">No priority</div><div class="track" style="width:100%;background:var(--s4)"></div><div class="v">97</div></div>
+        <div class="hbar"><div class="name">Ghost-assigned</div><div class="track" style="width:63%;background:var(--s8)"></div><div class="v">61</div></div>
+        <div class="hbar"><div class="name">Unassigned</div><div class="track" style="width:57%;background:var(--s4)"></div><div class="v">55</div></div>
+        <div class="hbar"><div class="name">Epics needing attention</div><div class="track" style="width:46%;background:var(--s4)"></div><div class="v">45</div></div>
+        <div class="hbar"><div class="name">Orphan tickets (no epic)</div><div class="track" style="width:39%"></div><div class="v">38</div></div>
+        <div class="hbar"><div class="name">Empty epics</div><div class="track" style="width:12%"></div><div class="v">12</div></div>
+        <div class="hbar"><div class="name">Stuck in triage</div><div class="track" style="width:5%"></div><div class="v">5</div></div>
+      </div>
+      <p class="chart-sub" style="margin:12px 0 0"><b>Ghost-assigned is worse than unassigned:</b> 61 open tickets belong to people who
+      have left, so they are invisible in every per-person view while looking owned.</p>
+    </div>
+    <div class="card">
+      <h3 class="chart-title">Triage — one decision per card</h3>
+      <p class="chart-sub">The best interaction in the old dashboard, kept as-is</p>
+      <div class="card" style="padding:14px 16px;margin-top:8px;background:var(--page)">
+        <span class="chip crit">⚠ 3 days in triage</span>
+        <p style="margin:8px 0 2px;font-size:var(--t-label);font-weight:600"><a href="#">VIN-1402</a> Checkout fails on Safari 17 with saved card</p>
+        <p class="chart-sub" style="margin:0">Reported by Dina QA · no priority · no owner · no epic</p>
+        <div class="filters" style="margin:10px 0 0">
+          <span class="fchip on">Urgent</span><span class="fchip">High</span><span class="fchip">Normal</span>
+          <span class="fchip">Assign → Mohsen</span><span class="fchip">Close</span>
+        </div>
+      </div>
+      <div class="card" style="padding:14px 16px;margin-top:10px;background:var(--page)">
+        <span class="chip warn">⚠ 2 days in triage</span>
+        <p style="margin:8px 0 2px;font-size:var(--t-label);font-weight:600"><a href="#">VIN-1399</a> Recommendation returns duplicates for logged-out users</p>
+        <p class="chart-sub" style="margin:0">Reported by Angel · no priority · unassigned</p>
+        <div class="filters" style="margin:10px 0 0">
+          <span class="fchip">Urgent</span><span class="fchip on">High</span><span class="fchip">Normal</span>
+          <span class="fchip">Assign → Mehdi</span><span class="fchip">Close</span>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 
