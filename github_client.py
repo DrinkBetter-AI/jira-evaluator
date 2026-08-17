@@ -58,19 +58,23 @@ _TOKEN_ENV_VARS = ("DASHBOARD_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")
 # that the pages then reported as "GitHub unavailable" - a throttle reading as an
 # outage. The lock costs sequence, not time: the reads were never the slow part.
 _REQUEST_LOCK = threading.Lock()
-_RETRY_ATTEMPTS = 4
+_RETRY_ATTEMPTS = 3
 _RETRY_BACKOFF_SECONDS = 2.0
-_RETRY_CEILING_SECONDS = 30.0
+# GitHub's secondary limit commonly asks for a minute, and asking again inside
+# the window it named can extend the penalty, so the ceiling has to be able to
+# hold that minute rather than truncating it into a request made during the ban.
+_RETRY_CEILING_SECONDS = 60.0
 # The instant before which nobody may ask again. A throttle applies to the token,
 # not to the thread that happened to hit it: without this, the reader that was
 # refused sleeps politely while the other dozen keep asking inside the very
 # window GitHub closed, and they spend their own retries being refused too.
 _NOT_BEFORE = 0.0
 _STATE_LOCK = threading.Lock()
-# Total seconds one read may spend waiting out throttles before it gives up. A
-# page that says "GitHub is throttling us" after half a minute is more use than
-# one that spins: the reader can come back, and the other sections still draw.
-_RETRY_BUDGET_SECONDS = 45.0
+# Total seconds one read may spend waiting out throttles before it gives up: one
+# full minute-long wait and a little more. A page that says "GitHub is throttling
+# us" is more use than one that spins: the reader can come back, and the other
+# sections still draw.
+_RETRY_BUDGET_SECONDS = 75.0
 
 
 def _retry_after(response: requests.Response, attempt: int) -> float | None:
@@ -95,7 +99,7 @@ def _retry_after(response: requests.Response, attempt: int) -> float | None:
         return None
     raw = response.headers.get("retry-after", "")
     if raw.isdigit() and int(raw) > 0:
-        return float(min(int(raw), _RETRY_CEILING_SECONDS))
+        return min(float(raw), _RETRY_CEILING_SECONDS)
     if reset_in is not None and reset_in > 0:
         return float(min(reset_in, _RETRY_CEILING_SECONDS))
     return min(_RETRY_BACKOFF_SECONDS * (2**attempt), _RETRY_CEILING_SECONDS)
@@ -194,13 +198,15 @@ def _graphql(token: str, query: str, variables: dict) -> dict:
     guessing between exactly those.
 
     The wait is shared rather than private: a refusal shuts the door for every
-    reader until the instant GitHub named, so a dozen concurrent reads back off
-    once together instead of each discovering the same closed window in turn.
+    reader until the instant GitHub named, and the door is checked while holding
+    the lock, immediately before the request goes out. Checking it earlier would
+    let the dozen readers already queued past a door that shut while they waited,
+    and each would spend an attempt learning what the first one already knew.
     """
     spent = 0.0
     for attempt in range(_RETRY_ATTEMPTS):
-        spent += _await_turn(_RETRY_BUDGET_SECONDS - spent)
         with _REQUEST_LOCK:
+            spent += _await_turn(_RETRY_BUDGET_SECONDS - spent)
             response = requests.post(
                 GITHUB_GRAPHQL_URL,
                 json={"query": query, "variables": variables},
@@ -213,12 +219,9 @@ def _graphql(token: str, query: str, variables: dict) -> dict:
         if not _throttled(response) or attempt == _RETRY_ATTEMPTS - 1:
             break
         pause = _retry_after(response, attempt)
-        if pause is None:
+        if pause is None or spent + pause > _RETRY_BUDGET_SECONDS:
             break
         _hold_off(pause)
-        if spent + pause > _RETRY_BUDGET_SECONDS:
-            break
-        spent += _await_turn(pause)
     if response.status_code >= 400:
         reason = " ".join(response.text.split())[:300]
         raise GitHubConfigError(

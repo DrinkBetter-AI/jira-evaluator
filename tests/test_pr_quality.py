@@ -660,7 +660,7 @@ def test_reads_are_serialised_so_a_burst_cannot_trip_the_limit(monkeypatch):
     assert max(overlapping) == 1
 
 
-def test_a_minute_long_wait_is_capped_not_discarded(monkeypatch, clock):
+def test_a_minute_long_wait_is_waited_out_not_discarded(monkeypatch, clock):
     """GitHub asks for 60s; retrying at 2s spends every attempt inside the ban."""
     throttle = _Response(
         403, '{"message":"secondary rate limit"}', {"retry-after": "60"}
@@ -727,3 +727,13 @@ def test_an_hourly_quota_that_cannot_refill_in_time_is_not_waited_on(
     with pytest.raises(github_client.GitHubConfigError):
         github_client._graphql("t", "{}", {})
     assert clock == []
+
+
+def test_a_reader_already_queued_does_not_ask_through_a_shut_door(monkeypatch, clock):
+    """The door is checked with the lock held, so the queue waits with the rest."""
+    github_client._hold_off(11.0)
+    monkeypatch.setattr(
+        github_client.requests, "post", lambda *a, **k: _Response(200)
+    )
+    github_client._graphql("t", "{}", {})
+    assert clock == [pytest.approx(11.0)]
