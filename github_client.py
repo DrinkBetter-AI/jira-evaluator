@@ -30,6 +30,8 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import re
+import threading
+import time
 
 import pandas as pd
 import requests
@@ -49,6 +51,40 @@ _REPO_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9-]{0,38}/)?[A-Za-z0-9._-]{1,100
 # has a narrower, repo-scoped permission set - does not shadow the token an
 # operator explicitly configured for org-wide PR search.
 _TOKEN_ENV_VARS = ("DASHBOARD_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")
+
+# GitHub asks for requests from one token to be made serially, and answers a
+# burst with a secondary-limit 403 rather than a queue. The dashboard opens with
+# a dozen reads at once, so without this lock every load raced itself into a 403
+# that the pages then reported as "GitHub unavailable" - a throttle reading as an
+# outage. The lock costs sequence, not time: the reads were never the slow part.
+_REQUEST_LOCK = threading.Lock()
+_RETRY_ATTEMPTS = 4
+_RETRY_BACKOFF_SECONDS = 2.0
+_RETRY_CEILING_SECONDS = 30.0
+
+
+def _retry_after(response: requests.Response, attempt: int) -> float:
+    """How long to wait before asking again, GitHub's own answer preferred."""
+    for header in ("retry-after", "x-ratelimit-reset"):
+        raw = response.headers.get(header, "")
+        if not raw.isdigit():
+            continue
+        seconds = int(raw)
+        if header == "x-ratelimit-reset":
+            seconds = int(seconds - time.time())
+        if 0 < seconds <= _RETRY_CEILING_SECONDS:
+            return float(seconds)
+    return min(_RETRY_BACKOFF_SECONDS * (2**attempt), _RETRY_CEILING_SECONDS)
+
+
+def _throttled(response: requests.Response) -> bool:
+    """Whether a refusal is "too fast", which waiting fixes, or "no", which does not."""
+    if response.status_code == 429:
+        return True
+    if response.status_code != 403:
+        return False
+    body = response.text.lower()
+    return "rate limit" in body or "secondary" in body or "try again" in body
 
 
 class GitHubConfigError(RuntimeError):
@@ -95,22 +131,33 @@ def _without_excluded(org: str, query: str) -> str:
 
 
 def _graphql(token: str, query: str, variables: dict) -> dict:
-    """One GraphQL read, with GitHub's own words kept when it refuses.
+    """One GraphQL read: serialised, retried while throttled, quoted when refused.
 
-    A bare ``403 Client Error`` is unactionable: a token missing a permission, an
-    org IP allow list refusing the caller's address and a secondary rate limit all
-    read identically, and the deployment cannot be told which it is without the
-    body GitHub sends to say so.
+    Three things a single request has to get right here.
+
+    Serialised, because concurrent reads on one token are what GitHub's secondary
+    limit exists to stop, and the dashboard's opening burst tripped it on every
+    load. Retried with GitHub's own ``Retry-After``, because a throttle is a wait,
+    not a failure, and the alternative was a blank page. Quoted, because a bare
+    ``403 Client Error`` cannot distinguish a missing permission, an org IP allow
+    list and a secondary limit - the three days this bug survived were spent
+    guessing between exactly those.
     """
-    response = requests.post(
-        GITHUB_GRAPHQL_URL,
-        json={"query": query, "variables": variables},
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-        },
-        timeout=30,
-    )
+    for attempt in range(_RETRY_ATTEMPTS):
+        with _REQUEST_LOCK:
+            response = requests.post(
+                GITHUB_GRAPHQL_URL,
+                json={"query": query, "variables": variables},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                timeout=30,
+            )
+        if _throttled(response) and attempt < _RETRY_ATTEMPTS - 1:
+            time.sleep(_retry_after(response, attempt))
+            continue
+        break
     if response.status_code >= 400:
         reason = " ".join(response.text.split())[:300]
         raise GitHubConfigError(

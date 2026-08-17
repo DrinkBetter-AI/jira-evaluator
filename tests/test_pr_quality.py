@@ -562,3 +562,76 @@ def test_a_refused_read_repeats_what_github_said(monkeypatch):
         github_client._graphql("t", "{viewer{login}}", {})
     assert "403" in str(raised.value)
     assert "IP allow list" in str(raised.value)
+
+
+class _Response:
+    def __init__(self, status_code: int, text: str = "", headers: dict | None = None):
+        self.status_code = status_code
+        self.text = text
+        self.headers = headers or {}
+
+    def json(self) -> dict:
+        return {"data": {"ok": True}}
+
+
+def test_a_throttled_read_waits_and_asks_again(monkeypatch):
+    """A secondary limit is a wait, not an outage: the page must not go blank."""
+    replies = [
+        _Response(403, '{"message":"You have exceeded a secondary rate limit"}',
+                  {"retry-after": "1"}),
+        _Response(200),
+    ]
+    slept: list[float] = []
+    monkeypatch.setattr(github_client.time, "sleep", slept.append)
+    monkeypatch.setattr(
+        github_client.requests, "post", lambda *a, **k: replies.pop(0)
+    )
+    assert github_client._graphql("t", "{}", {}) == {"ok": True}
+    assert slept == [1.0]
+
+
+def test_a_refusal_that_waiting_cannot_fix_is_not_retried(monkeypatch):
+    """A missing permission repeated four times is four wasted requests."""
+    calls: list[int] = []
+
+    def one(*a, **k):
+        calls.append(1)
+        return _Response(403, '{"message":"Resource not accessible by personal '
+                              'access token"}')
+
+    monkeypatch.setattr(github_client.requests, "post", one)
+    monkeypatch.setattr(github_client.time, "sleep", lambda s: None)
+    with pytest.raises(github_client.GitHubConfigError) as raised:
+        github_client._graphql("t", "{}", {})
+    assert len(calls) == 1
+    assert "not accessible" in str(raised.value)
+
+
+def test_reads_are_serialised_so_a_burst_cannot_trip_the_limit(monkeypatch):
+    """Concurrency on one token is the thing GitHub refuses."""
+    import threading as _t
+    import time as time_module
+
+    overlapping = []
+    live = {"n": 0}
+    guard = _t.Lock()
+
+    def post(*a, **k):
+        with guard:
+            live["n"] += 1
+            overlapping.append(live["n"])
+        time_module.sleep(0.01)
+        with guard:
+            live["n"] -= 1
+        return _Response(200)
+
+    monkeypatch.setattr(github_client.requests, "post", post)
+    threads = [
+        _t.Thread(target=lambda: github_client._graphql("t", "{}", {}))
+        for _ in range(6)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert max(overlapping) == 1
