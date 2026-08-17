@@ -4002,6 +4002,22 @@ def _render_sprint_capacity(
         else:
             # Create display dataframe with linked key column in the correct position
             epic_df_display = epic_sprint_df[epic_display_cols].sort_values(["assignee", "key"], ascending=[True, True]).copy()
+            # Read-only, so every unfilled field is dashed the way the other
+            # tables dash theirs: an epic with no estimate must not paint the
+            # word "None" into the Estimate column.
+            epic_df_display = _shown(
+                epic_df_display,
+                [
+                    "summary",
+                    "status",
+                    "priority",
+                    "assignee",
+                    "original_estimate",
+                    "reporter",
+                    "logged_time",
+                    "issue_type",
+                ],
+            )
             epic_df_display["key_url"] = epic_df_display["key"].apply(_jira_ticket_url)
             epic_df_display = epic_df_display.drop(columns=["key"])
             visible_epic_columns = [
