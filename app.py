@@ -10593,9 +10593,11 @@ def _render_people_page() -> None:
 
 def _render_delivery_page() -> None:
     """What finished, and how long it took. Counts, not verdicts."""
+    _, exclusion_caption = _exclude_repos()
     st.caption(
         "Org-wide throughput and the queues behind it. Counts here are telemetry — "
         "people are scored on the People page."
+        + (f" {exclusion_caption}" if exclusion_caption else "")
     )
     bundle, view, slot = _engineering_context()
     if _one_person_instead(bundle, view, slot):
@@ -10629,18 +10631,39 @@ def _render_delivery_page() -> None:
 
 
 def _exclude_repos() -> tuple[frozenset[str], str]:
-    """The repos config removes from PR metrics, and the caption naming them.
+    """The repos left out of every PR read, and the caption naming them.
 
     Angel's scratch repos are not team output, but dropping them silently would
     let a filtered figure read as a complete one — the disabled-merchant mistake.
-    The caption is the contract: wherever the filter applies, the page says so.
+    The caption is the contract: every page carrying a PR figure prints it.
+
+    The exclusion itself is applied by :func:`github_client.excluded_repos` in
+    the search queries, so the counts that cannot be filtered afterwards (open
+    total, merged in 7/30 days) obey it too and no two pages disagree. Names are
+    read back from there so the caption cannot drift from what was excluded, and
+    only the ones this org owns: ``-repo:someone-else/scratch`` is vacuous against
+    an ``org:`` search, so treating it as a name to drop would hide this org's own
+    ``scratch`` from the rows while every count kept it.
+
+    A malformed ``GITHUB_ORG`` is not this function's error to raise: the page
+    reads the caption before it reaches the check that reports config failures
+    legibly, so raising here would replace the page with a stack trace.
     """
-    raw = os.getenv("GITHUB_EXCLUDE_REPOS", "")
-    names = frozenset(n.strip() for n in raw.split(",") if n.strip())
+    try:
+        env = github_client.load_github_env()
+    except github_client.GitHubConfigError:
+        env = None
+    _, org = env or ("", github_client.DEFAULT_ORG)
+    owned = f"{org.lower()}/"
+    names = frozenset(
+        name.split("/", 1)[1]
+        for name in github_client.excluded_repos(org)
+        if name.lower().startswith(owned)
+    )
     caption = (
         "Excludes " + ", ".join(f"`{n}`" for n in sorted(names)) + " — "
-        "founder scratch repos, stated here so a filtered number is never read "
-        "as a complete one."
+        "founder scratch repos, left out of every PR figure on every page, "
+        "stated here so a filtered number is never read as a complete one."
         if names
         else ""
     )
@@ -10648,13 +10671,27 @@ def _exclude_repos() -> tuple[frozenset[str], str]:
 
 
 def _team_prs(prs: pd.DataFrame) -> pd.DataFrame:
-    """PRs that count: excluded repos out, drafts kept but flagged for callers."""
+    """PRs that count, for a frame that may predate the query-level exclusion."""
     if prs.empty:
         return prs
     excluded, _ = _exclude_repos()
     if excluded and "repo" in prs.columns:
         prs = prs[~prs["repo"].astype(str).isin(excluded)]
     return prs
+
+
+# The rendered tables are display, not paging widgets, so a long queue is cut.
+_STUCK_QUEUE_ROWS = 25
+
+
+def _truncation_note(total: int, shown: int) -> str:
+    """The footer a cut table needs, or "" when nothing was cut."""
+    if total <= shown:
+        return ""
+    return (
+        f"Showing the {shown} oldest of {total}. The other {total - shown} are "
+        "newer and still waiting — the queue is longer than this card."
+    )
 
 
 def _repo_review_coverage(open_prs: pd.DataFrame) -> pd.DataFrame:
@@ -10708,7 +10745,6 @@ def _repo_review_coverage(open_prs: pd.DataFrame) -> pd.DataFrame:
 def _render_code_kpis(open_prs: pd.DataFrame, merged_prs: pd.DataFrame) -> None:
     """The five numbers the mockup opens with, from the frames already fetched."""
     signals = _open_pr_signals(open_prs, None)
-    drafts_total = int(len(open_prs))
     share = (signals["unapproved"] / signals["total"]) if signals["total"] else 0.0
     oldest = signals["oldest_unreviewed_days"]
 
@@ -10722,17 +10758,25 @@ def _render_code_kpis(open_prs: pd.DataFrame, merged_prs: pd.DataFrame) -> None:
         if not never.empty:
             oldest_repo = str(never.loc[never["age_days"].idxmax()].get("repo", ""))
 
+    # The tile that carries an accusation reports the accusation's own column.
+    # ``self_merged`` is merely ``merged_by == author``, which is normal once a
+    # colleague has approved; ``merged_without_outside_approval`` is the review
+    # process not happening, and GitHub does not let an author approve their own
+    # PR at all, so "approved own work" described something impossible.
     selfm = pr_quality.self_merge(merged_prs)
+    unapproved_merges = (
+        int(selfm["merged_without_outside_approval"].sum()) if not selfm.empty else 0
+    )
     self_merged = int(selfm["self_merged"].sum()) if not selfm.empty else 0
     merged_total = int(selfm["merged_prs"].sum()) if not selfm.empty else 0
-    self_share = (self_merged / merged_total) if merged_total else 0.0
+    unapproved_share = (unapproved_merges / merged_total) if merged_total else 0.0
 
     theme_html.tiles(
         [
             (
                 "Open PRs",
                 str(signals["total"]),
-                f"non-draft · of {drafts_total} including drafts",
+                "open and handed to a reviewer · the search excludes drafts",
                 "neutral",
             ),
             (
@@ -10754,10 +10798,15 @@ def _render_code_kpis(open_prs: pd.DataFrame, merged_prs: pd.DataFrame) -> None:
                 "warning" if oldest else "good",
             ),
             (
-                "Self-merged · 30d",
-                str(self_merged),
-                f"{self_share:.0%} of merges · author approved own work" if merged_total else "no merges in window",
-                "danger" if self_share > 0.25 else "neutral",
+                "Merged unapproved · 30d",
+                str(unapproved_merges),
+                (
+                    f"{unapproved_share:.0%} of merges · nobody else approved first"
+                    f" · {self_merged} pressed merge on their own PR"
+                    if merged_total
+                    else "no merges in window"
+                ),
+                "danger" if unapproved_share > 0.25 else "neutral",
             ),
         ]
     )
@@ -10844,6 +10893,9 @@ def _render_stuck_queue(open_prs: pd.DataFrame, tickets: pd.DataFrame) -> None:
         stuck.get("review_requests", pd.Series(0, index=stuck.index)).fillna(0).astype(int) > 0
     ).map({True: "yes", False: "no"})
     stuck = stuck.sort_values("age_days", ascending=False)
+    # This org has run 75+ unapproved open PRs, so the hidden tail is the normal
+    # case rather than the edge one: the footer names the cut, or 25 rows read as
+    # the whole queue.
     theme_html.table(
         stuck,
         [
@@ -10857,6 +10909,8 @@ def _render_stuck_queue(open_prs: pd.DataFrame, tickets: pd.DataFrame) -> None:
             ("jira_key", "Ticket", "text"),
         ],
         title="",
+        footer=_truncation_note(len(stuck), _STUCK_QUEUE_ROWS),
+        max_rows=_STUCK_QUEUE_ROWS,
     )
 
 

@@ -47,6 +47,18 @@ def test_a_non_http_link_renders_as_none_not_as_a_link(monkeypatch):
     assert "none" in captured["html"]
 
 
+def test_a_scheme_that_merely_starts_with_http_is_not_a_link(monkeypatch):
+    """``httpfoo:`` passes a prefix check and must still not be emitted."""
+    captured = {}
+    monkeypatch.setattr(
+        theme_html.st, "markdown", lambda body, **k: captured.setdefault("html", body)
+    )
+    frame = pd.DataFrame({"url": ["httpevil:alert(1)"], "title": ["x"]})
+    theme_html.table(frame, [("url", "PR", "link"), ("title", "T", "text")], title="t")
+    assert "httpevil" not in captured["html"]
+    assert "none" in captured["html"]
+
+
 def test_bar_widths_are_proportional_to_values(monkeypatch):
     captured = {}
     monkeypatch.setattr(
