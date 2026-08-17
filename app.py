@@ -53,6 +53,7 @@ import focus
 import github_client
 import kpi
 import integrity
+import next_actions
 import pr_hygiene
 from capacity import (
     capacity_table,
@@ -2230,7 +2231,16 @@ def _render_epics(df: pd.DataFrame, organization_source: pd.DataFrame | None = N
             "Epics needing attention",
             f"{max(drifting, 0)}",
         )
-        _tile(e3, TAB_ENGINEERING, epics_section, "Tickets with no epic", f"{orphans}")
+        # "in this view" because the Epic organization block below shows the same
+        # label for the whole instance, and two tiles reading 7 and 9 under one
+        # name left the reader to guess which was the orphan count.
+        _tile(
+            e3,
+            TAB_ENGINEERING,
+            epics_section,
+            "Tickets with no epic (in this view)",
+            f"{orphans}",
+        )
 
         # "No epic" is a bucket rather than an issue, so it gets no link to follow.
         display = rollup.copy()
@@ -2286,7 +2296,13 @@ def _render_epic_organization(df: pd.DataFrame) -> None:
     matched = suggestions[suggestions["suggested_epic_key"].ne("")]
     o1, o2, o3 = st.columns(3)
     orphan_section = "Epic organization"
-    _tile(o1, TAB_ENGINEERING, orphan_section, "Tickets with no epic", f"{len(suggestions)}")
+    _tile(
+        o1,
+        TAB_ENGINEERING,
+        orphan_section,
+        "Tickets with no epic (whole board)",
+        f"{len(suggestions)}",
+    )
     _tile(o2, TAB_ENGINEERING, orphan_section, "With a suggested parent", f"{len(matched)}")
     _tile(o3, TAB_ENGINEERING, orphan_section, "Epics with nothing open", f"{len(empty)}")
     st.caption(
@@ -3363,6 +3379,19 @@ def _render_sprint_capacity(
         sprint_ticket_columns
     ].sort_values(["include", "assignee", "key"], ascending=[False, True, True])
 
+    # An unfilled text cell reaches st.data_editor as None and is drawn as a grey
+    # literal "None" - a ticket with no estimate read as one estimated at None.
+    # The estimate is left blank rather than dashed because it is editable and a
+    # dash typed back at Jira is not a duration; Logged is read-only, so it says
+    # the same em dash the other tables say.
+    for column, placeholder in (("original_estimate", ""), ("logged_time", _NO_VALUE)):
+        if column in ticket_editor_df.columns:
+            text = ticket_editor_df[column].astype("object")
+            text = text.where(text.notna(), "").astype(str).str.strip()
+            ticket_editor_df[column] = text.where(
+                ~text.str.lower().isin({"", "none", "nan", "nat", "<na>"}), placeholder
+            )
+
     # display_editor_df is only used for what the user sees — bubble click narrows rows here only.
     is_bubble_filtered = False
     if selected_ticket_key:
@@ -4029,6 +4058,12 @@ def _render_sprint_capacity(
         preview_workload = preview_scoped[preview_scoped["status_live"].isin(workload_statuses)].copy()
     else:
         preview_workload = preview_scoped.iloc[0:0].copy()
+        # Otherwise the tiles below read "0 tickets in sprint" beside a grand
+        # total of 69h, which is not a sprint anybody can picture.
+        st.caption(
+            "No statuses are selected, so the two hour tiles count nothing. "
+            "Grand Total ignores this filter, which is why it still has hours in it."
+        )
 
     c1, c2, c3 = st.columns(3)
     c1.markdown(
@@ -9736,35 +9771,46 @@ def _open_pr_signals(open_prs: pd.DataFrame, open_count_exact: object) -> dict[s
     }
 
 
-def _ownerless(df: pd.DataFrame) -> int:
-    """Open tickets belonging to nobody.
+def _ownerless_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """The open tickets belonging to nobody, not just how many there are.
 
     Ownerless is worse than badly owned: no scorecard can carry it, so it is
-    invisible in every per-person view on the dashboard.
+    invisible in every per-person view on the dashboard. The rows are returned
+    because a reader who is told 91 tickets have no owner needs the 91.
     """
     if df.empty or "assignee" not in df.columns:
-        return 0
+        return df.iloc[0:0]
     names = df["assignee"].fillna("").astype(str).str.strip().str.lower()
-    return int(names.isin(_NO_OWNER_NAMES).sum())
+    return df[names.isin(_NO_OWNER_NAMES)]
 
 
-def _stalled_count(df: pd.DataFrame) -> tuple[int, str]:
-    """How many open tickets have not *moved* in TODAY_STALLED_DAYS.
+def _ownerless(df: pd.DataFrame) -> int:
+    """How many open tickets belong to nobody."""
+    return int(len(_ownerless_rows(df)))
 
-    Returns the count and the clock it was measured on, because a fallback to
-    edit age has to say so - it is the gameable one.
+
+def _stalled_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """The open tickets that have not *moved* in TODAY_STALLED_DAYS, and the clock.
+
+    A fallback to edit age has to say so - it is the gameable one.
     """
     if df.empty:
-        return 0, "status age"
+        return df.iloc[0:0], "status age"
     try:
         ages = integrity.status_age_days(df, integrity.changelog_events(df))
-        column = ages["status_age_days"].dropna()
-        if not column.empty:
-            return int((column >= TODAY_STALLED_DAYS).sum()), "status age"
+        column = ages["status_age_days"]
+        if not column.dropna().empty:
+            return df[(column >= TODAY_STALLED_DAYS).fillna(False)], "status age"
     except Exception:  # noqa: BLE001 - a changelog we cannot parse must not blank the page
         logger.exception("status_age_days failed; falling back to edit age")
     idle = df.get("idle_days", pd.Series(0.0, index=df.index)).fillna(0.0)
-    return int((idle >= TODAY_STALLED_DAYS).sum()), "edit age (no changelog)"
+    return df[idle >= TODAY_STALLED_DAYS], "edit age (no changelog)"
+
+
+def _stalled_count(df: pd.DataFrame) -> tuple[int, str]:
+    """How many open tickets have not *moved* in TODAY_STALLED_DAYS."""
+    rows, clock = _stalled_rows(df)
+    return int(len(rows)), clock
 
 
 def _estimate_coverage(df: pd.DataFrame) -> tuple[int, int]:
@@ -9889,6 +9935,98 @@ def _render_attention_band(
     )
 
 
+def _action_queues(
+    bundle: "_EngineeringData", board: pd.DataFrame
+) -> dict[str, list[next_actions.Action]]:
+    """Every tile's number turned into the named work behind it."""
+    stalled, _ = _stalled_rows(board)
+    return {
+        "review": (
+            next_actions.review_actions(bundle.open_prs) if bundle.github_ready else []
+        ),
+        "triage": next_actions.triage_actions(
+            _as_frame(bundle.data.get("triage_stuck")), url_for=_jira_ticket_url
+        ),
+        "ownership": next_actions.ownership_actions(
+            _ownerless_rows(board), url_for=_jira_ticket_url
+        ),
+        "stalled": next_actions.stalled_actions(stalled, url_for=_jira_ticket_url),
+    }
+
+
+def _render_action_list(actions: list[next_actions.Action]) -> None:
+    """The actions as numbered lines, each naming its item and linking to it."""
+    lines = []
+    for position, action in enumerate(actions, start=1):
+        item = (
+            f"[{html.escape(action.subject)}]({action.url})"
+            if action.url.lower().startswith(("http://", "https://"))
+            else f"`{action.subject}`"
+        )
+        lines.append(
+            f"{position}. **{action.verb}** {item} — {html.escape(action.detail)}"
+        )
+    st.markdown("\n".join(lines))
+
+
+def _render_action_queue(
+    label: str, actions: list[next_actions.Action], *, empty: str
+) -> None:
+    """One tile's work, in an expander, with every row clickable."""
+    with st.expander(f"{label} ({len(actions)})"):
+        if not actions:
+            st.success(empty)
+            return
+        st.dataframe(
+            next_actions.as_frame(actions),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Open": st.column_config.LinkColumn("Open", display_text="open ↗"),
+                "Why": st.column_config.TextColumn("Why", width="large"),
+            },
+        )
+
+
+def _render_next_actions(queues: dict[str, list[next_actions.Action]]) -> None:
+    """What to do, before any number saying why.
+
+    The tiles above are counts, and a count is not a move: a reader was told 75
+    pull requests carry no approving review and left to work out which 75 and
+    whose. This says the moves, longest wait first, one problem at a time so a
+    five-line list still spans review, triage, ownership and stalled work - and
+    every item is the link to the thing itself.
+    """
+    st.subheader("Do these next")
+    top = next_actions.rank(queues, limit=5)
+    if not top:
+        st.success("Nothing is waiting on a decision: no unreviewed PR, no untriaged ticket, nothing ownerless or stalled.")
+        return
+    st.caption("Ranked by how long each has been waiting, one per problem before a second from any.")
+    _render_action_list(top)
+
+    _render_action_queue(
+        "Open PRs with no approving review",
+        queues["review"],
+        empty="Every open PR has an approving review.",
+    )
+    _render_action_queue(
+        f"Tickets stuck in triage > {TRIAGE_STUCK_HOURS:.0f}h",
+        queues["triage"],
+        empty="Nothing has been sitting in triage.",
+    )
+    _render_action_queue(
+        "Open tickets with no owner",
+        queues["ownership"],
+        empty="Every open ticket has an owner.",
+    )
+    _render_action_queue(
+        f"Tickets that have not moved in {TODAY_STALLED_DAYS:.0f}d",
+        queues["stalled"],
+        empty="Everything open has moved this month.",
+    )
+
+
 def _render_today_page() -> None:
     """The landing page: what needs a decision, then this week in six numbers.
 
@@ -9901,7 +10039,13 @@ def _render_today_page() -> None:
         "Counts are telemetry, not performance — people are scored on the People page."
     )
     bundle = _engineering_data()
-    df = bundle.df
+    # Backlog rows are left out here as they are on Delivery and Engineering by
+    # default. Counting them made this page open with "16 open tickets" above a
+    # Delivery page reading 14 from the same gather, with nothing on either
+    # screen to reconcile them - and a landing page that disagrees with the page
+    # behind it is worse than one that counts less.
+    df = _metrics_df(bundle.df, include_backlogs=False)
+    parked = int(len(bundle.df)) - int(len(df))
 
     prs = _open_pr_signals(bundle.open_prs, bundle.open_count_exact)
     ownerless = _ownerless(df)
@@ -9913,6 +10057,9 @@ def _render_today_page() -> None:
         ownerless=ownerless,
         open_total=int(len(df)),
     )
+
+    st.divider()
+    _render_next_actions(_action_queues(bundle, df))
 
     st.divider()
     st.subheader("This week")
@@ -9934,7 +10081,16 @@ def _render_today_page() -> None:
                 "bots excluded" if bundle.github_ready else "GitHub unavailable",
                 "info",
             ),
-            ("Open tickets", str(len(df)), "current JQL scope", "neutral"),
+            (
+                "Open tickets",
+                str(len(df)),
+                (
+                    f"Backlog excluded ({parked} parked)"
+                    if parked
+                    else "current JQL scope"
+                ),
+                "neutral",
+            ),
             (
                 f"Stalled {TODAY_STALLED_DAYS:.0f}d+",
                 str(stalled),
@@ -9953,7 +10109,10 @@ def _render_today_page() -> None:
 
     st.divider()
     st.subheader("Where open work sits")
-    st.caption(f"{len(df)} open tickets by status — ranked, not sliced.")
+    st.caption(
+        f"{len(df)} open tickets by status — ranked, not sliced."
+        + (f" {parked} Backlog ticket(s) are not counted here." if parked else "")
+    )
     if df.empty:
         st.info("No open tickets returned for the current JQL.")
     else:

@@ -223,3 +223,47 @@ def test_an_empty_board_stalls_nothing():
     assert app._stalled_count(pd.DataFrame()) == (0, "status age")
     assert app._estimate_coverage(pd.DataFrame()) == (0, 0)
     assert app._ownerless(pd.DataFrame()) == 0
+
+
+def test_the_rows_behind_the_ownerless_tile_are_the_tickets_themselves():
+    """A count with no rows behind it cannot be acted on, which was the complaint."""
+    df = pd.DataFrame(
+        {
+            "key": ["ENG-1", "ENG-2", "ENG-3"],
+            "assignee": ["Tam", None, "Unassigned"],
+            "status": ["In Progress", "To Do", "To Do"],
+            "ticket_age_days": [1.0, 30.0, 90.0],
+        }
+    )
+    rows = app._ownerless_rows(df)
+    assert rows["key"].tolist() == ["ENG-2", "ENG-3"]
+    assert app._ownerless(df) == len(rows)
+
+
+def test_the_rows_behind_the_stalled_tile_are_the_tickets_themselves():
+    df = pd.DataFrame(
+        {
+            "key": ["ENG-1", "ENG-2"],
+            "assignee": ["Tam", "Mehdi"],
+            "status": ["In Progress", "In Progress"],
+            "idle_days": [1.0, 45.0],
+            "changelog": [None, None],
+        }
+    )
+    rows, clock = app._stalled_rows(df)
+    assert rows["key"].tolist() == ["ENG-2"]
+    assert "edit age" in clock
+
+
+def test_today_counts_the_board_delivery_counts_and_not_the_backlog():
+    """The landing page said 16 open tickets above a Delivery page reading 14."""
+    df = pd.DataFrame(
+        {
+            "key": ["ENG-1", "ENG-2", "ENG-3"],
+            "status": ["In Progress", "Backlog", "To Do"],
+            "assignee": ["Tam", "Tam", None],
+        }
+    )
+    board = app._metrics_df(df, include_backlogs=False)
+    assert board["key"].tolist() == ["ENG-1", "ENG-3"]
+    assert app._ownerless(board) == 1
