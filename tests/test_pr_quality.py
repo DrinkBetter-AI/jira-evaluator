@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -544,3 +545,20 @@ def test_every_rollup_survives_an_empty_frame():
         assert isinstance(out, pd.DataFrame) and out.empty
     pairs, people = pr_quality.reciprocity(empty)
     assert pairs.empty and people.empty
+
+
+def test_a_refused_read_repeats_what_github_said(monkeypatch):
+    """``403 Client Error`` alone cannot tell a permission from an IP allow list."""
+
+    class Refusal:
+        status_code = 403
+        text = (
+            '{"message":"Although you appear to have the correct authorization '
+            'credentials, the organization has an IP allow list enabled"}'
+        )
+
+    monkeypatch.setattr(github_client.requests, "post", lambda *a, **k: Refusal())
+    with pytest.raises(github_client.GitHubConfigError) as raised:
+        github_client._graphql("t", "{viewer{login}}", {})
+    assert "403" in str(raised.value)
+    assert "IP allow list" in str(raised.value)

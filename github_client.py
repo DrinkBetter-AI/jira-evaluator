@@ -95,6 +95,13 @@ def _without_excluded(org: str, query: str) -> str:
 
 
 def _graphql(token: str, query: str, variables: dict) -> dict:
+    """One GraphQL read, with GitHub's own words kept when it refuses.
+
+    A bare ``403 Client Error`` is unactionable: a token missing a permission, an
+    org IP allow list refusing the caller's address and a secondary rate limit all
+    read identically, and the deployment cannot be told which it is without the
+    body GitHub sends to say so.
+    """
     response = requests.post(
         GITHUB_GRAPHQL_URL,
         json={"query": query, "variables": variables},
@@ -104,7 +111,12 @@ def _graphql(token: str, query: str, variables: dict) -> dict:
         },
         timeout=30,
     )
-    response.raise_for_status()
+    if response.status_code >= 400:
+        reason = " ".join(response.text.split())[:300]
+        raise GitHubConfigError(
+            f"GitHub refused the read: HTTP {response.status_code}"
+            + (f" — {reason}" if reason else "")
+        )
     payload = response.json()
     if payload.get("errors"):
         messages = "; ".join(e.get("message", "") for e in payload["errors"])
