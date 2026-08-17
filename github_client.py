@@ -39,6 +39,10 @@ DEFAULT_ORG = "DrinkBetter-AI"
 # GitHub logins/orgs: alphanumeric and single hyphens only. Enforced so the org,
 # which is interpolated into the search query, cannot smuggle extra qualifiers.
 _ORG_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+# A repository name, optionally owner-qualified. Same reason as the org: these
+# are interpolated into the search query, so a value that could carry a space
+# or a second qualifier is dropped rather than sent.
+_REPO_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9-]{0,38}/)?[A-Za-z0-9._-]{1,100}$")
 
 # Env var names, checked in order. The dedicated dashboard token comes first so
 # an ambient GITHUB_TOKEN/GH_TOKEN (Actions, Codespaces, gh CLI) - which often
@@ -64,6 +68,30 @@ def load_github_env() -> tuple[str, str] | None:
     if not _ORG_RE.match(org):
         raise GitHubConfigError(f"Invalid GITHUB_ORG: {org!r}")
     return token, org
+
+
+def excluded_repos(org: str) -> tuple[str, ...]:
+    """``owner/name`` for every repo ``GITHUB_EXCLUDE_REPOS`` takes out of scope.
+
+    The exclusion belongs in the query rather than in the frame: a page that
+    filters its own rows disagrees with the search counts, which cannot be
+    filtered afterwards at all, and the same population then reads two ways
+    depending on which page you are standing on.
+    """
+    raw = os.getenv("GITHUB_EXCLUDE_REPOS", "")
+    names = []
+    for entry in raw.split(","):
+        name = entry.strip()
+        if not name or not _REPO_RE.match(name):
+            continue
+        names.append(name if "/" in name else f"{org}/{name}")
+    return tuple(dict.fromkeys(names))
+
+
+def _without_excluded(org: str, query: str) -> str:
+    """``query`` with a ``-repo:`` term per excluded repository."""
+    terms = " ".join(f"-repo:{name}" for name in excluded_repos(org))
+    return f"{query} {terms}" if terms else query
 
 
 def _graphql(token: str, query: str, variables: dict) -> dict:
@@ -385,7 +413,7 @@ def _to_frame(nodes: list[dict]) -> pd.DataFrame:
 
 
 def _open_query(org: str) -> str:
-    return f"org:{org} is:pr is:open draft:false sort:created-asc"
+    return _without_excluded(org, f"org:{org} is:pr is:open draft:false") + " sort:created-asc"
 
 
 def open_pr_count(token: str, org: str) -> int:
@@ -421,7 +449,7 @@ def _merged_query(org: str, days: int) -> str:
     since = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-    return f"org:{org} is:pr is:merged merged:>={since}"
+    return _without_excluded(org, f"org:{org} is:pr is:merged merged:>={since}")
 
 
 def merged_pr_count(token: str, org: str, days: int) -> int:
@@ -457,7 +485,7 @@ def _closed_unmerged_query(org: str, days: int) -> str:
     since = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-    return f"org:{org} is:pr is:closed is:unmerged closed:>={since}"
+    return _without_excluded(org, f"org:{org} is:pr is:closed is:unmerged closed:>={since}")
 
 
 def closed_unmerged_pr_count(token: str, org: str, days: int) -> int:

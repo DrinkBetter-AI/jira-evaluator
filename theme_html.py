@@ -80,6 +80,13 @@ def _esc(value: Any) -> str:
     return _html.escape(str(value))
 
 
+# The one value emitted as markup rather than text is a link's href, so the
+# scheme is checked exactly, not by prefix: ``http`` also opens
+# ``httpfoo:``-shaped values, and the rest of the codebase already spells the
+# contract this way.
+_LINK_SCHEMES = ("https://", "http://")
+
+
 def css() -> None:
     """Inject the component styles once per page."""
     st.markdown(_CSS, unsafe_allow_html=True)
@@ -160,7 +167,11 @@ def table(
     ``columns`` is (source column, heading, kind) where kind is ``text``,
     ``num``, ``link`` (the cell holds a URL; the last path segment is the
     label), or ``strong-num``. Cells are escaped; only the link's href is
-    emitted as markup, and only when it starts with http.
+    emitted as markup, and only for an ``http://``/``https://`` URL.
+
+    Rows past ``max_rows`` are not drawn - these blocks display, they do not
+    page - so a caller with a longer frame owes the reader a ``footer`` saying
+    how much was cut.
     """
     heads = "".join(
         f'<th class="{ "num" if kind.endswith("num") else "" }">{_esc(head)}</th>'
@@ -173,7 +184,7 @@ def table(
             raw = row.get(source, "")
             if kind == "link":
                 url = str(raw or "")
-                if url.startswith("http"):
+                if url.startswith(_LINK_SCHEMES):
                     label = _esc(url.rstrip("/").rsplit("/", 1)[-1])
                     cells.append(f'<td><a href="{_esc(url)}">#{label}</a></td>')
                 else:
