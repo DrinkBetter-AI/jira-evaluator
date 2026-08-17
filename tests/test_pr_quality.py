@@ -635,3 +635,34 @@ def test_reads_are_serialised_so_a_burst_cannot_trip_the_limit(monkeypatch):
     for t in threads:
         t.join()
     assert max(overlapping) == 1
+
+
+def test_a_minute_long_wait_is_capped_not_discarded(monkeypatch):
+    """GitHub asks for 60s; retrying at 2s spends every attempt inside the ban."""
+    throttle = _Response(
+        403, '{"message":"secondary rate limit"}', {"retry-after": "60"}
+    )
+    slept: list[float] = []
+    replies = [throttle, _Response(200)]
+    monkeypatch.setattr(github_client.time, "sleep", slept.append)
+    monkeypatch.setattr(
+        github_client.requests, "post", lambda *a, **k: replies.pop(0)
+    )
+    github_client._graphql("t", "{}", {})
+    assert slept == [github_client._RETRY_CEILING_SECONDS]
+
+
+def test_waiting_stops_at_the_budget_rather_than_hanging_the_page(monkeypatch):
+    """A throttled org gets a message, not a spinner."""
+    slept: list[float] = []
+    monkeypatch.setattr(github_client.time, "sleep", slept.append)
+    monkeypatch.setattr(
+        github_client.requests,
+        "post",
+        lambda *a, **k: _Response(
+            403, '{"message":"secondary rate limit"}', {"retry-after": "30"}
+        ),
+    )
+    with pytest.raises(github_client.GitHubConfigError):
+        github_client._graphql("t", "{}", {})
+    assert sum(slept) <= github_client._RETRY_BUDGET_SECONDS

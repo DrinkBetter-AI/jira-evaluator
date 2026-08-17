@@ -61,10 +61,20 @@ _REQUEST_LOCK = threading.Lock()
 _RETRY_ATTEMPTS = 4
 _RETRY_BACKOFF_SECONDS = 2.0
 _RETRY_CEILING_SECONDS = 30.0
+# Total seconds one read may spend waiting out throttles before it gives up. A
+# page that says "GitHub is throttling us" after half a minute is more use than
+# one that spins: the reader can come back, and the other sections still draw.
+_RETRY_BUDGET_SECONDS = 45.0
 
 
 def _retry_after(response: requests.Response, attempt: int) -> float:
-    """How long to wait before asking again, GitHub's own answer preferred."""
+    """How long to wait before asking again, GitHub's own answer preferred.
+
+    A requested wait longer than the ceiling is cut down to the ceiling, never
+    discarded: GitHub's secondary limit routinely asks for a minute, and ignoring
+    that in favour of a two-second backoff spends every retry inside the window
+    it was told to sit out, which is how a throttle became an error page.
+    """
     for header in ("retry-after", "x-ratelimit-reset"):
         raw = response.headers.get(header, "")
         if not raw.isdigit():
@@ -72,8 +82,8 @@ def _retry_after(response: requests.Response, attempt: int) -> float:
         seconds = int(raw)
         if header == "x-ratelimit-reset":
             seconds = int(seconds - time.time())
-        if 0 < seconds <= _RETRY_CEILING_SECONDS:
-            return float(seconds)
+        if seconds > 0:
+            return float(min(seconds, _RETRY_CEILING_SECONDS))
     return min(_RETRY_BACKOFF_SECONDS * (2**attempt), _RETRY_CEILING_SECONDS)
 
 
@@ -137,12 +147,14 @@ def _graphql(token: str, query: str, variables: dict) -> dict:
 
     Serialised, because concurrent reads on one token are what GitHub's secondary
     limit exists to stop, and the dashboard's opening burst tripped it on every
-    load. Retried with GitHub's own ``Retry-After``, because a throttle is a wait,
-    not a failure, and the alternative was a blank page. Quoted, because a bare
+    load. Retried with GitHub's own ``Retry-After`` up to a fixed budget, because
+    a throttle is a wait, not a failure, but a reader would rather be told than
+    watch a spinner. Quoted, because a bare
     ``403 Client Error`` cannot distinguish a missing permission, an org IP allow
     list and a secondary limit - the three days this bug survived were spent
     guessing between exactly those.
     """
+    spent = 0.0
     for attempt in range(_RETRY_ATTEMPTS):
         with _REQUEST_LOCK:
             response = requests.post(
@@ -154,10 +166,13 @@ def _graphql(token: str, query: str, variables: dict) -> dict:
                 },
                 timeout=30,
             )
-        if _throttled(response) and attempt < _RETRY_ATTEMPTS - 1:
-            time.sleep(_retry_after(response, attempt))
-            continue
-        break
+        if not _throttled(response) or attempt == _RETRY_ATTEMPTS - 1:
+            break
+        pause = _retry_after(response, attempt)
+        if spent + pause > _RETRY_BUDGET_SECONDS:
+            break
+        spent += pause
+        time.sleep(pause)
     if response.status_code >= 400:
         reason = " ".join(response.text.split())[:300]
         raise GitHubConfigError(
