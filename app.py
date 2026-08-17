@@ -10591,8 +10591,67 @@ def _render_people_page() -> None:
     _download_report(slot, TAB_ENGINEERING)
 
 
+def _cycle_by_status(df: pd.DataFrame) -> pd.DataFrame:
+    """Median days a ticket sits in each status, from real transitions.
+
+    This is the chart that reframes the bottleneck: when the slowest statuses
+    are review stages, the constraint is attention, not build capacity - and no
+    amount of pressure on authors moves it.
+    """
+    try:
+        events = integrity.changelog_events(df)
+        cycle = integrity.cycle_time(events, df)
+        detail = cycle.detail
+    except Exception:  # noqa: BLE001 - an unparseable changelog must not blank the page
+        logger.exception("cycle_time failed; the by-status chart is omitted")
+        return pd.DataFrame(columns=["status", "median_days", "n"])
+    if detail.empty:
+        return pd.DataFrame(columns=["status", "median_days", "n"])
+    closed = detail[~detail["is_open"].fillna(False).astype(bool)]
+    if closed.empty:
+        return pd.DataFrame(columns=["status", "median_days", "n"])
+    out = (
+        closed.groupby("status")
+        .agg(median_days=("days", "median"), n=("days", "size"))
+        .reset_index()
+        .sort_values("median_days", ascending=False)
+    )
+    # Below five stays out: a median of two intervals is an anecdote wearing math.
+    return out[out["n"] >= 5].reset_index(drop=True)
+
+
+def _stale_with_masked(df: pd.DataFrame, top_n: int = 12) -> pd.DataFrame:
+    """The stale queue with the gaming made visible per row.
+
+    ``masked_days`` is apparent freshness from edits that moved no work. A row
+    with status age 186 and last-touched 2 is a ticket that has not moved in six
+    months and looks alive - the exact shape a label-edit sweep produces.
+    """
+    if df.empty:
+        return pd.DataFrame()
+    try:
+        ages = integrity.status_age_days(df, integrity.changelog_events(df))
+    except Exception:  # noqa: BLE001
+        logger.exception("status_age_days failed; the stale table is omitted")
+        return pd.DataFrame()
+    if ages.empty:
+        return pd.DataFrame()
+    ages = ages.sort_values("status_age_days", ascending=False).head(top_n)
+    summaries = df.set_index("key").get("summary", pd.Series(dtype=object))
+    ages["summary"] = ages["key"].map(summaries).fillna("")
+    ages["ticket"] = ages["key"] + "  " + ages["summary"].astype(str).str.slice(0, 60)
+    ages["url"] = ages["key"].map(_jira_ticket_url)
+    return ages
+
+
 def _render_delivery_page() -> None:
-    """What finished, and how long it took. Counts, not verdicts."""
+    """What finished and how long it took, in the mockup's shape.
+
+    Counts, never verdicts: people are scored on the People page, and the
+    caption says so because the distinction is the whole design. The repo
+    exclusion caption rides along wherever PR-derived figures appear.
+    """
+    theme_html.css()
     _, exclusion_caption = _exclude_repos()
     st.caption(
         "Org-wide throughput and the queues behind it. Counts here are telemetry — "
@@ -10603,33 +10662,103 @@ def _render_delivery_page() -> None:
     if _one_person_instead(bundle, view, slot):
         return
 
+    df = bundle.df
     data = bundle.data
-    _render_resolved_summary(
-        data.get("resolved_count_7"),
-        data.get("resolved_count_30"),
-        data.get("resolved_30"),
-        bundle.pr_count_7,
-        bundle.pr_count_30,
-        bundle.merged_prs,
-        bundle.github_ready,
-        bundle.github_error,
+    stalled, stalled_clock = _stalled_count(df)
+    cycle = _cycle_by_status(df)
+    overall_median = None
+    if not cycle.empty:
+        in_progress = cycle[cycle["status"].str.lower().eq("in progress")]
+        overall_median = float(in_progress["median_days"].iloc[0]) if not in_progress.empty else None
+
+    resolved_7 = data.get("resolved_count_7")
+    oldest = float(df["ticket_age_days"].max()) if "ticket_age_days" in df.columns and len(df) else None
+
+    theme_html.tiles(
+        [
+            ("Resolved · 7d", _text_or(resolved_7, "—"), "credited to current assignee — changelog credit lands with PR 2", "info"),
+            (
+                "Median In-Progress",
+                f"{overall_median:.1f}d" if overall_median is not None else "—",
+                "days in In Progress, from real transitions",
+                "info",
+            ),
+            (
+                f"Stalled {TODAY_STALLED_DAYS:.0f}d+",
+                str(stalled),
+                f"by {stalled_clock}, never edit age",
+                "danger" if stalled else "good",
+            ),
+            ("Open tickets", str(len(df)), "current scope", "neutral"),
+            (
+                "Oldest open",
+                f"{oldest:.0f}d" if oldest else "—",
+                "age of the oldest ticket in scope",
+                "warning" if oldest and oldest > 180 else "neutral",
+            ),
+        ]
     )
-    st.divider()
-    _render_metrics(
-        view.filtered,
-        include_backlogs=view.include_backlogs,
-        unassigned_source=view.unscoped if view.selected_assignees is not None else None,
-    )
-    metrics_view = _metrics_df(view.filtered, view.include_backlogs)
-    st.divider()
-    _render_mix(metrics_view)
+
+    left, right = st.columns(2)
+    with left:
+        team_view = add_team(df, TEAM_PROJECTS, TEAM_PEOPLE)
+        summary = team_summary(team_view)
+        if not summary.empty:
+            theme_html.hbars(
+                [(row.team, float(row.open), str(int(row.open))) for row in summary.itertuples()],
+                title="Where open work sits, by team",
+                subtitle=f"{len(df)} open tickets — ranked, never sliced",
+            )
+    with right:
+        if cycle.empty:
+            st.info("Not enough closed status intervals to draw cycle time yet.")
+        else:
+            slow_review = cycle.head(3)["status"].str.contains("review", case=False).sum()
+            footer = (
+                "The slowest statuses are review, not build. The bottleneck is "
+                "attention, not capacity."
+                if slow_review >= 2
+                else ""
+            )
+            theme_html.hbars(
+                [
+                    (row.status, float(row.median_days), f"{row.median_days:.1f}")
+                    for row in cycle.head(8).itertuples()
+                ],
+                title="Cycle time by status",
+                subtitle="Median days a ticket sits before it moves on (n ≥ 5)",
+                footer=footer,
+                severity=True,
+            )
+
+    stale = _stale_with_masked(view.filtered)
+    if not stale.empty:
+        theme_html.table(
+            stale,
+            [
+                ("url", "Ticket", "link"),
+                ("summary", "Summary", "text"),
+                ("assignee", "Owner", "text"),
+                ("status", "Status", "text"),
+                ("status_age_days", "Status age", "num"),
+                ("idle_days", "Last touched", "num"),
+                ("masked_days", "Masked", "num"),
+            ],
+            title="Stale & abandoned — by status age",
+            subtitle=(
+                "Days since the ticket actually moved. Masked is apparent freshness "
+                "from edits that moved no work — a label edit resets last-touched, never this."
+            ),
+            footer=(
+                "The innocent reading: a comment or a linked ticket is a real edit. The "
+                "pattern worth asking about is a large masked figure across many tickets "
+                "in the same week."
+            ),
+        )
+
     st.divider()
     _render_priority_queue(view.filtered, include_backlogs=view.include_backlogs)
-    st.divider()
-    _render_stale_cleanup(view.filtered)
     _download_report(slot, TAB_ENGINEERING)
-
-
 def _exclude_repos() -> tuple[frozenset[str], str]:
     """The repos left out of every PR read, and the caption naming them.
 
