@@ -53,6 +53,7 @@ import focus
 import github_client
 import kpi
 import integrity
+import next_actions
 import pr_hygiene
 from capacity import (
     capacity_table,
@@ -2230,7 +2231,16 @@ def _render_epics(df: pd.DataFrame, organization_source: pd.DataFrame | None = N
             "Epics needing attention",
             f"{max(drifting, 0)}",
         )
-        _tile(e3, TAB_ENGINEERING, epics_section, "Tickets with no epic", f"{orphans}")
+        # "in this view" because the Epic organization block below shows the same
+        # label for the whole instance, and two tiles reading 7 and 9 under one
+        # name left the reader to guess which was the orphan count.
+        _tile(
+            e3,
+            TAB_ENGINEERING,
+            epics_section,
+            "Tickets with no epic (in this view)",
+            f"{orphans}",
+        )
 
         # "No epic" is a bucket rather than an issue, so it gets no link to follow.
         display = rollup.copy()
@@ -2286,7 +2296,13 @@ def _render_epic_organization(df: pd.DataFrame) -> None:
     matched = suggestions[suggestions["suggested_epic_key"].ne("")]
     o1, o2, o3 = st.columns(3)
     orphan_section = "Epic organization"
-    _tile(o1, TAB_ENGINEERING, orphan_section, "Tickets with no epic", f"{len(suggestions)}")
+    _tile(
+        o1,
+        TAB_ENGINEERING,
+        orphan_section,
+        "Tickets with no epic (whole board)",
+        f"{len(suggestions)}",
+    )
     _tile(o2, TAB_ENGINEERING, orphan_section, "With a suggested parent", f"{len(matched)}")
     _tile(o3, TAB_ENGINEERING, orphan_section, "Epics with nothing open", f"{len(empty)}")
     st.caption(
@@ -3363,6 +3379,19 @@ def _render_sprint_capacity(
         sprint_ticket_columns
     ].sort_values(["include", "assignee", "key"], ascending=[False, True, True])
 
+    # An unfilled text cell reaches st.data_editor as None and is drawn as a grey
+    # literal "None" - a ticket with no estimate read as one estimated at None.
+    # The estimate is left blank rather than dashed because it is editable and a
+    # dash typed back at Jira is not a duration; Logged is read-only, so it says
+    # the same em dash the other tables say.
+    for column, placeholder in (("original_estimate", ""), ("logged_time", _NO_VALUE)):
+        if column in ticket_editor_df.columns:
+            text = ticket_editor_df[column].astype("object")
+            text = text.where(text.notna(), "").astype(str).str.strip()
+            ticket_editor_df[column] = text.where(
+                ~text.str.lower().isin({"", "none", "nan", "nat", "<na>"}), placeholder
+            )
+
     # display_editor_df is only used for what the user sees — bubble click narrows rows here only.
     is_bubble_filtered = False
     if selected_ticket_key:
@@ -3973,6 +4002,35 @@ def _render_sprint_capacity(
         else:
             # Create display dataframe with linked key column in the correct position
             epic_df_display = epic_sprint_df[epic_display_cols].sort_values(["assignee", "key"], ascending=[True, True]).copy()
+            # Written out as text - "42%" - and drawn by a TextColumn, because
+            # Streamlit 1.61 paints a NaN in a NumberColumn as the literal word
+            # "None": reading it as a number leaves the leak on the screen, so the
+            # percentage is formatted here and the empty ones dashed with the rest.
+            if "completion_pct" in epic_df_display.columns:
+                percent = pd.to_numeric(
+                    epic_df_display["completion_pct"], errors="coerce"
+                )
+                epic_df_display["completion_pct"] = [
+                    f"{value:.0f}%" if pd.notna(value) else "" for value in percent
+                ]
+            epic_df_display = _dated(epic_df_display, ["created", "updated"])
+            # Read-only, so every unfilled field is dashed the way the other
+            # tables dash theirs: an epic with no estimate must not paint the
+            # word "None" into the Estimate column.
+            epic_df_display = _shown(
+                epic_df_display,
+                [
+                    "summary",
+                    "status",
+                    "priority",
+                    "assignee",
+                    "original_estimate",
+                    "reporter",
+                    "logged_time",
+                    "completion_pct",
+                    "issue_type",
+                ],
+            )
             epic_df_display["key_url"] = epic_df_display["key"].apply(_jira_ticket_url)
             epic_df_display = epic_df_display.drop(columns=["key"])
             visible_epic_columns = [
@@ -4008,7 +4066,7 @@ def _render_sprint_capacity(
                     "original_estimate": st.column_config.TextColumn("Estimate"),
                     "reporter": st.column_config.TextColumn("Reporter"),
                     "logged_time": st.column_config.TextColumn("Logged"),
-                    "completion_pct": st.column_config.NumberColumn("Done %", format="%.0f%%"),
+                    "completion_pct": st.column_config.TextColumn("Done %"),
                     "ticket_age_days": st.column_config.NumberColumn("Age (days)", format="%.1f"),
                     "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
                     "created": st.column_config.TextColumn("Created at"),
@@ -4029,6 +4087,12 @@ def _render_sprint_capacity(
         preview_workload = preview_scoped[preview_scoped["status_live"].isin(workload_statuses)].copy()
     else:
         preview_workload = preview_scoped.iloc[0:0].copy()
+        # Otherwise the tiles below read "0 tickets in sprint" beside a grand
+        # total of 69h, which is not a sprint anybody can picture.
+        st.caption(
+            "No statuses are selected, so the two hour tiles count nothing. "
+            "Grand Total ignores this filter, which is why it still has hours in it."
+        )
 
     c1, c2, c3 = st.columns(3)
     c1.markdown(
@@ -4506,6 +4570,28 @@ def _shown(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
         out[column] = text.where(
             ~text.str.lower().isin({"", "none", "nan", "nat", "<na>"}), _NO_VALUE
         )
+    return out
+
+
+def _dated(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    """``frame`` with the named timestamps written as ``YYYY-MM-DD``.
+
+    Jira hands these back as epoch milliseconds in places, and a column of
+    ``1774860044168.82`` reads as broken data rather than as a date.
+    """
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        raw = out[column]
+        numbers = pd.to_numeric(raw, errors="coerce")
+        if numbers.notna().any() and not pd.api.types.is_datetime64_any_dtype(raw):
+            # Epoch milliseconds: read as-is pandas would call these nanoseconds
+            # and date every ticket to 1970.
+            stamps = pd.to_datetime(numbers, unit="ms", utc=True, errors="coerce")
+        else:
+            stamps = pd.to_datetime(raw, utc=True, errors="coerce")
+        out[column] = stamps.dt.strftime("%Y-%m-%d").fillna("")
     return out
 
 
@@ -9736,35 +9822,57 @@ def _open_pr_signals(open_prs: pd.DataFrame, open_count_exact: object) -> dict[s
     }
 
 
-def _ownerless(df: pd.DataFrame) -> int:
-    """Open tickets belonging to nobody.
+def _ownerless_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """The open tickets belonging to nobody, not just how many there are.
 
     Ownerless is worse than badly owned: no scorecard can carry it, so it is
-    invisible in every per-person view on the dashboard.
+    invisible in every per-person view on the dashboard. The rows are returned
+    because a reader who is told 91 tickets have no owner needs the 91.
     """
     if df.empty or "assignee" not in df.columns:
-        return 0
+        return df.iloc[0:0]
     names = df["assignee"].fillna("").astype(str).str.strip().str.lower()
-    return int(names.isin(_NO_OWNER_NAMES).sum())
+    return df[names.isin(_NO_OWNER_NAMES)]
 
 
-def _stalled_count(df: pd.DataFrame) -> tuple[int, str]:
-    """How many open tickets have not *moved* in TODAY_STALLED_DAYS.
+def _ownerless(df: pd.DataFrame) -> int:
+    """How many open tickets belong to nobody."""
+    return int(len(_ownerless_rows(df)))
 
-    Returns the count and the clock it was measured on, because a fallback to
-    edit age has to say so - it is the gameable one.
+
+def _stalled_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    """The open tickets that have not *moved* in TODAY_STALLED_DAYS, and the clock.
+
+    A fallback to edit age has to say so - it is the gameable one.
     """
     if df.empty:
-        return 0, "status age"
+        return df.iloc[0:0], "status age"
     try:
         ages = integrity.status_age_days(df, integrity.changelog_events(df))
-        column = ages["status_age_days"].dropna()
-        if not column.empty:
-            return int((column >= TODAY_STALLED_DAYS).sum()), "status age"
+        column = ages["status_age_days"]
+        if not column.dropna().empty:
+            # By position, not by label: status_age_days hands back a fresh
+            # RangeIndex, and this frame's index has gaps in it wherever a
+            # Backlog row was dropped. Asked by label, pandas refuses the mask
+            # and the whole measurement silently fell through to edit age.
+            keep = (column >= TODAY_STALLED_DAYS).fillna(False).to_numpy()
+            rows = df[keep].copy()
+            # The age these rows were *chosen* on travels with them, so anything
+            # reporting the wait quotes the same clock the tile measured.
+            rows[next_actions.STALLED_AGE_COLUMN] = column.to_numpy()[keep]
+            return rows, "status age"
     except Exception:  # noqa: BLE001 - a changelog we cannot parse must not blank the page
         logger.exception("status_age_days failed; falling back to edit age")
     idle = df.get("idle_days", pd.Series(0.0, index=df.index)).fillna(0.0)
-    return int((idle >= TODAY_STALLED_DAYS).sum()), "edit age (no changelog)"
+    rows = df[idle >= TODAY_STALLED_DAYS].copy()
+    rows[next_actions.STALLED_AGE_COLUMN] = idle[idle >= TODAY_STALLED_DAYS]
+    return rows, "edit age (no changelog)"
+
+
+def _stalled_count(df: pd.DataFrame) -> tuple[int, str]:
+    """How many open tickets have not *moved* in TODAY_STALLED_DAYS."""
+    rows, clock = _stalled_rows(df)
+    return int(len(rows)), clock
 
 
 def _estimate_coverage(df: pd.DataFrame) -> tuple[int, int]:
@@ -9889,6 +9997,162 @@ def _render_attention_band(
     )
 
 
+_ACTION_QUEUE_NAMES = {
+    "review": "the open PRs",
+    "triage": "the triage queue",
+    "ownership": "the unowned tickets",
+    "stalled": "the stalled tickets",
+}
+
+
+def _action_queues(
+    bundle: "_EngineeringData",
+    board: pd.DataFrame,
+    *,
+    stalled: pd.DataFrame | None = None,
+) -> tuple[dict[str, list[next_actions.Action]], set[str]]:
+    """Every tile's number turned into the named work behind it, and what could not be read.
+
+    A failed read leaves no key in ``data`` at all, which makes an empty queue
+    and "there is nothing to do" indistinguishable. The second value keeps them
+    apart: an outage announced as an all-clear is the one failure of this section
+    a reader has no way of detecting.
+    """
+    # Taken from the caller where it has already been measured: selecting the
+    # stalled rows walks every ticket's changelog, and the tile needs the same
+    # rows, so computing them here again doubled the cost of drawing the page.
+    if stalled is None:
+        stalled, _ = _stalled_rows(board)
+    # The triage read is the raw Jira frame - it has never been through
+    # add_ticket_health_fields, so it carries a created date and no age. Enriched
+    # here rather than defaulted to zero, because "0d in triage" about a ticket
+    # that has been sitting for nine days is worse than no row at all.
+    triage = _as_frame(bundle.data.get("triage_stuck"))
+    if not triage.empty:
+        triage = add_ticket_health_fields(triage)
+    unknown = set()
+    if not bundle.github_ready:
+        unknown.add("review")
+    if bundle.data.get("triage_stuck") is None:
+        unknown.add("triage")
+    return {
+        "review": (
+            next_actions.review_actions(bundle.open_prs) if bundle.github_ready else []
+        ),
+        "triage": next_actions.triage_actions(triage, url_for=_jira_ticket_url),
+        "ownership": next_actions.ownership_actions(
+            _ownerless_rows(board), url_for=_jira_ticket_url
+        ),
+        "stalled": next_actions.stalled_actions(stalled, url_for=_jira_ticket_url),
+    }, unknown
+
+
+def _render_action_list(actions: list[next_actions.Action]) -> None:
+    """The actions as numbered lines, each naming its item and linking to it."""
+    lines = []
+    for position, action in enumerate(actions, start=1):
+        item = (
+            f"[{html.escape(action.subject)}]({action.url})"
+            if action.url.lower().startswith(("http://", "https://"))
+            else f"`{action.subject}`"
+        )
+        lines.append(
+            f"{position}. **{action.verb}** {item} — {html.escape(action.detail)}"
+        )
+    st.markdown("\n".join(lines))
+
+
+def _render_action_queue(
+    label: str,
+    actions: list[next_actions.Action],
+    *,
+    empty: str,
+    unknown: bool = False,
+) -> None:
+    """One tile's work, in an expander, with every row clickable.
+
+    ``unknown`` is the difference between "there is none" and "we could not
+    look": a queue that is empty because its source failed must not be reported
+    as clear.
+    """
+    with st.expander(f"{label} ({'unknown' if unknown else len(actions)})"):
+        if unknown:
+            st.warning(
+                "This could not be read, so it is unknown rather than clear — "
+                "try Refresh Data."
+            )
+            return
+        if not actions:
+            st.success(empty)
+            return
+        st.dataframe(
+            next_actions.as_frame(actions),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Open": st.column_config.LinkColumn("Open", display_text="open ↗"),
+                "Why": st.column_config.TextColumn("Why", width="large"),
+            },
+        )
+
+
+def _render_next_actions(
+    queues: dict[str, list[next_actions.Action]],
+    *,
+    unknown: set[str] | None = None,
+) -> None:
+    """What to do, before any number saying why.
+
+    The tiles above are counts, and a count is not a move: a reader was told 75
+    pull requests carry no approving review and left to work out which 75 and
+    whose. This says the moves, longest wait first, one problem at a time so a
+    five-line list still spans review, triage, ownership and stalled work - and
+    every item is the link to the thing itself.
+    """
+    st.subheader("Do these next")
+    unknown = set(unknown or ())
+    top = next_actions.rank(queues, limit=5)
+    if not top:
+        if unknown:
+            # An unreadable source is not an empty queue: presenting an outage as
+            # an all-clear is the one thing here a reader cannot check.
+            missing = " and ".join(
+                sorted(_ACTION_QUEUE_NAMES[kind] for kind in unknown)
+            )
+            st.warning(
+                f"Nothing found that needs a decision — but {missing} could not "
+                "be read, so this list is incomplete rather than empty."
+            )
+        else:
+            st.success("Nothing is waiting on a decision: no unreviewed PR, no untriaged ticket, nothing ownerless or stalled.")
+        return
+    st.caption("Ranked by how long each has been waiting, one per problem before a second from any.")
+    _render_action_list(top)
+
+    _render_action_queue(
+        "Open PRs with no approving review",
+        queues["review"],
+        empty="Every open PR has an approving review.",
+        unknown="review" in unknown,
+    )
+    _render_action_queue(
+        f"Tickets stuck in triage > {TRIAGE_STUCK_HOURS:.0f}h",
+        queues["triage"],
+        empty="Nothing has been sitting in triage.",
+        unknown="triage" in unknown,
+    )
+    _render_action_queue(
+        "Open tickets with no owner",
+        queues["ownership"],
+        empty="Every open ticket has an owner.",
+    )
+    _render_action_queue(
+        f"Tickets that have not moved in {TODAY_STALLED_DAYS:.0f}d",
+        queues["stalled"],
+        empty="Everything open has moved this month.",
+    )
+
+
 def _render_today_page() -> None:
     """The landing page: what needs a decision, then this week in six numbers.
 
@@ -9901,7 +10165,13 @@ def _render_today_page() -> None:
         "Counts are telemetry, not performance — people are scored on the People page."
     )
     bundle = _engineering_data()
-    df = bundle.df
+    # Backlog rows are left out here as they are on Delivery and Engineering by
+    # default. Counting them made this page open with "16 open tickets" above a
+    # Delivery page reading 14 from the same gather, with nothing on either
+    # screen to reconcile them - and a landing page that disagrees with the page
+    # behind it is worse than one that counts less.
+    df = _metrics_df(bundle.df, include_backlogs=False)
+    parked = int(len(bundle.df)) - int(len(df))
 
     prs = _open_pr_signals(bundle.open_prs, bundle.open_count_exact)
     ownerless = _ownerless(df)
@@ -9915,9 +10185,14 @@ def _render_today_page() -> None:
     )
 
     st.divider()
+    stalled_rows, stalled_clock = _stalled_rows(df)
+    queues, unreadable = _action_queues(bundle, df, stalled=stalled_rows)
+    _render_next_actions(queues, unknown=unreadable)
+
+    st.divider()
     st.subheader("This week")
 
-    stalled, stalled_clock = _stalled_count(df)
+    stalled = int(len(stalled_rows))
     estimated, estimable = _estimate_coverage(df)
     coverage_note = (
         f"{estimated} of {estimable} past Backlog" if estimable else "nothing to estimate"
@@ -9934,7 +10209,16 @@ def _render_today_page() -> None:
                 "bots excluded" if bundle.github_ready else "GitHub unavailable",
                 "info",
             ),
-            ("Open tickets", str(len(df)), "current JQL scope", "neutral"),
+            (
+                "Open tickets",
+                str(len(df)),
+                (
+                    f"Backlog excluded ({parked} parked)"
+                    if parked
+                    else "current JQL scope"
+                ),
+                "neutral",
+            ),
             (
                 f"Stalled {TODAY_STALLED_DAYS:.0f}d+",
                 str(stalled),
@@ -9953,7 +10237,10 @@ def _render_today_page() -> None:
 
     st.divider()
     st.subheader("Where open work sits")
-    st.caption(f"{len(df)} open tickets by status — ranked, not sliced.")
+    st.caption(
+        f"{len(df)} open tickets by status — ranked, not sliced."
+        + (f" {parked} Backlog ticket(s) are not counted here." if parked else "")
+    )
     if df.empty:
         st.info("No open tickets returned for the current JQL.")
     else:

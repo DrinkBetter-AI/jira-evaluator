@@ -7,12 +7,14 @@ emptying the stalled queue, backlog tickets dragging estimate coverage down.
 
 from __future__ import annotations
 
+import types
 import pandas as pd
 import pytest
 
 import app
 import hygiene
 import theme
+import next_actions
 
 
 def _prs(**columns) -> pd.DataFrame:
@@ -223,3 +225,172 @@ def test_an_empty_board_stalls_nothing():
     assert app._stalled_count(pd.DataFrame()) == (0, "status age")
     assert app._estimate_coverage(pd.DataFrame()) == (0, 0)
     assert app._ownerless(pd.DataFrame()) == 0
+
+
+def test_the_rows_behind_the_ownerless_tile_are_the_tickets_themselves():
+    """A count with no rows behind it cannot be acted on, which was the complaint."""
+    df = pd.DataFrame(
+        {
+            "key": ["ENG-1", "ENG-2", "ENG-3"],
+            "assignee": ["Tam", None, "Unassigned"],
+            "status": ["In Progress", "To Do", "To Do"],
+            "ticket_age_days": [1.0, 30.0, 90.0],
+        }
+    )
+    rows = app._ownerless_rows(df)
+    assert rows["key"].tolist() == ["ENG-2", "ENG-3"]
+    assert app._ownerless(df) == len(rows)
+
+
+def test_the_rows_behind_the_stalled_tile_are_the_tickets_themselves():
+    df = pd.DataFrame(
+        {
+            "key": ["ENG-1", "ENG-2"],
+            "assignee": ["Tam", "Mehdi"],
+            "status": ["In Progress", "In Progress"],
+            "idle_days": [1.0, 45.0],
+            "changelog": [None, None],
+        }
+    )
+    rows, clock = app._stalled_rows(df)
+    assert rows["key"].tolist() == ["ENG-2"]
+    assert "edit age" in clock
+
+
+def test_today_counts_the_board_delivery_counts_and_not_the_backlog():
+    """The landing page said 16 open tickets above a Delivery page reading 14."""
+    df = pd.DataFrame(
+        {
+            "key": ["ENG-1", "ENG-2", "ENG-3"],
+            "status": ["In Progress", "Backlog", "To Do"],
+            "assignee": ["Tam", "Tam", None],
+        }
+    )
+    board = app._metrics_df(df, include_backlogs=False)
+    assert board["key"].tolist() == ["ENG-1", "ENG-3"]
+    assert app._ownerless(board) == 1
+
+
+def test_stalled_is_still_status_age_after_the_backlog_rows_are_dropped():
+    """A gappy index made the mask unalignable, and the honest clock was lost.
+
+    The exception was swallowed, so the tile quietly reported edit age while its
+    own caption said "not edit age" - a filtered board is the normal case here.
+    """
+    df = pd.DataFrame(
+        {
+            "key": ["ENG-1", "ENG-2"],
+            "assignee": ["Tam", "Tam"],
+            "status": ["Backlog", "In Progress"],
+            "idle_days": [1.0, 1.0],
+            "created": [pd.Timestamp("2026-01-01T00:00:00Z")] * 2,
+            "changelog": [
+                None,
+                [
+                    {
+                        "created": "2026-01-02T00:00:00.000+0000",
+                        "items": [
+                            {
+                                "field": "status",
+                                "fromString": "To Do",
+                                "toString": "In Progress",
+                            }
+                        ],
+                        "author": {"displayName": "Tam"},
+                    }
+                ],
+            ],
+        }
+    )
+    board = app._metrics_df(df, include_backlogs=False)
+    rows, clock = app._stalled_rows(board)
+    assert clock == "status age"
+    assert rows["key"].tolist() == ["ENG-2"]
+
+
+def test_a_stalled_row_carries_the_clock_it_was_selected_on():
+    """A ticket picked for 60 days of no movement must not claim one day.
+
+    ``idle_days`` is reset by any field edit, which is exactly why the tile
+    measures status age - so the age travels with the rows.
+    """
+    df = pd.DataFrame(
+        {
+            "key": ["ENG-1"],
+            "assignee": ["Tam"],
+            "status": ["In Progress"],
+            "idle_days": [1.0],
+            "created": [pd.Timestamp("2026-01-01T00:00:00Z")],
+            "changelog": [
+                [
+                    {
+                        "created": "2026-01-02T00:00:00.000+0000",
+                        "items": [
+                            {
+                                "field": "status",
+                                "fromString": "To Do",
+                                "toString": "In Progress",
+                            }
+                        ],
+                        "author": {"displayName": "Tam"},
+                    }
+                ]
+            ],
+        }
+    )
+    rows, clock = app._stalled_rows(df)
+    assert clock == "status age"
+    assert rows[next_actions.STALLED_AGE_COLUMN].iloc[0] > 30
+    action = next_actions.stalled_actions(rows, url_for=lambda key: f"https://j/{key}")[0]
+    assert "no movement in 1d" not in action.detail
+
+
+def test_a_failed_read_is_unknown_and_not_an_all_clear():
+    """An outage must not be handed to a reader as "nothing to do".
+
+    ``_gather`` leaves a failed read out of ``data`` entirely, so the empty
+    queue it produces is indistinguishable from a clear one unless the page is
+    told which sources it could not read.
+    """
+    bundle = types.SimpleNamespace(
+        data={},  # every read failed, triage_stuck included
+        github_ready=False,
+        open_prs=pd.DataFrame(),
+    )
+    board = pd.DataFrame(
+        {"key": ["ENG-1"], "assignee": ["Tam"], "status": ["In Progress"]}
+    )
+    queues, unknown = app._action_queues(bundle, board)
+    assert unknown == {"review", "triage"}
+    assert queues["review"] == [] and queues["triage"] == []
+    assert set(app._ACTION_QUEUE_NAMES) == set(queues)
+
+
+def test_a_triage_read_that_worked_and_found_nothing_is_not_unknown():
+    bundle = types.SimpleNamespace(
+        data={"triage_stuck": pd.DataFrame()},
+        github_ready=True,
+        open_prs=pd.DataFrame(),
+    )
+    _, unknown = app._action_queues(bundle, pd.DataFrame())
+    assert unknown == set()
+
+
+def test_the_action_list_reuses_the_stalled_rows_the_tile_measured(monkeypatch):
+    """Selecting stalled rows walks every changelog, so it happens once a render."""
+
+    def refuse(_df):  # pragma: no cover - called only if the rows are recomputed
+        raise AssertionError("_stalled_rows called a second time")
+
+    monkeypatch.setattr(app, "_stalled_rows", refuse)
+    bundle = types.SimpleNamespace(
+        data={"triage_stuck": pd.DataFrame()},
+        github_ready=True,
+        open_prs=pd.DataFrame(),
+    )
+    board = pd.DataFrame(
+        {"key": ["ENG-1"], "assignee": ["Tam"], "status": ["In Progress"]}
+    )
+    stalled = board.assign(**{next_actions.STALLED_AGE_COLUMN: [44.0]})
+    queues, _ = app._action_queues(bundle, board, stalled=stalled)
+    assert queues["stalled"][0].days == 44.0

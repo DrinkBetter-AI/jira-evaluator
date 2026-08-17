@@ -456,3 +456,24 @@ and `GCP_BIGQUERY_READONLY_KEY` (Merchant Center feed), plus `MEDUSA_DB_PASSWORD
 `MEDUSA_DB_HOST` / `MEDUSA_DB_PORT` / `MEDUSA_DB_USER` / `MEDUSA_DB_NAME` (or `POSTGRES_PASSWORD`)
 and, if the database is only reachable through a bastion, an SSH key for the tunnel. Read-only
 credentials are sufficient and are the only ones that should be used.
+
+## Two traps that a text sweep cannot see
+
+- **`theme.rank_bar` wants counts, not labels.** It runs `pd.to_numeric(...).fillna(0)` on what it
+  is given, so a raw per-ticket `df["status"]` becomes a chart of zero-length bars labelled
+  `0, 1, 2 … Other (N)` rather than an error. Every honest caller passes `series.value_counts()`.
+  `theme.ranked` now raises on an all-non-numeric input, so assert that no
+  `ranked() wants values indexed by category` appears in the Streamlit log, and read the bar labels:
+  numeric labels are the symptom.
+- **`st.dataframe` / `st.data_editor` grids are canvas-drawn.** Placeholder leakage - a literal grey
+  `None`, `nan` or `NaT` in a cell - is invisible to a DOM text sweep or a `grep` of the page source,
+  because the cell text is painted rather than written into the HTML. Zoom the pixels of every table
+  that can hold an unfilled field (Stuck in triage, Stale & Abandoned, Sprint Tickets' Original
+  Estimate and Logged) and read the cells. This is how both rounds of `None` leakage were caught.
+- **A NaN in `st.column_config.NumberColumn` paints the word `None` on Streamlit 1.61.x**, with or
+  without a `format=` string, so coercing a column to a float NaN does not blank the cell - the
+  value has to reach the grid as a blank string. Verify such a fix by pixel zoom, and attribute a
+  leak with a ten-line standalone probe app (`[nan, 42.0]` in one column) before blaming the data.
+- **"Epics in Sprint" only draws when an Epic-typed row carries the selected `sprint_id`**, so it is
+  empty on the stock synthetic board. Give the harness a dataset variant that parks an unfilled epic
+  in the selected sprint, or that grid is never tested.

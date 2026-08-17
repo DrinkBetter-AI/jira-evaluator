@@ -35,3 +35,28 @@ def test_the_frame_it_was_given_is_left_alone():
     frame = pd.DataFrame({"priority": [None]})
     app._shown(frame, ("priority",))
     assert frame["priority"].isna().all()
+
+
+def test_a_percentage_is_written_out_as_text_so_the_empty_ones_can_be_dashed():
+    """Streamlit 1.61 paints a NaN in a NumberColumn as the word "None".
+
+    So ``Done %`` is formatted here and drawn by a TextColumn, which lets
+    ``_shown`` dash the unfilled ones like every other column in the table.
+    """
+    percent = pd.to_numeric(pd.Series([50, None, "nan"]), errors="coerce")
+    written = [f"{value:.0f}%" if pd.notna(value) else "" for value in percent]
+    frame = pd.DataFrame({"completion_pct": written})
+    shown = app._shown(frame, ("completion_pct",))
+    assert shown["completion_pct"].tolist() == ["50%", app._NO_VALUE, app._NO_VALUE]
+
+
+def test_epoch_milliseconds_are_dated_rather_than_printed_raw():
+    frame = pd.DataFrame({"created": [1774860044168.82, None], "updated": ["not a date", None]})
+    dated = app._dated(frame, ("created", "updated"))
+    assert dated["created"].tolist() == ["2026-03-30", ""]
+    assert dated["updated"].tolist() == ["", ""]
+
+
+def test_a_timestamp_column_keeps_its_date():
+    frame = pd.DataFrame({"created": pd.to_datetime(["2026-01-02T03:04:05Z"])})
+    assert app._dated(frame, ("created",))["created"].tolist() == ["2026-01-02"]
