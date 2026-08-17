@@ -470,3 +470,10 @@ credentials are sufficient and are the only ones that should be used.
   because the cell text is painted rather than written into the HTML. Zoom the pixels of every table
   that can hold an unfilled field (Stuck in triage, Stale & Abandoned, Sprint Tickets' Original
   Estimate and Logged) and read the cells. This is how both rounds of `None` leakage were caught.
+- **A NaN in `st.column_config.NumberColumn` paints the word `None` on Streamlit 1.61.x**, with or
+  without a `format=` string, so coercing a column to a float NaN does not blank the cell - the
+  value has to reach the grid as a blank string. Verify such a fix by pixel zoom, and attribute a
+  leak with a ten-line standalone probe app (`[nan, 42.0]` in one column) before blaming the data.
+- **"Epics in Sprint" only draws when an Epic-typed row carries the selected `sprint_id`**, so it is
+  empty on the stock synthetic board. Give the harness a dataset variant that parks an unfilled epic
+  in the selected sprint, or that grid is never tested.
