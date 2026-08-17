@@ -53,11 +53,29 @@ def test_a_team_whose_carried_names_have_left_falls_back_to_the_roster():
     and asked the reader to re-pick everyone by hand.
     """
     _clear()
-    app._carry("team_members", ["Someone who closed everything"])
     roster = ["Tam", "Mehdi"]
-    carried = app._carried("team_members", roster, roster)
-    assert carried == []
-    assert (carried or roster) == roster
+    app._carry("team_members", ["Someone who closed everything"])
+    assert app._carried_roster("team_members", roster, roster) == roster
+
+
+def test_a_team_the_reader_emptied_on_purpose_stays_empty():
+    """Otherwise clearing the filter puts the whole team back on the next click."""
+    _clear()
+    roster = ["Tam", "Mehdi"]
+    app._carry("team_members", [])
+    assert app._carried_roster("team_members", roster, roster) == []
+
+
+def test_a_team_never_chosen_opens_on_the_roster():
+    _clear()
+    roster = ["Tam", "Mehdi"]
+    assert app._carried_roster("team_members", roster, roster) == roster
+
+
+def test_a_team_keeps_the_names_the_board_still_has():
+    _clear()
+    app._carry("team_members", ["Tam", "Someone who left"])
+    assert app._carried_roster("team_members", ["Tam", "Mehdi"], ["Tam", "Mehdi"]) == ["Tam"]
 
 
 def test_a_number_carries_as_itself():

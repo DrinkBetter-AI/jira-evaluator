@@ -1336,6 +1336,23 @@ def _carried(name: str, default: Any, options: Sequence[Any] | None = None) -> A
     return value if value in allowed else default
 
 
+def _carried_roster(name: str, default: list[str], options: Sequence[str]) -> list[str]:
+    """A carried list of names, where an empty one is a decision rather than a loss.
+
+    Three cases, and only the last one is the reader's: nothing carried yet, every
+    carried name gone from the board (both fall back to ``default``, or the view
+    would open showing no tickets), and a selection the reader deliberately
+    emptied, which is kept empty - restoring the whole team under someone who
+    just cleared it is the widening this carry exists to prevent.
+    """
+    key = _CARRIED_PREFIX + name
+    if key not in st.session_state:
+        return default
+    stored = list(st.session_state[key] or [])
+    kept = [item for item in stored if item in list(options)]
+    return default if stored and not kept else kept
+
+
 def person_link(person: str) -> str:
     """The URL that opens this person's own page.
 
@@ -1362,14 +1379,10 @@ def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | No
 
     if scope == SCOPE_TEAM:
         defaults = _roster_matches(ORG_TEAM_MEMBERS, assignees)
-        # An emptied carry falls back to the roster rather than to nobody: an
-        # empty list means "no filter" for Status and the opposite here, and a
-        # team whose carried names have all left the board would otherwise open
-        # on a page showing no tickets at all.
         selected = st.multiselect(
             "Team members",
             options=assignees,
-            default=_carried("team_members", defaults, assignees) or defaults,
+            default=_carried_roster("team_members", defaults, assignees),
         )
         _carry("team_members", selected)
         if not selected:
