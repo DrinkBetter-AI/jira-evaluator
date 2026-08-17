@@ -30,6 +30,10 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import re
+import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pandas as pd
 import requests
@@ -49,6 +53,137 @@ _REPO_RE = re.compile(r"^(?:[A-Za-z0-9][A-Za-z0-9-]{0,38}/)?[A-Za-z0-9._-]{1,100
 # has a narrower, repo-scoped permission set - does not shadow the token an
 # operator explicitly configured for org-wide PR search.
 _TOKEN_ENV_VARS = ("DASHBOARD_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN")
+
+# GitHub asks for requests from one token to be made serially, and answers a
+# burst with a secondary-limit 403 rather than a queue. The dashboard opens with
+# a dozen reads at once, so without this lock every load raced itself into a 403
+# that the pages then reported as "GitHub unavailable" - a throttle reading as an
+# outage. The lock costs sequence, not time: the reads were never the slow part.
+_REQUEST_LOCK = threading.Lock()
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFF_SECONDS = 2.0
+# GitHub's secondary limit commonly asks for a minute, and asking again inside
+# the window it named can extend the penalty, so the ceiling has to be able to
+# hold that minute rather than truncating it into a request made during the ban.
+_RETRY_CEILING_SECONDS = 60.0
+# The instant before which nobody may ask again. A throttle applies to the token,
+# not to the thread that happened to hit it: without this, the reader that was
+# refused sleeps politely while the other dozen keep asking inside the very
+# window GitHub closed, and they spend their own retries being refused too.
+_NOT_BEFORE = 0.0
+_STATE_LOCK = threading.Lock()
+# The deadline of the read this thread is serving, shared by its every request.
+_BUDGET = threading.local()
+# Total seconds one read may spend waiting out throttles before it gives up: one
+# full minute-long wait and a little more. A page that says "GitHub is throttling
+# us" is more use than one that spins: the reader can come back, and the other
+# sections still draw.
+_RETRY_BUDGET_SECONDS = 75.0
+
+
+def _retry_after(response: requests.Response, attempt: int) -> float | None:
+    """How long to wait before asking again, or ``None`` when waiting is futile.
+
+    A requested wait longer than the ceiling is cut down to the ceiling, never
+    discarded: GitHub's secondary limit routinely asks for a minute, and ignoring
+    that in favour of a two-second backoff spends every retry inside the window
+    it was told to sit out, which is how a throttle became an error page.
+
+    The hourly *primary* limit is the one exception. Its reset can be forty
+    minutes away, and no retry this function could schedule will outlast it, so
+    it returns ``None`` and the caller reports the exhausted quota at once rather
+    than sleeping through a budget that cannot help.
+    """
+    reset_in = _seconds_until_reset(response)
+    if (
+        response.headers.get("x-ratelimit-remaining") == "0"
+        and reset_in is not None
+        and reset_in > _RETRY_CEILING_SECONDS
+    ):
+        return None
+    raw = response.headers.get("retry-after", "")
+    if raw.isdigit() and int(raw) > 0:
+        return min(float(raw), _RETRY_CEILING_SECONDS)
+    if reset_in is not None and reset_in > 0:
+        return float(min(reset_in, _RETRY_CEILING_SECONDS))
+    return min(_RETRY_BACKOFF_SECONDS * (2**attempt), _RETRY_CEILING_SECONDS)
+
+
+def _seconds_until_reset(response: requests.Response) -> int | None:
+    """Seconds until the quota named by ``x-ratelimit-reset`` refills."""
+    raw = response.headers.get("x-ratelimit-reset", "")
+    if not raw.isdigit():
+        return None
+    return int(int(raw) - time.time())
+
+
+@contextmanager
+def _read_budget() -> Iterator[None]:
+    """Give one logical read a single deadline, however many requests it takes.
+
+    A budget per request is not a budget: a merged-PR read is ten pages and then,
+    if the rich payload fails, ten more, so a per-request allowance multiplies into
+    minutes of a page that was promised a message instead of a spinner. The
+    deadline lives on the thread, so the pages of one read - and the lean retry
+    after them - share the allowance the first page opened, and a read that arrives
+    with nothing left says so rather than waiting again.
+    """
+    if getattr(_BUDGET, "deadline", None) is not None:
+        yield  # An inner read inherits the outer one's deadline, never a new one.
+        return
+    _BUDGET.deadline = time.monotonic() + _RETRY_BUDGET_SECONDS
+    try:
+        yield
+    finally:
+        _BUDGET.deadline = None
+
+
+def _remaining() -> float:
+    """Seconds this read may still spend waiting, counting time blocked on others."""
+    deadline = getattr(_BUDGET, "deadline", None)
+    if deadline is None:
+        return _RETRY_BUDGET_SECONDS
+    return deadline - time.monotonic()
+
+
+def _hold_off(seconds: float) -> None:
+    """Close the door on every reader until ``seconds`` from now."""
+    global _NOT_BEFORE
+    with _STATE_LOCK:
+        _NOT_BEFORE = max(_NOT_BEFORE, time.monotonic() + seconds)
+
+
+def _await_turn(allowance: float) -> float | None:
+    """Sleep until the shared door opens, or ``None`` if ``allowance`` is too small.
+
+    A reader that cannot afford the whole wait does not spend part of it and then
+    ask anyway: that is a request made during the ban, which is what shut the door
+    in the first place. It gives up its turn instead, and the page says so.
+    """
+    with _STATE_LOCK:
+        delay = _NOT_BEFORE - time.monotonic()
+    if delay <= 0:
+        return 0.0
+    if delay > allowance:
+        return None
+    time.sleep(delay)
+    return delay
+
+
+def _throttled(response: requests.Response) -> bool:
+    """Whether a refusal is "too fast" or "not now", which waiting fixes.
+
+    A gateway error belongs here as much as a rate limit does. GitHub's edge
+    answers a burst with an nginx ``502`` as readily as with a documented 403, and
+    the dashboard spent days reporting that as "GitHub unavailable" when asking
+    again a moment later would have worked.
+    """
+    if response.status_code in (429, 502, 503, 504):
+        return True
+    if response.status_code != 403:
+        return False
+    body = response.text.lower()
+    return "rate limit" in body or "secondary" in body or "try again" in body
 
 
 class GitHubConfigError(RuntimeError):
@@ -95,16 +230,70 @@ def _without_excluded(org: str, query: str) -> str:
 
 
 def _graphql(token: str, query: str, variables: dict) -> dict:
-    response = requests.post(
-        GITHUB_GRAPHQL_URL,
-        json={"query": query, "variables": variables},
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
+    """One GraphQL read: serialised, retried while throttled, quoted when refused.
+
+    Three things a single request has to get right here.
+
+    Serialised, because concurrent reads on one token are what GitHub's secondary
+    limit exists to stop, and the dashboard's opening burst tripped it on every
+    load. Retried with GitHub's own ``Retry-After`` up to a fixed budget, because
+    a throttle is a wait, not a failure, but a reader would rather be told than
+    watch a spinner. Quoted, because a bare
+    ``403 Client Error`` cannot distinguish a missing permission, an org IP allow
+    list and a secondary limit - the three days this bug survived were spent
+    guessing between exactly those.
+
+    The wait is shared rather than private: a refusal shuts the door for every
+    reader until the instant GitHub named - including when this read is the one
+    giving up, because the window outlives the reader that found it - and the door
+    is checked while holding the lock, immediately before the request goes out.
+    Checking it earlier would let the dozen readers already queued past a door
+    that shut while they waited, and each would spend an attempt learning what the
+    first one already knew.
+    """
+    response = None
+    for attempt in range(_RETRY_ATTEMPTS):
+        with _REQUEST_LOCK:
+            # Asked for after the lock, so time spent blocked behind another
+            # reader's wait is charged too: otherwise fourteen readers each
+            # believe they have the whole budget and spend it one after another.
+            if _await_turn(_remaining()) is None:
+                break
+            response = requests.post(
+                GITHUB_GRAPHQL_URL,
+                json={"query": query, "variables": variables},
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                timeout=30,
+            )
+            # Shutting the door happens under the same lock that sent the
+            # request. Released first, the reader queued behind would be woken,
+            # read a door that had not yet been shut, and ask inside the window.
+            refused = _throttled(response)
+            pause = _retry_after(response, attempt) if refused else 0.0
+            if refused:
+                _hold_off(pause if pause is not None else _RETRY_CEILING_SECONDS)
+        if not refused:
+            break
+        if (
+            pause is None
+            or attempt == _RETRY_ATTEMPTS - 1
+            or pause > _remaining()
+        ):
+            break
+    if response is None:
+        raise GitHubConfigError(
+            "GitHub is throttling this token; the reads were abandoned rather "
+            "than sent during the wait it asked for. Reload in a minute."
+        )
+    if response.status_code >= 400:
+        reason = " ".join(response.text.split())[:300]
+        raise GitHubConfigError(
+            f"GitHub refused the read: HTTP {response.status_code}"
+            + (f" — {reason}" if reason else "")
+        )
     payload = response.json()
     if payload.get("errors"):
         messages = "; ".join(e.get("message", "") for e in payload["errors"])
@@ -240,7 +429,9 @@ def _search_count(token: str, query: str) -> int:
     Not bounded by pagination, so it stays correct even past the point where
     the result nodes themselves would be capped.
     """
-    return int(_graphql(token, _COUNT_QUERY, {"q": query})["search"]["issueCount"])
+    with _read_budget():
+        data = _graphql(token, _COUNT_QUERY, {"q": query})
+    return int(data["search"]["issueCount"])
 
 
 def _page(token: str, gql: str, query: str, max_prs: int) -> list[dict]:
@@ -282,12 +473,13 @@ def _search_prs(
     shapes; half a frame with detail columns and half without would read as
     "these people had no reviews" instead of "this page was never fetched".
     """
-    try:
-        return _page(token, gql, query, max_prs)
-    except (GitHubConfigError, requests.RequestException):
-        if not fallback_gql or fallback_gql == gql:
-            raise
-    return _page(token, fallback_gql, query, max_prs)
+    with _read_budget():
+        try:
+            return _page(token, gql, query, max_prs)
+        except (GitHubConfigError, requests.RequestException):
+            if not fallback_gql or fallback_gql == gql:
+                raise
+        return _page(token, fallback_gql, query, max_prs)
 
 
 def _int_or_none(value: object) -> int | None:
