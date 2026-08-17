@@ -8,8 +8,11 @@ emptying the stalled queue, backlog tickets dragging estimate coverage down.
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 import app
+import hygiene
+import theme
 
 
 def _prs(**columns) -> pd.DataFrame:
@@ -107,11 +110,62 @@ def test_estimate_coverage_excludes_the_backlog():
     df = pd.DataFrame(
         {
             "status": ["In Progress", "In Progress", "Backlog"],
-            "has_estimate": [True, False, False],
+            "original_estimate_sec": [7200, 0, 0],
         }
     )
     estimated, estimable = app._estimate_coverage(df)
     assert (estimated, estimable) == (1, 2)
+
+
+def test_estimate_coverage_reads_the_estimates_not_a_missing_flag():
+    """The tile said 100% while Delivery and Planning said 77% of the same tickets.
+
+    Today's frame carries no ``has_estimate`` column - that is added by
+    ``estimate_policy`` further down the page - and a missing flag was read as
+    "estimated", so every non-backlog ticket counted as covered.
+    """
+    df = pd.DataFrame(
+        {
+            "status": ["In Progress", "To Do", "Review in Staging"],
+            "original_estimate_sec": [3600, 0, 0],
+        }
+    )
+    assert app._estimate_coverage(df) == (1, 3)
+
+
+def test_estimate_coverage_agrees_with_the_policy_the_other_pages_read():
+    """One number, one definition: Today cannot disagree with Delivery."""
+    df = pd.DataFrame(
+        {
+            "status": ["In Progress", "To Do", "Backlog", "In Progress"],
+            "issue_type": ["Task", "Bug", "Task", "Epic"],
+            "original_estimate_sec": [3600, 0, 0, 0],
+        }
+    )
+    scored = hygiene.estimate_policy(df, app.BACKLOG_STATUSES)
+    in_policy = scored[scored["policy_applies"]]
+    expected = (
+        int(in_policy["has_estimate"].sum()),
+        int(len(in_policy)),
+    )
+    assert app._estimate_coverage(df) == expected
+    # The epic is exempt (it holds other tickets' hours) and Backlog is not asked.
+    assert expected == (1, 2)
+
+
+def test_a_status_column_is_counted_before_it_is_ranked():
+    """The Today chart drew ten zero-length bars labelled 0, 1, 2 ...
+
+    ``ranked`` counts values indexed by category, so handing it the per-ticket
+    status column coerced every status to 0 and labelled the bars off the row
+    numbers. It now refuses rather than drawing an empty chart.
+    """
+    statuses = pd.Series(["To Do", "To Do", "In Progress"])
+    with pytest.raises(TypeError):
+        theme.ranked(statuses)
+    ranked = theme.ranked(statuses.value_counts())
+    assert ranked.loc["To Do"] == 2
+    assert ranked.loc["In Progress"] == 1
 
 
 def test_stalled_is_measured_on_status_age_not_edit_age():

@@ -303,7 +303,19 @@ def ranked(series: pd.Series, *, top_n: int = RANK_ROWS) -> pd.Series:
     # ``fillna(0)`` rather than ``fillna(0.0)``, and the sums left in whatever
     # type they arrive as: these are usually ticket counts, and a table beside
     # the chart showing "9.0000" tickets is a table that looks broken.
-    counted = pd.to_numeric(pd.Series(series), errors="coerce").fillna(0)
+    given = pd.Series(series)
+    counted = pd.to_numeric(given, errors="coerce")
+    # A ranking is drawn from counts indexed by category. Handed the categories
+    # themselves - a per-ticket ``status`` column rather than its
+    # ``value_counts()`` - every value coerces to nothing, and the chart drew ten
+    # zero-length bars labelled 0, 1, 2 ... off the row numbers. Silently reading
+    # that as "everything is zero" is the failure; say so instead.
+    if len(given) and counted.isna().all():
+        raise TypeError(
+            "ranked() wants values indexed by category, e.g. series.value_counts(); "
+            "it was given labels it cannot count"
+        )
+    counted = counted.fillna(0)
     carried_labels = [label for label in counted.index if _other_size(label) is not None]
     collapsed = sum(_other_size(label) or 0 for label in carried_labels)
     collapsed_value = counted[carried_labels].sum() if carried_labels else 0
