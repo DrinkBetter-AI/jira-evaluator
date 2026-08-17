@@ -10,6 +10,7 @@ import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple
 from urllib.parse import quote, unquote, urlencode
 
@@ -50,6 +51,7 @@ from access_gate import render_sign_out, require_password
 import focus
 import github_client
 import kpi
+import integrity
 import pr_hygiene
 from capacity import (
     capacity_table,
@@ -118,6 +120,82 @@ ORG_TEAM_MEMBERS = [
 # Placeholder owner names Jira writes when nobody is assigned.
 _NO_OWNER_NAMES = {"", "unassigned", "none"}
 
+# GitHub logins that are not people. They open and merge real pull requests, so
+# they belong in every org-wide total - the work happened - but they are not
+# engineers and a per-person table that ranks Devin above a human is a table
+# nobody can act on. Matched on the login with any "[bot]" suffix stripped,
+# because GitHub spells the same account both ways depending on the API.
+# Extend with a comma-separated GITHUB_BOT_LOGINS rather than editing this list.
+_DEFAULT_BOT_LOGINS = (
+    "devin-ai-integration",
+    "github-actions",
+    "dependabot",
+    "dependabot-preview",
+    "renovate",
+    "renovate-bot",
+    "codecov",
+    "sonarcloud",
+)
+BOT_LOGINS = {
+    login.strip().lower()
+    for login in os.getenv(
+        "GITHUB_BOT_LOGINS", ",".join(_DEFAULT_BOT_LOGINS)
+    ).split(",")
+    if login.strip()
+}
+
+
+def _is_bot(login: object) -> bool:
+    """Whether this GitHub login belongs to an automation rather than a person."""
+    name = str(login or "").strip().lower()
+    if name.endswith("[bot]"):
+        name = name[: -len("[bot]")]
+    return name in BOT_LOGINS
+
+
+def _people_only(frame: pd.DataFrame, column: str = "author") -> tuple[pd.DataFrame, int]:
+    """The rows written by people, and how many bot rows were set aside.
+
+    The count comes back with the frame so that the caller can say so on the
+    page. A table that silently drops half the pull requests is worse than one
+    that includes the bots: the reader compares it against an org-wide tile,
+    finds the two disagree, and stops trusting both.
+    """
+    if frame.empty or column not in frame.columns:
+        return frame, 0
+    is_bot = frame[column].map(_is_bot)
+    return frame[~is_bot], int(is_bot.sum())
+
+
+def _text_or(value: object, default: str) -> str:
+    """``value`` as text, or ``default`` when there is nothing in it.
+
+    ``value or default`` reads as though it does this and does not: an empty
+    cell in a pandas frame is a float NaN, NaN is truthy, and ``NaN or "none"``
+    is therefore NaN - which is how the triage card came to tell a reviewer
+    "Epic: nan" about a ticket that simply has no epic. Whitespace counts as
+    nothing too, because a Jira field cleared by hand often keeps a space.
+    """
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except (TypeError, ValueError):
+        # A list or an array has no single truthiness; it is also not missing.
+        pass
+    return str(value).strip() or default
+
+
+def _number_or(value: object, default: float = 0.0) -> float:
+    """``value`` as a float, or ``default`` when it is missing or not a number.
+
+    The same NaN trap as ``_text_or``: ``float(row["idle_days"] or 0)`` keeps
+    the NaN and prints "nan days old" on the card.
+    """
+    number = pd.to_numeric(value, errors="coerce")
+    return default if pd.isna(number) else float(number)
+
 
 def _positive_int(value: str | None, *, default: int) -> int:
     """Read a positive integer setting; a typo costs the setting, not the app."""
@@ -132,8 +210,26 @@ SCOPE_ORG = "Organization"
 SCOPE_TEAM = "Team"
 SCOPE_INDIVIDUAL = "Individual"
 
+TODAY_PAGE_TITLE = "Today"
+PEOPLE_PAGE_TITLE = "People"
+DELIVERY_PAGE_TITLE = "Delivery"
+CODE_PAGE_TITLE = "Code"
+PLANNING_PAGE_TITLE = "Planning"
 ENGINEERING_PAGE_TITLE = "Engineering"
 BUSINESS_PAGE_TITLE = "Business"
+
+# What each page calls itself in its own heading. The navigation labels above are
+# one word each because a top tab strip has no room for more; a heading has, and
+# the two pages are about entirely different things.
+PAGE_HEADINGS = {
+    TODAY_PAGE_TITLE: "Today — What Needs a Decision",
+    PEOPLE_PAGE_TITLE: "People — Scorecards Within Role",
+    DELIVERY_PAGE_TITLE: "Delivery — Throughput & Queues",
+    CODE_PAGE_TITLE: "Code — Pull Request Health",
+    PLANNING_PAGE_TITLE: "Planning — Sprints, Capacity & Hygiene",
+    ENGINEERING_PAGE_TITLE: "Engineering — Ticket & PR Health",
+    BUSINESS_PAGE_TITLE: "Business — Orders, Revenue & Spend",
+}
 
 FETCH_SCHEMA_VERSION = 8
 JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
@@ -142,7 +238,8 @@ JIRA_KEY_DISPLAY_PATTERN = r".*/browse/([^/?#]+)$"
 TRANSITION_LOOKUP_LIMIT = 50
 # Upper bound on how many tickets a bulk write-back pre-selects.
 BULK_ACTION_DEFAULT_LIMIT = 25
-# Slices a composition pie shows before the tail collapses into "Other".
+# Rows the composition chart draws at most, the last of which is the collapsed
+# "Other" when there are more categories than that.
 MIX_SLICE_LIMIT = 10
 # Ceiling on tickets fetched per run; org-wide JQL can exceed the old fixed 1000.
 MAX_RESULTS = _positive_int(os.getenv("JIRA_MAX_RESULTS"), default=1000)
@@ -1078,15 +1175,34 @@ def _render_metrics(
     max_idle = float(metrics_df["idle_days"].max()) if total_open else 0.0
     oldest = float(metrics_df["ticket_age_days"].max()) if total_open else 0.0
 
-    estimated_tickets = 0
-    if "estimate_seconds" in metrics_df.columns and total_open:
-        estimated_tickets = int(
-            pd.to_numeric(metrics_df["estimate_seconds"], errors="coerce").fillna(0).gt(0).sum()
-        )
-    elif "original_estimate" in metrics_df.columns and total_open:
-        estimate_text = metrics_df["original_estimate"].fillna("").astype(str).str.strip()
-        estimated_tickets = int(estimate_text.ne("").sum())
-    estimate_coverage_pct = (estimated_tickets / total_open * 100.0) if total_open else 0.0
+    # Estimate coverage is scored by hygiene.estimate_policy, the same rule the
+    # Policy Compliance section two sections down uses, rather than by a second
+    # count that happens to live here.
+    #
+    # It used to be its own thing and it was wrong twice over. It looked first
+    # for an "estimate_seconds" column, which no code path puts on a raw ticket
+    # frame - jira_client emits "original_estimate_sec" - so the branch was dead
+    # and every run fell through to "is there any text in original_estimate",
+    # counted over every open ticket. That denominator includes epics and
+    # initiatives, which hold other tickets' hours rather than their own and
+    # which the policy deliberately exempts, and Backlog tickets, which have not
+    # been asked for an estimate yet. The headline said one number and Policy
+    # Compliance said another with nothing on the page to explain the gap.
+    scored = estimate_policy(metrics_df, BACKLOG_STATUSES)
+    in_policy = (
+        scored[scored["policy_applies"].fillna(False).astype(bool)]
+        if not scored.empty
+        else scored
+    )
+    estimate_scope = int(len(in_policy))
+    estimated_tickets = (
+        int(in_policy["has_estimate"].fillna(False).astype(bool).sum())
+        if estimate_scope
+        else 0
+    )
+    estimate_coverage_pct = (
+        (estimated_tickets / estimate_scope * 100.0) if estimate_scope else 0.0
+    )
 
     _LATE_STAGE_STATUSES = {"IN DEV ENV", "Review in Staging", "Ready for Production"}
     _STALE_THRESHOLD_DAYS = 6
@@ -1130,7 +1246,7 @@ def _render_metrics(
             (
                 "Estimate coverage",
                 f"{estimate_coverage_pct:.0f}%",
-                "tickets carrying an estimate",
+                f"of {estimate_scope} past Backlog; epics exempt",
                 "good" if estimate_coverage_pct >= 80 else "warning",
             ),
             (
@@ -1757,19 +1873,22 @@ def _render_mix(df: pd.DataFrame) -> None:
         .replace({"": "Unknown"})
         .value_counts()
     )
-    # A pie with forty slices is a colour wheel, not a chart: keep the shape of
-    # the backlog readable and let the tail sit in one honest "Other" slice.
-    top = counts.head(MIX_SLICE_LIMIT)
-    remainder = int(counts.iloc[MIX_SLICE_LIMIT:].sum())
-    if remainder:
-        top = pd.concat(
-            [top, pd.Series({f"Other ({len(counts) - MIX_SLICE_LIMIT})": remainder})]
-        )
+    # Ranked bars, not a pie. Broken down by Assignee or Status this routinely
+    # ran past twenty categories, at which point the slices were slivers, the
+    # labels were drawn over each other and the legend scrolled - and even at
+    # six a reader is left comparing angles, which is the comparison people are
+    # worst at. The tail still collapses into one honest "Other" row, and the
+    # table beside it is built from the same collapsed series so the two cannot
+    # disagree.
+    top = theme.ranked(counts, top_n=MIX_SLICE_LIMIT)
 
     mix = top.rename_axis(label).reset_index(name="tickets")
-    figure = px.pie(mix, names=label, values="tickets", hole=0.45)
-    figure.update_traces(textposition="inside", textinfo="percent+label")
-    figure.update_layout(height=420, legend_title_text=label)
+    figure = theme.rank_bar(
+        top,
+        title=f"Tickets by {label.lower()}",
+        value_label="tickets",
+        top_n=MIX_SLICE_LIMIT,
+    )
     left, right = st.columns([3, 2])
     theme.plot(figure, into=left, width="stretch")
     right.dataframe(
@@ -1824,7 +1943,17 @@ def _render_scope_breakdown(df: pd.DataFrame, scope: str, include_backlogs: bool
             "unprioritized": st.column_config.NumberColumn("No Priority"),
         },
     )
-    st.bar_chart(rollup.set_index("assignee")["open_tickets"], height=260)
+    # Horizontal, and sorted, because the categories are people's full names.
+    # Vertically these were rotated onto their sides and a reader had to tilt
+    # their head to find out whose bar was whose; lying down, every name reads
+    # level and the tallest bar is the top row where a ranking belongs. The
+    # height grows with the roster rather than squeezing twenty people into the
+    # space five were comfortable in.
+    st.bar_chart(
+        rollup.sort_values("open_tickets").set_index("assignee")["open_tickets"],
+        horizontal=True,
+        height=max(260, 30 * len(rollup) + 80),
+    )
 
     selected_rows = (event or {}).get("selection", {}).get("rows", [])
     if selected_rows:
@@ -1986,9 +2115,18 @@ def _render_team_overview(df: pd.DataFrame) -> None:
             ),
         ]
     )
+    # Horizontal for the same reason as the assignee chart: this team's statuses
+    # are things like "Ready for Production" and "DISCUSSION NEEDED", which as
+    # x-axis labels were printed sideways and unreadable.
+    by_status = (
+        current.groupby(current["status"].fillna("Unknown").astype(str))["key"]
+        .count()
+        .sort_values()
+    )
     st.bar_chart(
-        current.groupby(current["status"].fillna("Unknown").astype(str))["key"].count(),
-        height=240,
+        by_status,
+        horizontal=True,
+        height=max(240, 30 * len(by_status) + 80),
     )
     st.caption(
         f"{chosen}: {len(team_df)} open tickets total, {len(current)} in {sprint_label}. "
@@ -2224,16 +2362,23 @@ def _triage_state(queue_name: str, keys: list[str]) -> tuple[dict[str, str], int
 
 def _render_triage_card(row: pd.Series) -> None:
     """One ticket, large enough to judge without opening Jira."""
-    age = float(row["ticket_age_days"] or 0)
-    idle = float(row["idle_days"] or 0)
-    owner = "Nobody" if is_unowned(row["assignee"]) else str(row["assignee"])
+    age = _number_or(row.get("ticket_age_days"))
+    idle = _number_or(row.get("idle_days"))
+    # Every field here goes through _text_or: a ticket with no epic is the
+    # normal case in this queue, and the card was reporting it as "Epic: nan".
+    # The owner is normalised before cleanup.is_unowned sees it for the same
+    # reason - that helper asks ``str(assignee or "")``, which hands back "nan"
+    # for an empty cell and so reads a missing owner as a person called nan.
+    owner_name = _text_or(row.get("assignee"), "")
+    owner = "Nobody" if is_unowned(owner_name) else owner_name
+    epic = _text_or(row.get("epic_summary"), "none")
     chips = [
         (f"{age:.0f} days old", age >= cleanup.ABANDONED_AGE_DAYS),
         (f"untouched {idle:.0f} days", idle >= cleanup.ABANDONED_IDLE_DAYS),
-        (f"Owner: {owner}", is_unowned(row["assignee"])),
-        (f"Status: {row['status']}", False),
-        (f"Epic: {row['epic_summary'] or 'none'}", not str(row["epic_summary"] or "").strip()),
-        (f"Priority: {row['priority'] or 'none'}", False),
+        (f"Owner: {owner}", is_unowned(owner_name)),
+        (f"Status: {_text_or(row.get('status'), 'unknown')}", False),
+        (f"Epic: {epic}", epic == "none"),
+        (f"Priority: {_text_or(row.get('priority'), 'none')}", False),
     ]
     if cleanup.is_container(row.get("issue_type")):
         # Closing a container from an age-sorted queue is the one decision here
@@ -3990,17 +4135,35 @@ def _render_hourly_capacity(sprint_df: pd.DataFrame, in_sprint_df: pd.DataFrame)
 
 # Tinted background with a saturated text colour of the same hue, so the pills
 # sit on the light theme the KPI cards are drawn for.
+#
+# These stay a map rather than becoming theme.CATEGORICAL: a status pill's
+# colour means something ("this one is nearly out of the door", "this one is
+# stuck"), and handing it the first free colour in a sequence would throw that
+# meaning away. What has changed is which colours the map reaches for - the
+# blues, greens and violet are now the exact hues in theme.CATEGORICAL, so a
+# pill and a bar for the same status no longer disagree by a shade.
+#
+# "Ready for Production" also used to be the identical green to "In Progress",
+# so in a row of pills the ticket about to ship and the ticket somebody started
+# this morning looked the same. Green now belongs to the far end of the workflow
+# alone, and the stages before it walk through the palette in the order the work
+# moves; red stays reserved for the one status that is a request for a decision.
+#
+# The palette hues are darkened where they had to be: a bar can be #009e73
+# because it is a large block of colour, but the same value as 13px text on a
+# tinted chip is not legible, so each entry is the palette hue taken down to
+# something that reads.
 _STAGE_COLORS: dict[str, tuple[str, str]] = {
     # (background, text)
-    "Backlog":               ("#eef0f5", "#525c73"),
-    "DISCUSSION NEEDED":     ("#fdecec", "#b42318"),
-    "To Do":                 ("#e8f0fd", "#1d4ed8"),
-    "In Progress":           ("#e6f6ec", "#15803d"),
-    "IN DEV ENV":            ("#e6f2fd", "#0369a1"),
-    "Code Review":           ("#f1ecfd", "#6d28d9"),
-    "Review in Staging":     ("#fdf3e0", "#a16207"),
-    "Ready for Production":  ("#e7f8ea", "#15803d"),
-    "Review":                ("#fdefe5", "#c2410c"),
+    "Backlog":               ("#eef0f5", "#4b5563"),  # slate - parked on purpose
+    "DISCUSSION NEEDED":     ("#fdecec", "#b42318"),  # red - waiting on a person
+    "To Do":                 ("#eaf1fe", "#2563eb"),  # blue
+    "In Progress":           ("#e8f5fd", "#0b6fa4"),  # sky
+    "IN DEV ENV":            ("#f1ecfd", "#5b21b6"),  # violet
+    "Code Review":           ("#fbeef5", "#a03d78"),  # reddish purple
+    "Review in Staging":     ("#fdf3e0", "#8a6100"),  # orange
+    "Ready for Production":  ("#e4f6f0", "#007857"),  # bluish green - nearly out
+    "Review":                ("#fdefe5", "#a34600"),  # vermillion
 }
 _DEFAULT_PILL: tuple[str, str] = ("#f1f2f4", "#4b5563")
 
@@ -4017,7 +4180,9 @@ def _render_status_pills(status_series: pd.Series) -> None:
             f'<span style="'
             f'background:{bg};color:{fg};'
             f'border-radius:6px;padding:4px 10px;'
-            f'font-size:0.78rem;font-weight:600;white-space:nowrap;'
+            # The same rung of the type scale as every other chip on the page,
+            # rather than a size invented at the point of use.
+            f'font-size:{theme.TYPE_META};font-weight:600;white-space:nowrap;'
             f'border:1px solid {fg}22;'
             f'">'
             f'{html.escape(str(status))} '
@@ -4097,7 +4262,11 @@ def _render_bubble_chart(
             color_discrete_map=_BUCKET_COLORS,
             category_orders={"priority_bucket": ["Normal", "High", "Urgent"]},
             custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days", "issue_type"],
-            # title="Staleness vs Workflow Status (Aggregated Priority)",
+            # Commented out, this chart drew the word "undefined" where its title
+            # belongs: theme.plot set a title font, that brought a title object
+            # into being with no text in it, and Streamlit printed the missing
+            # text. theme.plot no longer does that, and the chart says what it is.
+            title="Staleness vs workflow status (priorities grouped)",
             labels={"idle_days": "Idle Days", "y_jitter": "Status", "priority_bucket": "Priority"},
             size_max=34,
             opacity=0.3,
@@ -4110,7 +4279,7 @@ def _render_bubble_chart(
             size="bubble_size",
             color=color_by,
             custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days", "issue_type"],
-            title="Staleness vs Workflow Status",
+            title="Staleness vs workflow status",
             labels={"idle_days": "Idle Days", "y_jitter": "Status"},
             size_max=34,
             opacity=0.3,
@@ -4223,10 +4392,15 @@ def _apply_action_with_audit(
     return succeeded, failed, operation
 
 
-def _contribution_pie(
+def _contribution_ranking(
     labels: pd.Series, value_name: str, title: str, unavailable: bool = False
 ) -> None:
-    """Render a 'who did how much' pie from a series of names, or a note if empty.
+    """Render a 'who did how much' ranking from a series of names, or a note if empty.
+
+    This was a pie, and with twenty-three people in the window it was a ring of
+    slivers over a legend nobody could read - which is the shape "who is doing
+    the work" was being asked in. theme.rank_bar answers it as a sorted list
+    with the numbers written on the bars.
 
     ``unavailable`` distinguishes a failed lookup from a genuinely empty window so
     an errored fetch doesn't masquerade as an authoritative "nobody did anything".
@@ -4238,11 +4412,10 @@ def _contribution_pie(
         else:
             st.caption(f"No {value_name} in the last 30 days.")
         return
-    frame = pd.DataFrame({"who": counts.index, value_name: counts.values})
-    fig = px.pie(frame, names="who", values=value_name, title=title)
-    fig.update_traces(textposition="inside", textinfo="value+label")
-    fig.update_layout(height=340, margin=dict(t=48, b=8, l=8, r=8), showlegend=True)
-    theme.plot(fig, width="stretch")
+    theme.plot(
+        theme.rank_bar(counts, title=title, value_label=value_name),
+        width="stretch",
+    )
 
 
 def _metric_value(count: int | None) -> str | int:
@@ -4954,6 +5127,62 @@ def _offer_merchants_cached(
 # merchants is named on the page.
 _EVERY_MERCHANT = "Every merchant"
 _MERCHANT_SEPARATOR = merchant_client.MERCHANT_SEPARATOR
+
+# The merchants actually trading. The catalogue still carries wine from shops
+# that have been switched off, and counting them was distorting the one number
+# this whole section exists to state: "87% of products cost more here than the
+# market" was measured across inventory nobody can buy. A disabled shop's
+# prices are nobody's decision, so they belong outside the denominator rather
+# than inside it with an asterisk.
+#
+# Set ``ACTIVE_MERCHANTS`` to a comma-separated list of merchant names as they
+# appear in the catalogue. Left unset, every merchant counts and the page
+# behaves as it always did - an unset variable must not silently hide data.
+_ACTIVE_MERCHANTS_ENV = "ACTIVE_MERCHANTS"
+
+
+def _active_merchant_names() -> frozenset[str] | None:
+    """The configured trading roster, or ``None`` when nobody has said."""
+    raw = os.getenv(_ACTIVE_MERCHANTS_ENV, "").strip()
+    if not raw:
+        return None
+    names = frozenset(part.strip() for part in raw.split(",") if part.strip())
+    return names or None
+
+
+def _trading_only(
+    prices: merchant_client.Prices,
+    named: dict[str, tuple[str, ...]],
+    active: frozenset[str] | None,
+) -> tuple[merchant_client.Prices, dict[str, tuple[str, ...]], int]:
+    """Drop the offers that belong only to shops that are switched off.
+
+    Returns the narrowed read, the narrowed offer-to-merchant map, and how many
+    offers were set aside, so the page can say what it left out rather than
+    quietly reporting a smaller catalogue than the feed holds.
+    """
+    if not active or not named:
+        return prices, named, 0
+    kept_names = {
+        offer: tuple(name for name in names if name in active)
+        for offer, names in named.items()
+    }
+    trading = {offer: names for offer, names in kept_names.items() if names}
+    if not trading:
+        # Every name in the roster is a typo, or the catalogue calls these
+        # shops something else. Reporting nothing would look like a dead feed,
+        # so the honest move is to leave the read alone and let the caption say
+        # the roster matched none of it.
+        return prices, named, 0
+    kept = prices.offers[prices.offers["offer"].isin(trading)].reset_index(drop=True)
+    set_aside = int(len(prices.offers) - len(kept))
+    return (
+        merchant_client.Prices(
+            kept, prices.currency, prices.other_currencies, prices.truncated
+        ),
+        trading,
+        set_aside,
+    )
 
 
 def _offer_merchants(offers: pd.DataFrame) -> dict[str, tuple[str, ...]]:
@@ -6431,6 +6660,14 @@ def _render_price_benchmark() -> None:
     # Whose wine each offer is, read once for the whole catalogue so the same
     # names can both filter it and label the rows below.
     named = _offer_merchants(prices.offers)
+    # Shops that have been switched off are dropped before anything is counted,
+    # so "Every merchant" means every merchant still trading rather than every
+    # merchant the feed remembers.
+    active = _active_merchant_names()
+    prices, named, set_aside = _trading_only(prices, named, active)
+    if set_aside:
+        read = read._replace(prices=prices)
+        whole_feed_counted = prices.counted
     if named:
         merchants = sorted(
             {name for names in named.values() for name in names if name}
@@ -6452,6 +6689,22 @@ def _render_price_benchmark() -> None:
                 f"None of {chosen}'s wines has a benchmark: Google publishes "
                 "one only where enough other merchants sell the same product."
             )
+    if set_aside:
+        st.caption(
+            f"{set_aside:,} offer(s) left out: they belong only to shops that "
+            f"are switched off. Every figure here is the {len(active)} trading "
+            f"merchant(s) named in {_ACTIVE_MERCHANTS_ENV}."
+        )
+    elif active and not named:
+        st.caption(
+            f"{_ACTIVE_MERCHANTS_ENV} is set, but the catalogue could not be "
+            "read to apply it, so every merchant is counted below."
+        )
+    elif active:
+        st.caption(
+            f"{_ACTIVE_MERCHANTS_ENV} names no shop this catalogue knows, so "
+            "every merchant is counted below. Check the names match the feed."
+        )
     money = prices.currency
     tiles = st.columns(3)
     _tile(
@@ -7630,7 +7883,11 @@ def _render_ai_costs(days: int) -> None:
             _unmathed(
                 "By project: "
                 + ", ".join(
-                    f"{row['project'] or 'unnamed'} {_money(float(row['cost']), money)}"
+                    # _text_or rather than ``or``: a cloud line with no project
+                    # attached comes back as NaN, and NaN is truthy, so this
+                    # read "nan $312" rather than "unnamed $312".
+                    f"{_text_or(row['project'], 'unnamed')} "
+                    f"{_money(_number_or(row['cost']), money)}"
                     for _, row in projects.iterrows()
                 )
             )
@@ -8329,10 +8586,11 @@ def _render_resolved_summary(
     github_error: str = "",
 ) -> None:
     """Login landing snapshot: tickets and PRs resolved in the last 7 / 30 days,
-    with a pie for who resolved tickets and who merged PRs. Tile counts come from
-    server-side counts (Jira's approximate count for tickets, GitHub's exact
-    issueCount for PRs); the dataframes only drive the pies. A ``None`` count
-    means the lookup failed and renders as "—", distinct from a genuine 0."""
+    with a ranking of who resolved tickets and who merged PRs. Tile counts come
+    from server-side counts (Jira's approximate count for tickets, GitHub's exact
+    issueCount for PRs) and are org-wide, bots included; the dataframes drive only
+    the rankings, which are people and therefore are not. A ``None`` count means
+    the lookup failed and renders as "—", distinct from a genuine 0."""
     st.subheader("Resolved in the Last 7 / 30 Days")
 
     c1, c2, c3, c4 = st.columns(4)
@@ -8351,7 +8609,7 @@ def _render_resolved_summary(
     _tile(c4, TAB_ENGINEERING, shipped, "PRs merged (30d)", _metric_value(pr_count_30))
 
     # None means the ticket fetch failed (distinct from an empty 30-day window),
-    # so the pie can say "could not load" instead of asserting nobody resolved any.
+    # so the chart can say "could not load" instead of asserting nobody resolved any.
     tickets_unavailable = resolved_30 is None
     resolved_df = pd.DataFrame() if resolved_30 is None else resolved_30
 
@@ -8362,7 +8620,7 @@ def _render_resolved_summary(
             if "assignee" in resolved_df.columns and not resolved_df.empty
             else pd.Series(dtype=str)
         )
-        _contribution_pie(
+        _contribution_ranking(
             ticket_people, "tickets", "Who resolved tickets (30 days)",
             unavailable=tickets_unavailable,
         )
@@ -8372,7 +8630,7 @@ def _render_resolved_summary(
             and len(ticket_people) < int(ticket_count_30)
         ):
             st.caption(
-                f"Pie shows a {len(ticket_people)}-ticket sample of ~{int(ticket_count_30)} "
+                f"Chart shows a {len(ticket_people)}-ticket sample of ~{int(ticket_count_30)} "
                 "resolved (fetch limit); ticket tiles are Jira's approximate counts."
             )
     with right:
@@ -8382,12 +8640,23 @@ def _render_resolved_summary(
                 + (f"({github_error})" if github_error else "Set DASHBOARD_GITHUB_TOKEN.")
             )
         else:
+            # The tiles above are org-wide and count everything that merged; this
+            # chart is a ranking of people, and Devin and the Actions runner are
+            # not people. Filtered here rather than upstream so the two numbers
+            # stay honest, and said out loud below so a reader who adds the bars
+            # up and finds they fall short knows why.
+            merged_people, merged_bots = _people_only(merged_prs, "author")
             pr_people = (
-                merged_prs["author"].fillna("unknown").astype(str)
-                if "author" in merged_prs.columns and not merged_prs.empty
+                merged_people["author"].fillna("unknown").astype(str)
+                if "author" in merged_people.columns and not merged_people.empty
                 else pd.Series(dtype=str)
             )
-            _contribution_pie(pr_people, "PRs", "Who merged PRs (30 days)")
+            _contribution_ranking(pr_people, "PRs", "Who merged PRs (30 days)")
+            if merged_bots:
+                st.caption(
+                    f"{merged_bots} bot-authored PR(s) are in the tiles above but not "
+                    "in this chart (Devin, GitHub Actions, dependabot, renovate)."
+                )
 
     st.caption(
         "Ticket resolved = transitioned into Done / Released / Ready for Production / Review in "
@@ -8462,8 +8731,14 @@ def _render_pr_section(
         )
 
     # Per-person PR status: who is holding open and stuck work, and their oldest.
+    # The three tiles above are org-wide and include the bots, because a PR Devin
+    # opened and nobody reviewed is still a stuck PR somebody has to deal with.
+    # This table is a list of people to talk to, and no conversation is going to
+    # be had with dependabot, so the bots come out of it here and the difference
+    # is stated rather than left for a reader to discover by adding the column up.
+    people, bot_prs = _people_only(prs, "author")
     by_person = (
-        prs.groupby("author")
+        people.groupby("author")
         .agg(
             open_prs=("number", "size"),
             stuck_prs=("stuck", "sum"),
@@ -8474,7 +8749,14 @@ def _render_pr_section(
         .sort_values(["stuck_prs", "oldest_days"], ascending=[False, False])
     )
     by_person["stuck_prs"] = by_person["stuck_prs"].astype(int)
-    st.markdown("**PR status by person** (GitHub username)")
+    st.markdown(
+        "**PR status by person** (GitHub username)"
+        + (
+            f" — {bot_prs} bot PR(s) excluded here and counted in the tiles above"
+            if bot_prs
+            else ""
+        )
+    )
     st.dataframe(
         by_person,
         width="stretch",
@@ -8704,8 +8986,18 @@ def _render_pr_hygiene(
             )
             st.caption("Nobody was asked to review and nobody has - these stall silently.")
     with person_tab:
+        # A per-person tab, so the bots come out of it for the same reason as
+        # everywhere else: they cannot be asked to link a ticket or find a
+        # reviewer. The three tabs beside it are lists of PRs to act on and keep
+        # the bots, because a PR with no Jira key is worth seeing whoever opened it.
+        hygiene_people, hygiene_bots = _people_only(prs, "author")
+        if hygiene_bots:
+            st.caption(
+                f"{hygiene_bots} bot-authored PR(s) are in the tabs beside this one "
+                "but not in this table."
+            )
         st.dataframe(
-            pr_hygiene.hygiene_by_person(prs),
+            pr_hygiene.hygiene_by_person(hygiene_people),
             width="stretch",
             hide_index=True,
             column_config={
@@ -9284,12 +9576,306 @@ def _render_individual_page(
     _render_sprint_capacity(filtered, status_source_df=filtered, selected_ticket_key=None)
 
 
-def _render_engineering_page() -> None:
-    st.caption("Visual monitoring for stale, idle, and high-risk tickets.")
-    # Reserved before the sections run: the download button can only be built
-    # once they have, but the slot has to sit at the top where a reader looks
-    # for it.
-    engineering_slot = st.columns([5, 1])[1]
+# How old an unreviewed PR has to be before nobody-was-asked counts as a
+# decision rather than a PR opened an hour ago. Two days is the number Angel's
+# own review-latency complaint is about.
+TODAY_NO_REVIEWER_DAYS = 2.0
+
+# Where "stalled" starts. Measured on status age, never on edit age: a label
+# edit resets idle_days and would empty this tile in five minutes.
+TODAY_STALLED_DAYS = 30.0
+
+
+def _open_pr_signals(open_prs: pd.DataFrame, open_count_exact: object) -> dict[str, Any]:
+    """The three PR facts the Today page opens with.
+
+    Draft PRs are excluded from every count here. A draft says "not ready for
+    you yet", so counting it as unreviewed would blame reviewers for work the
+    author has not handed over.
+    """
+    total = _number_or(open_count_exact, float("nan"))
+    if open_prs.empty:
+        return {
+            "total": int(total) if total == total else 0,
+            "unapproved": 0,
+            "never_reviewed": 0,
+            "oldest_unreviewed_days": None,
+            "no_reviewer_asked": 0,
+        }
+
+    live = open_prs
+    if "is_draft" in live.columns:
+        live = live[~live["is_draft"].fillna(False).astype(bool)]
+
+    approvals = live.get("approving_reviews", pd.Series(0, index=live.index))
+    reviews = live.get("total_reviews", pd.Series(0, index=live.index))
+    requests = live.get("review_requests", pd.Series(0, index=live.index))
+    age = live.get("age_days", pd.Series(0.0, index=live.index)).fillna(0.0)
+
+    unapproved = pd.Series(approvals, index=live.index).fillna(0).astype(int) == 0
+    never = pd.Series(reviews, index=live.index).fillna(0).astype(int) == 0
+    unasked = never & (pd.Series(requests, index=live.index).fillna(0).astype(int) == 0)
+
+    oldest = age[never].max() if bool(never.any()) else None
+    return {
+        "total": int(total) if total == total else int(len(live)),
+        "unapproved": int(unapproved.sum()),
+        "never_reviewed": int(never.sum()),
+        "oldest_unreviewed_days": None if oldest is None else float(oldest),
+        "no_reviewer_asked": int((unasked & (age > TODAY_NO_REVIEWER_DAYS)).sum()),
+    }
+
+
+def _ownerless(df: pd.DataFrame) -> int:
+    """Open tickets belonging to nobody.
+
+    Ownerless is worse than badly owned: no scorecard can carry it, so it is
+    invisible in every per-person view on the dashboard.
+    """
+    if df.empty or "assignee" not in df.columns:
+        return 0
+    names = df["assignee"].fillna("").astype(str).str.strip().str.lower()
+    return int(names.isin(_NO_OWNER_NAMES).sum())
+
+
+def _stalled_count(df: pd.DataFrame) -> tuple[int, str]:
+    """How many open tickets have not *moved* in TODAY_STALLED_DAYS.
+
+    Returns the count and the clock it was measured on, because a fallback to
+    edit age has to say so - it is the gameable one.
+    """
+    if df.empty:
+        return 0, "status age"
+    try:
+        ages = integrity.status_age_days(df, integrity.changelog_events(df))
+        column = ages["status_age_days"].dropna()
+        if not column.empty:
+            return int((column >= TODAY_STALLED_DAYS).sum()), "status age"
+    except Exception:  # noqa: BLE001 - a changelog we cannot parse must not blank the page
+        logger.exception("status_age_days failed; falling back to edit age")
+    idle = df.get("idle_days", pd.Series(0.0, index=df.index)).fillna(0.0)
+    return int((idle >= TODAY_STALLED_DAYS).sum()), "edit age (no changelog)"
+
+
+def _estimate_coverage(df: pd.DataFrame) -> tuple[int, int]:
+    """Tickets carrying an original estimate, out of those that should."""
+    if df.empty:
+        return 0, 0
+    scoped = df[~df["status"].fillna("").astype(str).str.strip().str.lower().isin({"backlog"})]
+    if scoped.empty:
+        return 0, 0
+    estimated = int(scoped.apply(_estimated, axis=1).sum())
+    return estimated, int(len(scoped))
+
+
+def _decision_card(column, *, chip: str, accent: str, value: str, headline: str, note: str) -> None:
+    """One "somebody has to decide this" card: chip, number, what it means."""
+    color = theme.ACCENTS.get(accent, theme.ACCENTS["neutral"])
+    with column:
+        with st.container(border=True):
+            st.markdown(
+                f'<div style="font-size:{theme.TYPE_META};font-weight:600;color:{color};'
+                f'text-transform:uppercase;letter-spacing:.04em">{html.escape(chip)}</div>'
+                f'<div style="font-size:{theme.TYPE_DISPLAY};font-weight:700;line-height:1.1;'
+                f'margin:.15rem 0">{html.escape(value)}</div>'
+                f'<div style="font-size:{theme.TYPE_LABEL};font-weight:600">{html.escape(headline)}</div>'
+                f'<div style="font-size:{theme.TYPE_META};color:#64748b;margin-top:.35rem">'
+                f"{html.escape(note)}</div>",
+                unsafe_allow_html=True,
+            )
+
+
+def _render_attention_band(
+    prs: dict[str, Any],
+    *,
+    github_ready: bool,
+    github_error: str,
+    triage_stuck: object,
+    ownerless: int,
+    open_total: int,
+) -> None:
+    """The one number the page exists to put in front of a reader, then three decisions.
+
+    Nineteen sections at one visual level meant the finding that mattered - most
+    open PRs carry no approving review - sat below twenty tiles and two pies. It
+    is the hero here, and nothing else on the page is drawn at its size.
+    """
+    hero, a, b, c = st.columns([2.1, 1, 1, 1])
+
+    with hero:
+        with st.container(border=True):
+            if not github_ready:
+                st.markdown(
+                    f'<div style="font-size:{theme.TYPE_META};font-weight:600;'
+                    f'color:{theme.ACCENTS["warning"]};text-transform:uppercase">GitHub unavailable</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown("**PR review health cannot be read**")
+                st.caption(
+                    f"({github_error})" if github_error else "Set DASHBOARD_GITHUB_TOKEN."
+                )
+            else:
+                total = prs["total"] or 0
+                unapproved = prs["unapproved"]
+                share = (unapproved / total) if total else 0.0
+                oldest = prs["oldest_unreviewed_days"]
+                st.markdown(
+                    f'<div style="font-size:{theme.TYPE_META};font-weight:600;'
+                    f'color:{theme.ACCENTS["danger"]};text-transform:uppercase;'
+                    f'letter-spacing:.04em">⚠ Needs a decision</div>'
+                    f'<div style="margin:.2rem 0"><span style="font-size:44px;font-weight:700;'
+                    f'line-height:1">{unapproved}</span>'
+                    f'<span style="font-size:{theme.TYPE_LEAD};color:#64748b"> of {total}</span></div>'
+                    f'<div style="font-size:{theme.TYPE_SECTION};font-weight:600">'
+                    f"open PRs have no approving review</div>",
+                    unsafe_allow_html=True,
+                )
+                st.progress(min(max(share, 0.0), 1.0))
+                oldest_text = (
+                    f" Oldest unreviewed PR: **{oldest:.0f} days**." if oldest else ""
+                )
+                st.markdown(
+                    f"{prs['never_reviewed']} have never been reviewed at all."
+                    f"{oldest_text}"
+                )
+
+    _decision_card(
+        a,
+        chip="Triage",
+        accent="warning",
+        value=_text_or(triage_stuck, "—"),
+        headline=f"tickets stuck in triage > {TRIAGE_STUCK_HOURS:.0f}h",
+        note="Untriaged bugs age silently — nobody has decided they matter.",
+    )
+    _decision_card(
+        b,
+        chip="Review",
+        accent="danger",
+        value=str(prs["no_reviewer_asked"]) if github_ready else "—",
+        headline=f"PRs > {TODAY_NO_REVIEWER_DAYS:.0f} days with no reviewer asked",
+        note="Nobody was requested and nobody has looked. These stall by default.",
+    )
+    share_note = (
+        f"{ownerless / open_total:.0%} of open work belongs to nobody, so nobody's score carries it."
+        if open_total
+        else "No open tickets in scope."
+    )
+    _decision_card(
+        c,
+        chip="Ownership",
+        accent="info",
+        value=str(ownerless),
+        headline="open tickets with no owner",
+        note=share_note,
+    )
+
+
+def _render_today_page() -> None:
+    """The landing page: what needs a decision, then this week in six numbers.
+
+    Deliberately org-wide and filter-free. A reader who lands here is asking
+    "what is wrong right now", not "what is wrong within these four statuses" -
+    the scoped views are the pages behind it.
+    """
+    st.caption(
+        "What needs a decision today, then the week in numbers. "
+        "Counts are telemetry, not performance — people are scored on the People page."
+    )
+    bundle = _engineering_data()
+    df = bundle.df
+
+    prs = _open_pr_signals(bundle.open_prs, bundle.open_count_exact)
+    ownerless = _ownerless(df)
+    _render_attention_band(
+        prs,
+        github_ready=bundle.github_ready,
+        github_error=bundle.github_error,
+        triage_stuck=bundle.data.get("triage_stuck_count"),
+        ownerless=ownerless,
+        open_total=int(len(df)),
+    )
+
+    st.divider()
+    st.subheader("This week")
+
+    stalled, stalled_clock = _stalled_count(df)
+    estimated, estimable = _estimate_coverage(df)
+    coverage_note = (
+        f"{estimated} of {estimable} non-backlog tickets" if estimable else "nothing to estimate"
+    )
+    resolved_7 = bundle.data.get("resolved_count_7")
+    merged_7 = bundle.pr_count_7
+
+    theme.kpi_strip(
+        [
+            ("Tickets resolved · 7d", _text_or(resolved_7, "—"), "changelog-credited", "info"),
+            (
+                "PRs merged · 7d",
+                _text_or(merged_7, "—") if bundle.github_ready else "—",
+                "bots excluded" if bundle.github_ready else "GitHub unavailable",
+                "info",
+            ),
+            ("Open tickets", str(len(df)), "current JQL scope", "neutral"),
+            (
+                f"Stalled {TODAY_STALLED_DAYS:.0f}d+",
+                str(stalled),
+                f"by {stalled_clock}, not edit age",
+                "danger" if stalled else "good",
+            ),
+            (
+                "Estimate coverage",
+                f"{estimated / estimable:.0%}" if estimable else "—",
+                coverage_note,
+                "warning" if estimable and estimated / estimable < 0.8 else "good",
+            ),
+            ("Ownerless", str(ownerless), "no assignee on the board", "warning" if ownerless else "good"),
+        ]
+    )
+
+    st.divider()
+    st.subheader("Where open work sits")
+    st.caption(f"{len(df)} open tickets by status — ranked, not sliced.")
+    if df.empty:
+        st.info("No open tickets returned for the current JQL.")
+    else:
+        theme.plot(
+            theme.rank_bar(
+                df["status"].fillna("(none)").astype(str),
+                title="",
+                value_label="tickets",
+            )
+        )
+
+
+@dataclass(frozen=True)
+class _EngineeringData:
+    """Everything one engineering page draw needs, read exactly once.
+
+    The reads were inlined in the single engineering page. Six pages now share
+    them, and a page that re-derived its own copy would re-run the whole gather
+    on every navigation. The caches make the repeat cheap; this makes it once.
+    """
+
+    data: Any
+    errors: Any
+    raw_df: Any
+    df: Any
+    github_ready: Any
+    github_error: Any
+    open_prs: Any
+    merged_prs: Any
+    pr_count_7: Any
+    pr_count_30: Any
+    open_count_exact: Any
+    assignees: Any
+    statuses: Any
+    priorities: Any
+    max_results: Any
+    page_size: Any
+
+
+def _engineering_data() -> "_EngineeringData":
+    """Load and shape the engineering reads. Calls st.stop() on a fatal read."""
 
     max_results = MAX_RESULTS
     page_size = JIRA_PAGE_SIZE
@@ -9371,6 +9957,53 @@ def _render_engineering_page() -> None:
     statuses = sorted(df["status"].dropna().unique().tolist())
     priorities = sorted(df["priority"].dropna().unique().tolist())
 
+    return _EngineeringData(
+        data=data,
+        errors=errors,
+        raw_df=raw_df,
+        df=df,
+        github_ready=github_ready,
+        github_error=github_error,
+        open_prs=open_prs,
+        merged_prs=merged_prs,
+        pr_count_7=pr_count_7,
+        pr_count_30=pr_count_30,
+        open_count_exact=open_count_exact,
+        assignees=assignees,
+        statuses=statuses,
+        priorities=priorities,
+        max_results=max_results,
+        page_size=page_size,
+    )
+
+
+@dataclass(frozen=True)
+class _EngineeringView:
+    """The sidebar's answer: what this reader is looking at, and the frames for it.
+
+    Six pages share one sidebar. Rendering it per page is correct - Streamlit runs
+    only the open page, so the widgets have to be declared by whichever page that
+    is - but the filtering that follows must not be re-derived six different ways.
+    """
+
+    scope: Any
+    selected_assignees: Any
+    selected_statuses: Any
+    selected_priorities: Any
+    min_idle: Any
+    min_age: Any
+    include_backlogs: Any
+    color_by: Any
+    allow_writes: Any
+    filtered: Any
+    unscoped: Any
+
+
+def _engineering_filters(bundle: "_EngineeringData") -> "_EngineeringView":
+    """Draw the scope and filter sidebar, then apply it to the ticket frame."""
+    df = bundle.df
+    assignees, statuses, priorities = bundle.assignees, bundle.statuses, bundle.priorities
+
     with st.sidebar:
         st.header("Scope")
         scope = st.radio(
@@ -9442,6 +10075,228 @@ def _render_engineering_page() -> None:
     unscoped = filtered
     if selected_assignees is not None:
         filtered = filtered[filtered["assignee"].isin(selected_assignees)]
+
+    return _EngineeringView(
+        scope=scope,
+        selected_assignees=selected_assignees,
+        selected_statuses=selected_statuses,
+        selected_priorities=selected_priorities,
+        min_idle=min_idle,
+        min_age=min_age,
+        include_backlogs=include_backlogs,
+        color_by=color_by,
+        allow_writes=allow_writes,
+        filtered=filtered,
+        unscoped=unscoped,
+    )
+
+
+def _engineering_context() -> tuple["_EngineeringData", "_EngineeringView", Any]:
+    """One page's worth of setup: the reads, the sidebar, and the report slot.
+
+    Every engineering page calls this first. The reads are cached, so the second
+    page a reader opens pays for the sidebar and nothing else.
+    """
+    slot = st.columns([5, 1])[1]
+    bundle = _engineering_data()
+    view = _engineering_filters(bundle)
+    return bundle, view, slot
+
+
+def _one_person_instead(
+    bundle: "_EngineeringData", view: "_EngineeringView", slot: Any
+) -> bool:
+    """Draw the single-engineer page when the reader has narrowed to one name.
+
+    Returns True when it did, so the caller stops. Org-wide sections under one
+    person's name are somebody else's work wearing their heading, whichever way
+    the reader got there - the Individual scope, or a Team multiselect whittled
+    down to one.
+    """
+    people = view.selected_assignees
+    if people is None or len(people) != 1:
+        return False
+    _render_individual_page(
+        person=str(people[0]),
+        filtered=view.filtered,
+        organization=bundle.df,
+        open_prs=bundle.open_prs,
+        merged_prs=bundle.merged_prs,
+        github_ready=bundle.github_ready,
+        github_error=bundle.github_error,
+        include_backlogs=view.include_backlogs,
+    )
+    _download_report(slot, TAB_ENGINEERING)
+    return True
+
+
+def _render_people_page() -> None:
+    """Who is doing what, compared within their own role.
+
+    Kept apart from Delivery on purpose: Delivery counts work, this page ranks
+    people, and a reader should have to choose which question they are asking.
+    """
+    st.caption(
+        "Scores compare within a role only. A component with too little data says so "
+        "instead of scoring, and every figure shows its n."
+    )
+    bundle, view, slot = _engineering_context()
+    if _one_person_instead(bundle, view, slot):
+        return
+
+    metrics_view = _metrics_df(view.filtered, view.include_backlogs)
+    _render_team_overview(metrics_view)
+    st.divider()
+    _render_scope_breakdown(
+        view.filtered, scope=view.scope, include_backlogs=view.include_backlogs
+    )
+    _download_report(slot, TAB_ENGINEERING)
+
+
+def _render_delivery_page() -> None:
+    """What finished, and how long it took. Counts, not verdicts."""
+    st.caption(
+        "Org-wide throughput and the queues behind it. Counts here are telemetry — "
+        "people are scored on the People page."
+    )
+    bundle, view, slot = _engineering_context()
+    if _one_person_instead(bundle, view, slot):
+        return
+
+    data = bundle.data
+    _render_resolved_summary(
+        data.get("resolved_count_7"),
+        data.get("resolved_count_30"),
+        data.get("resolved_30"),
+        bundle.pr_count_7,
+        bundle.pr_count_30,
+        bundle.merged_prs,
+        bundle.github_ready,
+        bundle.github_error,
+    )
+    st.divider()
+    _render_metrics(
+        view.filtered,
+        include_backlogs=view.include_backlogs,
+        unassigned_source=view.unscoped if view.selected_assignees is not None else None,
+    )
+    metrics_view = _metrics_df(view.filtered, view.include_backlogs)
+    st.divider()
+    _render_mix(metrics_view)
+    st.divider()
+    _render_priority_queue(view.filtered, include_backlogs=view.include_backlogs)
+    st.divider()
+    _render_stale_cleanup(view.filtered)
+    _download_report(slot, TAB_ENGINEERING)
+
+
+def _render_code_page() -> None:
+    """Pull requests: what is stuck, what nobody looked at, and how it was written."""
+    st.caption(
+        "Every repository in the org. A draft is excluded from the review counts — "
+        "it has not been handed to a reviewer yet."
+    )
+    bundle, view, slot = _engineering_context()
+    if _one_person_instead(bundle, view, slot):
+        return
+
+    df = bundle.df
+    _render_pr_section(
+        bundle.open_prs, bundle.github_ready, bundle.github_error, bundle.open_count_exact
+    )
+    st.divider()
+    # Every ticket, not the scoped slice: a PR belongs to the org whichever team or
+    # person the reader is currently looking at.
+    _render_pr_hygiene(
+        bundle.open_prs,
+        bundle.github_ready,
+        bundle.github_error,
+        _known_project_keys(df),
+        tickets=df,
+    )
+    st.divider()
+    # Backlog-inclusive on purpose: a backlog ticket is the best kind to hand off,
+    # and it is where badly written tickets accumulate unseen.
+    _render_ticket_quality(view.filtered)
+    _download_report(slot, TAB_ENGINEERING)
+
+
+def _render_planning_page() -> None:
+    """Commitments, capacity and board hygiene — the PM function, made legible."""
+    st.caption(
+        "Sprints run in parallel, one board each. Where a sprint has no dates, the "
+        "numbers that need them stay blank rather than reading zero."
+    )
+    bundle, view, slot = _engineering_context()
+    if _one_person_instead(bundle, view, slot):
+        return
+
+    data = bundle.data
+    df = bundle.df
+    _render_new_and_triage(
+        data.get("created_count_1"),
+        data.get("created_count_7"),
+        data.get("triage_stuck_count"),
+        data.get("created_7"),
+        data.get("triage_stuck"),
+        TRIAGE_STUCK_HOURS,
+    )
+    metrics_view = _metrics_df(view.filtered, view.include_backlogs)
+    st.divider()
+    _render_epics(metrics_view, organization_source=df)
+    st.divider()
+    # Backlog-inclusive on purpose: the backlog is what this section clears out.
+    _render_cleanup(view.filtered, unassigned_source=view.unscoped)
+    st.divider()
+    _render_estimate_policy(view.filtered)
+    st.divider()
+    st.subheader("Sprint Planner")
+    _render_sprint_plan(df)
+    st.divider()
+    st.subheader("Sprint Capacity")
+    _render_sprint_capacity(
+        view.filtered, status_source_df=view.filtered, selected_ticket_key=None
+    )
+    _download_report(slot, TAB_ENGINEERING)
+
+
+def _render_engineering_page() -> None:
+    st.caption("Visual monitoring for stale, idle, and high-risk tickets.")
+    # Reserved before the sections run: the download button can only be built
+    # once they have, but the slot has to sit at the top where a reader looks
+    # for it.
+    engineering_slot = st.columns([5, 1])[1]
+
+    bundle = _engineering_data()
+    data = bundle.data
+    errors = bundle.errors
+    raw_df = bundle.raw_df
+    df = bundle.df
+    github_ready = bundle.github_ready
+    github_error = bundle.github_error
+    open_prs = bundle.open_prs
+    merged_prs = bundle.merged_prs
+    pr_count_7 = bundle.pr_count_7
+    pr_count_30 = bundle.pr_count_30
+    open_count_exact = bundle.open_count_exact
+    assignees = bundle.assignees
+    statuses = bundle.statuses
+    priorities = bundle.priorities
+    max_results = bundle.max_results
+    page_size = bundle.page_size
+
+    view = _engineering_filters(bundle)
+    scope = view.scope
+    selected_assignees = view.selected_assignees
+    selected_statuses = view.selected_statuses
+    selected_priorities = view.selected_priorities
+    min_idle = view.min_idle
+    min_age = view.min_age
+    include_backlogs = view.include_backlogs
+    color_by = view.color_by
+    allow_writes = view.allow_writes
+    filtered = view.filtered
+    unscoped = view.unscoped
 
     # One engineer means one page about them alone: the org-wide sections would
     # only be somebody else's work wearing their name at the top. That holds
@@ -9850,8 +10705,74 @@ def _clear_page_caches(page_title: str) -> None:
     logger.info("Cleared cached reads for the %s page", page_title)
 
 
+class _PageSpec(NamedTuple):
+    """One navigation entry, as data.
+
+    The list is built as plain tuples rather than ``st.Page`` objects so the
+    invariants worth pinning - exactly one default, no repeated ``url_path``, a
+    heading for every title - can be asserted by a test without a Streamlit
+    runtime. ``main`` turns them into pages unchanged.
+    """
+
+    render: Callable[[], None]
+    title: str
+    icon: str
+    url_path: str
+    default: bool = False
+    hidden: bool = False
+
+
+def _page_specs() -> list[_PageSpec]:
+    """Every page this dashboard serves, in navigation order."""
+    specs = [
+        # Today is what a reader lands on. The single engineering page opened on
+        # twenty tiles and two pies, and the finding that mattered - most open PRs
+        # carry no approving review - sat below all of it. Today asks one question
+        # ("what needs a decision now") and the pages behind it keep the detail.
+        #
+        # The default page is served at "/" and Streamlit forces its `url_path` to
+        # "" - it is ignored, not honoured - so the path is stated as "" to say so.
+        _PageSpec(_render_today_page, TODAY_PAGE_TITLE, ":material/priority_high:", "", default=True),
+        _PageSpec(_render_people_page, PEOPLE_PAGE_TITLE, ":material/group:", "people"),
+        _PageSpec(_render_delivery_page, DELIVERY_PAGE_TITLE, ":material/trending_up:", "delivery"),
+        _PageSpec(_render_code_page, CODE_PAGE_TITLE, ":material/code:", "code"),
+        _PageSpec(_render_planning_page, PLANNING_PAGE_TITLE, ":material/event_note:", "planning"),
+        # The former single page, kept whole at the address people already have.
+        # Links to /engineering are in Slack and in people's bookmarks.
+        _PageSpec(
+            _render_engineering_page,
+            ENGINEERING_PAGE_TITLE,
+            ":material/engineering:",
+            "engineering",
+        ),
+    ]
+    if _business_readable():
+        specs.append(
+            _PageSpec(_render_business, BUSINESS_PAGE_TITLE, ":material/storefront:", "business")
+        )
+    return specs
+
+
+def _pages() -> list:
+    """The specs as ``st.Page`` objects, for ``st.navigation``."""
+    return [
+        st.Page(
+            spec.render,
+            title=spec.title,
+            icon=spec.icon,
+            url_path=spec.url_path,
+            **({"default": True} if spec.default else {}),
+            **({"visibility": "hidden"} if spec.hidden else {}),
+        )
+        for spec in _page_specs()
+    ]
+
+
 def main() -> None:
-    st.set_page_config(page_title="Jira Ticket Health Dashboard", layout="wide")
+    # Neutral, because the browser tab is shared by both pages and the shop's
+    # figures are not Jira ticket health. Each page says what it is in its own
+    # heading below.
+    st.set_page_config(page_title="VinoVoss Dashboard", layout="wide")
     require_password()
     inject_styles()
 
@@ -9860,30 +10781,15 @@ def main() -> None:
     # at the shop's figures and vice versa; a page that is not open does not run
     # at all, which is why the Business page no longer needs a button in front
     # of it and why opening it no longer waits for Jira.
-    pages = [
-        st.Page(
-            _render_engineering_page,
-            title=ENGINEERING_PAGE_TITLE,
-            icon=":material/engineering:",
-            url_path="engineering",
-            default=True,
-        )
-    ]
-    if _business_readable():
-        pages.append(
-            st.Page(
-                _render_business,
-                title=BUSINESS_PAGE_TITLE,
-                icon=":material/storefront:",
-                url_path="business",
-            )
-        )
+    pages = _pages()
     page = st.navigation(pages, position="top")
 
     # The login is remembered in the browser for a month, so there has to be a
     # way to hand a shared laptop back without handing over Jira write access.
     render_sign_out()
-    st.title("Jira Ticket Health Dashboard")
+    # Per page, because "Jira Ticket Health Dashboard" sat above the Business
+    # page's orders, revenue and ad spend and was simply untrue there.
+    st.title(PAGE_HEADINGS.get(page.title, "VinoVoss Dashboard"))
     if st.button("Refresh data", icon=":material/refresh:"):
         _clear_page_caches(page.title)
 

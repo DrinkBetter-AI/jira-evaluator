@@ -1,9 +1,18 @@
-"""Presentation helpers: the KPI header strip and its stylesheet."""
+"""Presentation helpers: the type scale, the palette, the KPI strip, the charts.
+
+Everything a reader complains about that is not a number lives here. The
+complaints this file answers are, in order: the text is too small to read on a
+shared screen, the colours mean nothing because there are five palettes, and a
+pie of twenty-three slices is a colour wheel rather than a chart.
+"""
 
 from __future__ import annotations
 
 import html
+import re
 
+import pandas as pd
+import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
@@ -17,6 +26,37 @@ CHART_TITLE_FONT = 19
 _TEMPLATE = "vinovoss"
 
 
+# --- The type scale ----------------------------------------------------------
+#
+# One ladder, six rungs, rather than the 0.76 / 0.78 / 0.85 / 0.95 / 1 / 1.25 /
+# 2rem that grew here a rule at a time. The rungs are named for the job a piece
+# of text does, so a new rule picks a role instead of inventing a size, and
+# nothing on this dashboard ends up half a pixel away from something else.
+#
+# They are declared in pixels on purpose. `.streamlit/config.toml` raises the
+# app's root font size to 17px so that Streamlit's own dataframe - which is
+# drawn on a canvas and cannot be reached by any stylesheet - lands at 15px
+# instead of 14px. Sizes written in rem would have been scaled by that same
+# 17/16 and quietly drifted off the ladder; these do not move.
+TYPE_META = "13px"  # chips, notes, the small print under a number
+TYPE_LABEL = "14px"  # what a number is called
+TYPE_BODY = "15px"  # tables, captions, widget labels - most of this dashboard
+TYPE_LEAD = "17px"  # the prose that explains the numbers
+TYPE_SECTION = "20px"  # a card's headline
+TYPE_DISPLAY = "32px"  # the KPI number itself
+
+# The widest the main column is allowed to get. `layout="wide"` with no ceiling
+# turns a six-card KPI strip into a thin ribbon on a 34-inch monitor and drags
+# the eye across two feet of table, so the content is centred in a column about
+# as wide as a reader can track a row across.
+CONTENT_MAX_WIDTH = "1560px"
+
+
+# --- Colour ------------------------------------------------------------------
+
+# Semantic, not categorical: these five say whether a number is good or bad and
+# are used by `kpi_strip` alone. A chart must not reach for them, or "green"
+# stops meaning "healthy" the moment a series happens to be third in a legend.
 ACCENTS = {
     "neutral": "#1f2937",
     "danger": "#b91c1c",
@@ -25,48 +65,124 @@ ACCENTS = {
     "info": "#1d4ed8",
 }
 
-_STYLE = """
+# The one categorical sequence. Charts that need to tell series apart take these
+# in order rather than each inventing their own set - the dashboard had five
+# palettes, so the same status was three colours depending on which chart a
+# reader was looking at.
+#
+# Chosen from the Okabe-Ito colourblind-safe set, with its blue replaced by the
+# app's own primary (#2563eb, the `primaryColor` in .streamlit/config.toml) and
+# its illegible-on-white yellow replaced by a deep violet. Ordered so that
+# neighbours differ in lightness as well as hue, which is what survives a
+# greyscale print or a projector with the colour turned down: the weakest
+# adjacent pair is still 1.26:1 apart in luminance and most are over 1.5:1.
+#
+# Eight is the ceiling and it is already generous. No eight-colour set is fully
+# separable in greyscale, which is the second reason `rank_bar` collapses a long
+# tail rather than drawing it.
+CATEGORICAL = (
+    "#2563eb",  # blue - the app's primary
+    "#e69f00",  # orange
+    "#009e73",  # bluish green
+    "#5b21b6",  # violet
+    "#56b4e9",  # sky
+    "#d55e00",  # vermillion
+    "#cc79a7",  # reddish purple
+    "#6b7280",  # slate, and the colour of an "Other" bar
+)
+
+
+def categorical(count: int) -> list[str]:
+    """The first ``count`` palette colours, repeating only if forced to.
+
+    Repeating is a chart telling on itself: two series the same colour means the
+    chart has more categories than a reader can hold, and the fix is to collapse
+    the tail rather than to add a ninth hue nobody can name.
+    """
+    if count <= 0:
+        return []
+    return [CATEGORICAL[index % len(CATEGORICAL)] for index in range(count)]
+
+
+def apply_palette(figure):
+    """Draw this figure's series from the app's one categorical sequence.
+
+    Opt-in rather than automatic: a chart whose colours carry their own meaning -
+    a red/amber/green priority bucket, a status pill - would be made worse by
+    having that meaning overwritten with "first colour, second colour".
+    """
+    figure.update_layout(colorway=list(CATEGORICAL))
+    return figure
+
+
+_STYLE = f"""
 <style>
-.kpi-strip { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 0.25rem 0 1rem; }
-.kpi-card {
+/* The readable column. `layout="wide"` is still right - the tables need the
+   room - but "as wide as the window" is not a width, it is the absence of one. */
+[data-testid="stMainBlockContainer"], [data-testid="stMain"] .block-container {{
+  max-width: {CONTENT_MAX_WIDTH};
+  margin-left: auto;
+  margin-right: auto;
+}}
+/* The sidebar is deliberately untouched: it is a column of controls, not prose,
+   and it is already as narrow as it should be. */
+
+.kpi-strip {{ display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 0.25rem 0 1rem; }}
+.kpi-card {{
   flex: 1 1 170px; padding: 0.9rem 1.1rem; border: 1px solid #e5e7eb;
   border-radius: 12px; background: #ffffff;
-}
-.kpi-card .kpi-label {
-  font-size: 0.78rem; color: #6b7280; text-transform: none; letter-spacing: 0.01em;
-}
-.kpi-card .kpi-value { font-size: 2rem; font-weight: 700; line-height: 1.2; }
-.kpi-card .kpi-note { font-size: 0.78rem; color: #9ca3af; }
+}}
+.kpi-card .kpi-label {{
+  font-size: {TYPE_LABEL}; color: #6b7280; text-transform: none; letter-spacing: 0.01em;
+}}
+.kpi-card .kpi-value {{ font-size: {TYPE_DISPLAY}; font-weight: 700; line-height: 1.2; }}
+.kpi-card .kpi-note {{ font-size: {TYPE_META}; color: #9ca3af; }}
 
 /* Triage card: one ticket, sized to be judged at a glance. */
-.triage-card {
+.triage-card {{
   border: 1px solid #e5e7eb; border-radius: 14px; background: #ffffff;
   padding: 1.1rem 1.3rem; margin: 0.4rem 0 0.9rem;
-}
-.triage-card .triage-key { font-size: 0.85rem; font-weight: 700; color: #1d4ed8; }
-.triage-card .triage-summary {
-  font-size: 1.25rem; font-weight: 600; color: #111827; line-height: 1.35;
+}}
+.triage-card .triage-key {{ font-size: {TYPE_LABEL}; font-weight: 700; color: #1d4ed8; }}
+.triage-card .triage-summary {{
+  font-size: {TYPE_SECTION}; font-weight: 600; color: #111827; line-height: 1.35;
   margin: 0.15rem 0 0.7rem;
-}
-.triage-meta { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.6rem; }
-.triage-meta span {
+}}
+.triage-meta {{ display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.6rem; }}
+.triage-meta span {{
   background: #f3f4f6; color: #4b5563; border-radius: 6px;
-  padding: 3px 9px; font-size: 0.76rem; white-space: nowrap;
-}
+  padding: 3px 9px; font-size: {TYPE_META}; white-space: nowrap;
+}}
 /* The signals that argue for closing, so the eye finds them first. */
-.triage-meta span.hot { background: #fdecec; color: #b91c1c; font-weight: 600; }
-.triage-why { font-size: 0.85rem; color: #6b7280; font-style: italic; }
+.triage-meta span.hot {{ background: #fdecec; color: #b91c1c; font-weight: 600; }}
+.triage-why {{ font-size: {TYPE_BODY}; color: #6b7280; font-style: italic; }}
 
 /* The prose the numbers are explained in. Streamlit sizes captions, help text
-   and widget labels for a dense form; beside a 2rem metric they read as a
+   and widget labels for a dense form; beside a 32px metric they read as a
    footnote, and every honest qualification on this dashboard lives in one. */
-[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {
-  font-size: 0.95rem; line-height: 1.5; color: #4b5563;
-}
-[data-testid="stWidgetLabel"] p, [data-testid="stMetricLabel"] p { font-size: 0.95rem; }
-[data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li {
-  font-size: 1rem;
-}
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {{
+  font-size: {TYPE_BODY}; line-height: 1.5; color: #4b5563;
+}}
+[data-testid="stWidgetLabel"] p, [data-testid="stMetricLabel"] p {{ font-size: {TYPE_BODY}; }}
+[data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li {{
+  font-size: {TYPE_LEAD};
+}}
+
+/* Tables. This dashboard is mostly tables, and they were the smallest text on
+   it: Streamlit sizes a dataframe cell at 0.875rem while body copy sat at 1rem,
+   so the numbers a reader came for were the hardest thing on the page to read.
+   `st.dataframe` is drawn on a canvas and takes its size from the root font
+   size rather than from any stylesheet, which is why the ceiling is raised in
+   .streamlit/config.toml instead of here; these rules cover the tables that are
+   real DOM - `st.table` and the ones written in markdown - so all three kinds
+   agree, and give every header row the weight that separates a column name from
+   the data under it. */
+[data-testid="stTable"] td, [data-testid="stMarkdownContainer"] table td {{
+  font-size: {TYPE_BODY};
+}}
+[data-testid="stTable"] th, [data-testid="stMarkdownContainer"] table th {{
+  font-size: {TYPE_BODY}; font-weight: 600;
+}}
 </style>
 """
 
@@ -74,6 +190,16 @@ _STYLE = """
 def inject_styles() -> None:
     st.markdown(_STYLE, unsafe_allow_html=True)
     chart_fonts()
+
+
+def _titled(figure) -> bool:
+    """Whether this figure has a title a reader would actually see.
+
+    Read rather than written: touching ``figure.layout.title`` does not create
+    the key, so asking the question is free where answering it wrongly is not.
+    """
+    title = getattr(figure.layout, "title", None)
+    return bool(title is not None and str(title.text or "").strip())
 
 
 def plot(figure, into=None, **kwargs):
@@ -84,13 +210,21 @@ def plot(figure, into=None, **kwargs):
     template it finds, so a template alone is overwritten in the browser and
     only a chart that states its size keeps it.
 
+    The title size is only stated when there is a title to size, and that is not
+    tidiness. Plotly's magic underscore expands ``title_font=`` into
+    ``layout.title.font.size``, which brings a ``layout.title`` object into
+    existence with no ``text`` in it; Streamlit's own theming then does
+    ``if ("title" in layout) layout.title.text = "<b>" + String(layout.title.text) + "</b>"``,
+    and ``String(undefined)`` is the word "undefined". That is the literal
+    "undefined" heading readers have been seeing above two charts in production.
+
     ``into`` is a column or other container to draw in, since a chart written as
     ``left.plotly_chart(...)`` would otherwise have to skip this and keep the
     small text.
     """
-    figure.update_layout(
-        font=dict(size=CHART_FONT), title_font=dict(size=CHART_TITLE_FONT)
-    )
+    figure.update_layout(font=dict(size=CHART_FONT))
+    if _titled(figure):
+        figure.update_layout(title_font=dict(size=CHART_TITLE_FONT))
     return (into or st).plotly_chart(figure, **kwargs)
 
 
@@ -133,6 +267,130 @@ def chart_fonts() -> None:
         }
         pio.templates[_TEMPLATE] = larger
     pio.templates.default = _TEMPLATE
+
+
+# --- Ranked bars, which is what a pie should have been ------------------------
+
+# How many rows a ranked bar draws before the rest become one "Other" bar. Ten
+# is about as far down a list as anyone reads, and the row that matters is
+# always at the top.
+RANK_ROWS = 10
+_OTHER = "Other"
+# The label a collapsed tail carries, recognised again on the way back in so
+# that ranking an already-ranked series is not a second collapse.
+_OTHER_PATTERN = re.compile(rf"^{_OTHER} \((\d+)\)$")
+
+
+def _other_size(label: object) -> int | None:
+    """How many things a row is standing in for, if it is a collapsed tail."""
+    match = _OTHER_PATTERN.match(str(label))
+    return int(match.group(1)) if match else None
+
+
+def ranked(series: pd.Series, *, top_n: int = RANK_ROWS) -> pd.Series:
+    """The largest ``top_n`` entries, with everything below them added up.
+
+    The result is never longer than ``top_n``, and the collapsed tail is always
+    the last row rather than wherever its size would put it: a tail that outgrows
+    the top named entry - which happens the moment a long tail is long enough to
+    be worth collapsing - would otherwise rank first and read as the busiest
+    person on the team.
+
+    It sums to exactly what it was given, so a chart and the table beside it
+    cannot disagree, and running it on its own output changes nothing, which is
+    what lets the figure and its table be built from one call.
+    """
+    # ``fillna(0)`` rather than ``fillna(0.0)``, and the sums left in whatever
+    # type they arrive as: these are usually ticket counts, and a table beside
+    # the chart showing "9.0000" tickets is a table that looks broken.
+    counted = pd.to_numeric(pd.Series(series), errors="coerce").fillna(0)
+    carried_labels = [label for label in counted.index if _other_size(label) is not None]
+    collapsed = sum(_other_size(label) or 0 for label in carried_labels)
+    collapsed_value = counted[carried_labels].sum() if carried_labels else 0
+    named = counted.drop(labels=carried_labels).sort_values(ascending=False)
+
+    room = top_n - (1 if carried_labels else 0) if top_n > 0 else len(named)
+    if top_n > 0 and len(named) > room:
+        tail = named.iloc[top_n - 1 :]
+        collapsed += len(tail)
+        collapsed_value = collapsed_value + tail.sum()
+        named = named.iloc[: top_n - 1]
+
+    if not collapsed:
+        return named
+    return pd.concat(
+        [named, pd.Series({f"{_OTHER} ({collapsed})": collapsed_value})]
+    )
+
+
+def rank_bar(
+    series: pd.Series,
+    *,
+    title: str,
+    value_label: str,
+    top_n: int = RANK_ROWS,
+):
+    """A "who did how much" ranking, drawn as horizontal bars rather than a pie.
+
+    A pie stops communicating at about six categories. Past that the slices are
+    slivers, the labels are drawn on top of one another or dropped, the legend
+    turns into a scrolling list, and a reader is left comparing angles - which is
+    the one comparison people are measurably bad at. These charts had
+    twenty-three slices each. A bar chart sorted by size answers the question a
+    pie was being asked to answer ("who is at the top, and by how much") in the
+    order the eye already reads.
+
+    Horizontal, because the categories are people's names and status labels:
+    vertical bars would have to rotate them, and a rotated label is one a reader
+    tilts their head to read. Every name here stays level. The value is printed
+    at the end of its own bar, so nobody has to measure anything against an axis.
+
+    The height grows with the number of rows rather than being fixed, so ten
+    people are not squeezed into the space three were comfortable in.
+    """
+    rows = ranked(series, top_n=top_n)
+    frame = rows.rename_axis("category").reset_index(name="value")
+    frame["category"] = frame["category"].astype(str)
+
+    # Plotly stacks the first category at the bottom of a horizontal bar chart,
+    # so the order is reversed to put the largest at the top where a ranking
+    # belongs.
+    frame = frame.iloc[::-1]
+
+    # One colour for the named rows, because they are one dimension and colouring
+    # them individually would imply a distinction that is not there. The
+    # collapsed tail is drawn in the palette's grey so it reads as the leftovers
+    # rather than as somebody called "Other".
+    colors = [
+        CATEGORICAL[-1] if _other_size(name) is not None else CATEGORICAL[0]
+        for name in frame["category"]
+    ]
+
+    figure = go.Figure(
+        go.Bar(
+            x=frame["value"],
+            y=frame["category"],
+            orientation="h",
+            marker_color=colors,
+            text=[f"{value:,.0f}" for value in frame["value"]],
+            textposition="outside",
+            cliponaxis=False,
+            hovertemplate="%{y}: %{x:,.0f} " + value_label + "<extra></extra>",
+        )
+    )
+    figure.update_layout(
+        title=dict(text=title),
+        height=max(240, 38 * len(frame) + 110),
+        margin=dict(t=56, b=40, l=8, r=48),
+        showlegend=False,
+        bargap=0.28,
+    )
+    figure.update_xaxes(title_text=value_label, rangemode="tozero")
+    # `tickangle=0` is the whole point of the chart: never rotated, whatever the
+    # length of the name. `automargin` buys the labels the room they need
+    # instead of truncating them.
+    figure.update_yaxes(title_text="", tickangle=0, automargin=True, type="category")
+    return figure
 
 
 def kpi_strip(cards: list[tuple[str, str, str, str]]) -> None:

@@ -887,6 +887,17 @@ class JiraClient:
                     "created": fields.get("created"),
                     "updated": fields.get("updated"),
                     "last_meaningful_activity": last_meaningful_activity,
+                    # The whole changelog, not only the one timestamp above. It
+                    # is already downloaded on every load - tickets are fetched
+                    # with ``expand="changelog"`` - and reducing it to a single
+                    # ``max()`` threw away the only record of who moved a ticket,
+                    # when, and from what. Every honest activity signal needs
+                    # that: ``idle_days`` resets on any field edit at all, so a
+                    # pass of label changes reads exactly like work, and a real
+                    # status transition is indistinguishable from a typo fix.
+                    # ``integrity.changelog_events`` parses this column. Carrying
+                    # it costs memory, not another request.
+                    "changelog": issue.get("changelog"),
                     "due_date": fields.get("duedate"),
                     "issue_type": issue_type.get("name"),
                     "project_key": project.get("key"),

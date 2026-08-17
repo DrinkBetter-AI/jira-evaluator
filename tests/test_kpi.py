@@ -3,6 +3,11 @@
 The scorecard is a management aid, so what matters is that each component
 scores from the inputs it names, that a missing input drops the component
 rather than zeroing the person, and that badges appear only when earned.
+
+It is also a scorecard that people are paid against, so a second class of test
+matters just as much: the ones that pin down what happens when the inputs are
+absent. An engineer who can raise their score by holding fewer tickets has been
+handed an incentive nobody meant to give them.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -60,9 +66,134 @@ def test_a_missing_input_drops_the_component_not_the_person():
     assert kpi.overall(parts) is None
 
 
-def test_the_overall_score_renormalizes_over_present_components():
+def test_a_fragment_of_the_scorecard_does_not_get_a_headline():
+    # Delivery (10) and Rework (20) is 30 of 100 points. Publishing a number
+    # from that is how an empty board used to outscore a full one.
     parts = [kpi.Component("Delivery", 100.0, ""), kpi.Component("Rework", 0.0, "")]
-    assert kpi.overall(parts) == 50.0  # equal weights renormalized
+    assert kpi.overall(parts) is None
+    report = kpi.coverage(parts)
+    assert report.scorable is False
+    assert report.covered_weight == 30.0
+    assert "Weekly updates" in report.note
+
+
+def test_enough_of_the_scorecard_scores_over_the_weight_that_had_data():
+    parts = [
+        kpi.Component("Rework", 100.0, ""),  # 20
+        kpi.Component("Weekly updates", 100.0, ""),  # 15
+        kpi.Component("Staleness", 0.0, ""),  # 10
+        kpi.Component("Carry-over", 100.0, ""),  # 10
+        kpi.Component("Estimates", 0.0, ""),  # 10
+    ]
+    # 45 of 65 points scored full, and the note names what was missing.
+    assert kpi.overall(parts) == pytest.approx(100.0 * 45 / 65)
+    report = kpi.coverage(parts)
+    assert report.scorable is True
+    assert "Delivery" in report.missing
+
+
+def test_pushing_every_ticket_to_backlog_stops_the_score_instead_of_raising_it():
+    # The gaming move the old renormalisation rewarded: hold no open non-backlog
+    # tickets, lose 45 points of denominator, get scored on what is left.
+    empty_board = kpi.components(
+        pd.DataFrame(),
+        pd.DataFrame([{"quality_score": 5.0}]),
+        resolved_7=1,
+        resolved_90=1,
+        reopened_90=0,
+        prs=pd.DataFrame([{"changes_reviews": 0}]),
+    )
+    assert {p.name for p in empty_board} == {"Delivery", "Rework", "Devin-ready docs"}
+    assert kpi.overall(empty_board) is None
+    assert "Weekly updates" in kpi.coverage(empty_board).missing
+
+
+def test_a_component_with_no_data_can_be_shown_as_insufficient_rather_than_hidden():
+    parts = kpi.components(
+        board(),
+        pd.DataFrame(),
+        resolved_7=None,
+        resolved_90=None,
+        reopened_90=None,
+        prs=pd.DataFrame(),
+        include_gaps=True,
+    )
+    gaps = {p.name: p for p in parts if not p.sufficient}
+    assert "Delivery" in gaps and "Devin-ready docs" in gaps
+    assert gaps["Delivery"].detail.startswith("insufficient data")
+    assert gaps["Delivery"].n == 0
+    # A placeholder must never drag the score down as if it were a zero.
+    assert kpi.overall(parts) == kpi.overall([p for p in parts if p.sufficient])
+
+
+def test_every_component_says_how_many_things_it_counted():
+    parts = kpi.components(
+        board(),
+        pd.DataFrame([{"quality_score": 4.0}]),
+        resolved_7=2,
+        resolved_90=18,
+        reopened_90=1,
+        prs=pd.DataFrame([{"changes_reviews": 0}]),
+        peer_resolved_7=[0, 1, 2, 9],
+    )
+    by_name = {p.name: p for p in parts}
+    # 100% on two tickets and 100% on forty are different claims; n is how a
+    # reader tells them apart.
+    assert by_name["Weekly updates"].n == 2
+    assert by_name["Estimates"].n == 2
+    assert by_name["Devin-ready docs"].n == 1
+    assert by_name["Delivery"].n == 18
+    assert by_name["Delivery vs team"].n == 4
+    assert all(p.n is not None for p in parts)
+
+
+def test_the_delivery_baseline_stops_counting_the_week_it_is_judging():
+    # 12 resolved in 90 days, 12 of them this week: the prior 83 days were
+    # empty. The old arithmetic divided by a baseline the burst had inflated.
+    assert kpi.baseline_rate(12, 12, 7, 90) == 0.0
+    # 4 this week out of 20 in the quarter leaves 16 over 83 days.
+    assert kpi.baseline_rate(4, 20, 7, 90) == pytest.approx(7.0 * 16 / 83)
+    # The counts come from separate queries and can disagree; never go negative.
+    assert kpi.baseline_rate(9, 5, 7, 90) == 0.0
+    assert kpi.baseline_rate(None, 20) is None
+
+
+def test_a_quiet_quarter_no_longer_builds_a_baseline_a_burst_can_beat():
+    # Someone who resolved nothing for 83 days and then closed 5 trivial
+    # tickets scores 100 on the self-relative reading. It is not wrong - there
+    # is nothing to compare against - and it is exactly why the peer reading
+    # sits next to it carrying the same weight.
+    parts = kpi.components(
+        pd.DataFrame(), pd.DataFrame(), 5, 5, None, pd.DataFrame(),
+        peer_resolved_7=[5, 9, 11, 14],
+    )
+    by_name = {p.name: p for p in parts}
+    assert by_name["Delivery"].score == 100.0
+    assert "no prior-83-day pace" in by_name["Delivery"].detail
+    assert by_name["Delivery vs team"].score == pytest.approx(12.5)  # bottom of the team
+
+
+def test_the_peer_reading_needs_a_real_cohort_before_it_says_anything():
+    assert kpi.peer_percentile(3.0, [1.0, 5.0]) is None  # two people is not a team
+    assert kpi.peer_percentile(3.0, [1.0, 2.0, 3.0, 9.0]) == pytest.approx(62.5)
+    assert kpi.peer_percentile(None, [1.0, 2.0, 3.0]) is None
+    # Everybody identical: nobody is above or below anybody.
+    assert kpi.peer_percentile(4.0, [4.0, 4.0, 4.0]) == 50.0
+
+
+def test_the_peer_reading_takes_a_mapping_of_person_to_count():
+    parts = kpi.components(
+        pd.DataFrame(), pd.DataFrame(), 6, 30, None, pd.DataFrame(),
+        peer_resolved_7={"Ana": 6, "Bo": 1, "Cy": 2, "Di": 3},
+    )
+    by_name = {p.name: p.score for p in parts}
+    assert by_name["Delivery vs team"] == pytest.approx(87.5)
+
+
+def test_without_peer_counts_the_peer_component_is_absent_not_invented():
+    parts = kpi.components(board(), pd.DataFrame(), 2, 18, 1, pd.DataFrame())
+    assert "Delivery vs team" not in {p.name for p in parts}
+    assert "Delivery vs team" in kpi.coverage(parts).missing
 
 
 def test_an_epic_does_not_count_against_estimate_discipline():
