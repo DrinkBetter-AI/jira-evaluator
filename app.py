@@ -211,6 +211,10 @@ SCOPE_TEAM = "Team"
 SCOPE_INDIVIDUAL = "Individual"
 
 TODAY_PAGE_TITLE = "Today"
+PEOPLE_PAGE_TITLE = "People"
+DELIVERY_PAGE_TITLE = "Delivery"
+CODE_PAGE_TITLE = "Code"
+PLANNING_PAGE_TITLE = "Planning"
 ENGINEERING_PAGE_TITLE = "Engineering"
 BUSINESS_PAGE_TITLE = "Business"
 
@@ -219,6 +223,10 @@ BUSINESS_PAGE_TITLE = "Business"
 # the two pages are about entirely different things.
 PAGE_HEADINGS = {
     TODAY_PAGE_TITLE: "Today — What Needs a Decision",
+    PEOPLE_PAGE_TITLE: "People — Scorecards Within Role",
+    DELIVERY_PAGE_TITLE: "Delivery — Throughput & Queues",
+    CODE_PAGE_TITLE: "Code — Pull Request Health",
+    PLANNING_PAGE_TITLE: "Planning — Sprints, Capacity & Hygiene",
     ENGINEERING_PAGE_TITLE: "Engineering — Ticket & PR Health",
     BUSINESS_PAGE_TITLE: "Business — Orders, Revenue & Spend",
 }
@@ -9969,30 +9977,32 @@ def _engineering_data() -> "_EngineeringData":
     )
 
 
-def _render_engineering_page() -> None:
-    st.caption("Visual monitoring for stale, idle, and high-risk tickets.")
-    # Reserved before the sections run: the download button can only be built
-    # once they have, but the slot has to sit at the top where a reader looks
-    # for it.
-    engineering_slot = st.columns([5, 1])[1]
+@dataclass(frozen=True)
+class _EngineeringView:
+    """The sidebar's answer: what this reader is looking at, and the frames for it.
 
-    bundle = _engineering_data()
-    data = bundle.data
-    errors = bundle.errors
-    raw_df = bundle.raw_df
+    Six pages share one sidebar. Rendering it per page is correct - Streamlit runs
+    only the open page, so the widgets have to be declared by whichever page that
+    is - but the filtering that follows must not be re-derived six different ways.
+    """
+
+    scope: Any
+    selected_assignees: Any
+    selected_statuses: Any
+    selected_priorities: Any
+    min_idle: Any
+    min_age: Any
+    include_backlogs: Any
+    color_by: Any
+    allow_writes: Any
+    filtered: Any
+    unscoped: Any
+
+
+def _engineering_filters(bundle: "_EngineeringData") -> "_EngineeringView":
+    """Draw the scope and filter sidebar, then apply it to the ticket frame."""
     df = bundle.df
-    github_ready = bundle.github_ready
-    github_error = bundle.github_error
-    open_prs = bundle.open_prs
-    merged_prs = bundle.merged_prs
-    pr_count_7 = bundle.pr_count_7
-    pr_count_30 = bundle.pr_count_30
-    open_count_exact = bundle.open_count_exact
-    assignees = bundle.assignees
-    statuses = bundle.statuses
-    priorities = bundle.priorities
-    max_results = bundle.max_results
-    page_size = bundle.page_size
+    assignees, statuses, priorities = bundle.assignees, bundle.statuses, bundle.priorities
 
     with st.sidebar:
         st.header("Scope")
@@ -10065,6 +10075,228 @@ def _render_engineering_page() -> None:
     unscoped = filtered
     if selected_assignees is not None:
         filtered = filtered[filtered["assignee"].isin(selected_assignees)]
+
+    return _EngineeringView(
+        scope=scope,
+        selected_assignees=selected_assignees,
+        selected_statuses=selected_statuses,
+        selected_priorities=selected_priorities,
+        min_idle=min_idle,
+        min_age=min_age,
+        include_backlogs=include_backlogs,
+        color_by=color_by,
+        allow_writes=allow_writes,
+        filtered=filtered,
+        unscoped=unscoped,
+    )
+
+
+def _engineering_context() -> tuple["_EngineeringData", "_EngineeringView", Any]:
+    """One page's worth of setup: the reads, the sidebar, and the report slot.
+
+    Every engineering page calls this first. The reads are cached, so the second
+    page a reader opens pays for the sidebar and nothing else.
+    """
+    slot = st.columns([5, 1])[1]
+    bundle = _engineering_data()
+    view = _engineering_filters(bundle)
+    return bundle, view, slot
+
+
+def _one_person_instead(
+    bundle: "_EngineeringData", view: "_EngineeringView", slot: Any
+) -> bool:
+    """Draw the single-engineer page when the reader has narrowed to one name.
+
+    Returns True when it did, so the caller stops. Org-wide sections under one
+    person's name are somebody else's work wearing their heading, whichever way
+    the reader got there - the Individual scope, or a Team multiselect whittled
+    down to one.
+    """
+    people = view.selected_assignees
+    if people is None or len(people) != 1:
+        return False
+    _render_individual_page(
+        person=str(people[0]),
+        filtered=view.filtered,
+        organization=bundle.df,
+        open_prs=bundle.open_prs,
+        merged_prs=bundle.merged_prs,
+        github_ready=bundle.github_ready,
+        github_error=bundle.github_error,
+        include_backlogs=view.include_backlogs,
+    )
+    _download_report(slot, TAB_ENGINEERING)
+    return True
+
+
+def _render_people_page() -> None:
+    """Who is doing what, compared within their own role.
+
+    Kept apart from Delivery on purpose: Delivery counts work, this page ranks
+    people, and a reader should have to choose which question they are asking.
+    """
+    st.caption(
+        "Scores compare within a role only. A component with too little data says so "
+        "instead of scoring, and every figure shows its n."
+    )
+    bundle, view, slot = _engineering_context()
+    if _one_person_instead(bundle, view, slot):
+        return
+
+    metrics_view = _metrics_df(view.filtered, view.include_backlogs)
+    _render_team_overview(metrics_view)
+    st.divider()
+    _render_scope_breakdown(
+        view.filtered, scope=view.scope, include_backlogs=view.include_backlogs
+    )
+    _download_report(slot, TAB_ENGINEERING)
+
+
+def _render_delivery_page() -> None:
+    """What finished, and how long it took. Counts, not verdicts."""
+    st.caption(
+        "Org-wide throughput and the queues behind it. Counts here are telemetry — "
+        "people are scored on the People page."
+    )
+    bundle, view, slot = _engineering_context()
+    if _one_person_instead(bundle, view, slot):
+        return
+
+    data = bundle.data
+    _render_resolved_summary(
+        data.get("resolved_count_7"),
+        data.get("resolved_count_30"),
+        data.get("resolved_30"),
+        bundle.pr_count_7,
+        bundle.pr_count_30,
+        bundle.merged_prs,
+        bundle.github_ready,
+        bundle.github_error,
+    )
+    st.divider()
+    _render_metrics(
+        view.filtered,
+        include_backlogs=view.include_backlogs,
+        unassigned_source=view.unscoped if view.selected_assignees is not None else None,
+    )
+    metrics_view = _metrics_df(view.filtered, view.include_backlogs)
+    st.divider()
+    _render_mix(metrics_view)
+    st.divider()
+    _render_priority_queue(view.filtered, include_backlogs=view.include_backlogs)
+    st.divider()
+    _render_stale_cleanup(view.filtered)
+    _download_report(slot, TAB_ENGINEERING)
+
+
+def _render_code_page() -> None:
+    """Pull requests: what is stuck, what nobody looked at, and how it was written."""
+    st.caption(
+        "Every repository in the org. A draft is excluded from the review counts — "
+        "it has not been handed to a reviewer yet."
+    )
+    bundle, view, slot = _engineering_context()
+    if _one_person_instead(bundle, view, slot):
+        return
+
+    df = bundle.df
+    _render_pr_section(
+        bundle.open_prs, bundle.github_ready, bundle.github_error, bundle.open_count_exact
+    )
+    st.divider()
+    # Every ticket, not the scoped slice: a PR belongs to the org whichever team or
+    # person the reader is currently looking at.
+    _render_pr_hygiene(
+        bundle.open_prs,
+        bundle.github_ready,
+        bundle.github_error,
+        _known_project_keys(df),
+        tickets=df,
+    )
+    st.divider()
+    # Backlog-inclusive on purpose: a backlog ticket is the best kind to hand off,
+    # and it is where badly written tickets accumulate unseen.
+    _render_ticket_quality(view.filtered)
+    _download_report(slot, TAB_ENGINEERING)
+
+
+def _render_planning_page() -> None:
+    """Commitments, capacity and board hygiene — the PM function, made legible."""
+    st.caption(
+        "Sprints run in parallel, one board each. Where a sprint has no dates, the "
+        "numbers that need them stay blank rather than reading zero."
+    )
+    bundle, view, slot = _engineering_context()
+    if _one_person_instead(bundle, view, slot):
+        return
+
+    data = bundle.data
+    df = bundle.df
+    _render_new_and_triage(
+        data.get("created_count_1"),
+        data.get("created_count_7"),
+        data.get("triage_stuck_count"),
+        data.get("created_7"),
+        data.get("triage_stuck"),
+        TRIAGE_STUCK_HOURS,
+    )
+    metrics_view = _metrics_df(view.filtered, view.include_backlogs)
+    st.divider()
+    _render_epics(metrics_view, organization_source=df)
+    st.divider()
+    # Backlog-inclusive on purpose: the backlog is what this section clears out.
+    _render_cleanup(view.filtered, unassigned_source=view.unscoped)
+    st.divider()
+    _render_estimate_policy(view.filtered)
+    st.divider()
+    st.subheader("Sprint Planner")
+    _render_sprint_plan(df)
+    st.divider()
+    st.subheader("Sprint Capacity")
+    _render_sprint_capacity(
+        view.filtered, status_source_df=view.filtered, selected_ticket_key=None
+    )
+    _download_report(slot, TAB_ENGINEERING)
+
+
+def _render_engineering_page() -> None:
+    st.caption("Visual monitoring for stale, idle, and high-risk tickets.")
+    # Reserved before the sections run: the download button can only be built
+    # once they have, but the slot has to sit at the top where a reader looks
+    # for it.
+    engineering_slot = st.columns([5, 1])[1]
+
+    bundle = _engineering_data()
+    data = bundle.data
+    errors = bundle.errors
+    raw_df = bundle.raw_df
+    df = bundle.df
+    github_ready = bundle.github_ready
+    github_error = bundle.github_error
+    open_prs = bundle.open_prs
+    merged_prs = bundle.merged_prs
+    pr_count_7 = bundle.pr_count_7
+    pr_count_30 = bundle.pr_count_30
+    open_count_exact = bundle.open_count_exact
+    assignees = bundle.assignees
+    statuses = bundle.statuses
+    priorities = bundle.priorities
+    max_results = bundle.max_results
+    page_size = bundle.page_size
+
+    view = _engineering_filters(bundle)
+    scope = view.scope
+    selected_assignees = view.selected_assignees
+    selected_statuses = view.selected_statuses
+    selected_priorities = view.selected_priorities
+    min_idle = view.min_idle
+    min_age = view.min_age
+    include_backlogs = view.include_backlogs
+    color_by = view.color_by
+    allow_writes = view.allow_writes
+    filtered = view.filtered
+    unscoped = view.unscoped
 
     # One engineer means one page about them alone: the org-wide sections would
     # only be somebody else's work wearing their name at the top. That holds
@@ -10473,6 +10705,69 @@ def _clear_page_caches(page_title: str) -> None:
     logger.info("Cleared cached reads for the %s page", page_title)
 
 
+class _PageSpec(NamedTuple):
+    """One navigation entry, as data.
+
+    The list is built as plain tuples rather than ``st.Page`` objects so the
+    invariants worth pinning - exactly one default, no repeated ``url_path``, a
+    heading for every title - can be asserted by a test without a Streamlit
+    runtime. ``main`` turns them into pages unchanged.
+    """
+
+    render: Callable[[], None]
+    title: str
+    icon: str
+    url_path: str
+    default: bool = False
+    hidden: bool = False
+
+
+def _page_specs() -> list[_PageSpec]:
+    """Every page this dashboard serves, in navigation order."""
+    specs = [
+        # Today is what a reader lands on. The single engineering page opened on
+        # twenty tiles and two pies, and the finding that mattered - most open PRs
+        # carry no approving review - sat below all of it. Today asks one question
+        # ("what needs a decision now") and the pages behind it keep the detail.
+        #
+        # The default page is served at "/" and Streamlit forces its `url_path` to
+        # "" - it is ignored, not honoured - so the path is stated as "" to say so.
+        _PageSpec(_render_today_page, TODAY_PAGE_TITLE, ":material/priority_high:", "", default=True),
+        _PageSpec(_render_people_page, PEOPLE_PAGE_TITLE, ":material/group:", "people"),
+        _PageSpec(_render_delivery_page, DELIVERY_PAGE_TITLE, ":material/trending_up:", "delivery"),
+        _PageSpec(_render_code_page, CODE_PAGE_TITLE, ":material/code:", "code"),
+        _PageSpec(_render_planning_page, PLANNING_PAGE_TITLE, ":material/event_note:", "planning"),
+        # The former single page, kept whole at the address people already have.
+        # Links to /engineering are in Slack and in people's bookmarks.
+        _PageSpec(
+            _render_engineering_page,
+            ENGINEERING_PAGE_TITLE,
+            ":material/engineering:",
+            "engineering",
+        ),
+    ]
+    if _business_readable():
+        specs.append(
+            _PageSpec(_render_business, BUSINESS_PAGE_TITLE, ":material/storefront:", "business")
+        )
+    return specs
+
+
+def _pages() -> list:
+    """The specs as ``st.Page`` objects, for ``st.navigation``."""
+    return [
+        st.Page(
+            spec.render,
+            title=spec.title,
+            icon=spec.icon,
+            url_path=spec.url_path,
+            **({"default": True} if spec.default else {}),
+            **({"visibility": "hidden"} if spec.hidden else {}),
+        )
+        for spec in _page_specs()
+    ]
+
+
 def main() -> None:
     # Neutral, because the browser tab is shared by both pages and the shop's
     # figures are not Jira ticket health. Each page says what it is in its own
@@ -10486,46 +10781,7 @@ def main() -> None:
     # at the shop's figures and vice versa; a page that is not open does not run
     # at all, which is why the Business page no longer needs a button in front
     # of it and why opening it no longer waits for Jira.
-    pages = [
-        # The default page is served at "/" and Streamlit forces its `url_path`
-        # to "" - it is ignored, not honoured - so declaring "engineering" here
-        # bought nothing and /engineering answered with "Page not found". The
-        # path is stated as "" to say that out loud, and the same function is
-        # registered a second time below at the address people actually paste.
-        # Today is what a reader lands on. The single engineering page opened on
-        # twenty tiles and two pies, and the finding that mattered - most open PRs
-        # carry no approving review - sat below all of it. Today asks one question
-        # ("what needs a decision now") and the pages behind it keep the detail
-        # that used to be stacked on top of the answer.
-        st.Page(
-            _render_today_page,
-            title=TODAY_PAGE_TITLE,
-            icon=":material/priority_high:",
-            url_path="",
-            default=True,
-        ),
-        # /engineering, hidden from the navigation because it is the same page as
-        # the one already in it, not a second one. A page hash is derived from
-        # the URL path alone, so this must not repeat the default's empty path or
-        # st.navigation refuses the pair as a duplicate. Hidden pages are still
-        # reachable by URL, which is the entire point: links to /engineering are
-        # in Slack and in people's bookmarks.
-        st.Page(
-            _render_engineering_page,
-            title=ENGINEERING_PAGE_TITLE,
-            icon=":material/engineering:",
-            url_path="engineering",
-        ),
-    ]
-    if _business_readable():
-        pages.append(
-            st.Page(
-                _render_business,
-                title=BUSINESS_PAGE_TITLE,
-                icon=":material/storefront:",
-                url_path="business",
-            )
-        )
+    pages = _pages()
     page = st.navigation(pages, position="top")
 
     # The login is remembered in the browser for a month, so there has to be a
