@@ -788,3 +788,36 @@ def test_the_pages_of_one_read_share_one_budget(monkeypatch, clock):
         with pytest.raises(github_client.GitHubConfigError, match="throttling"):
             github_client._graphql("t", "{}", {})
     assert clock == [pytest.approx(60.0)]
+
+
+def test_a_gateway_error_is_asked_again_not_reported_as_an_outage(monkeypatch, clock):
+    """GitHub's edge answers a burst with nginx's 502 as readily as with a 403."""
+    replies = [_Response(502, "<html>502 Bad Gateway</html>"), _Response(200)]
+    monkeypatch.setattr(
+        github_client.requests, "post", lambda *a, **k: replies.pop(0)
+    )
+    assert github_client._graphql("t", "{}", {}) == {"ok": True}
+    assert clock == [pytest.approx(github_client._RETRY_BACKOFF_SECONDS)]
+
+
+def test_the_door_is_shut_before_the_next_reader_is_let_through(monkeypatch, clock):
+    """Shut after the lock, the reader queued behind asks inside the window."""
+    doors: list[float] = []
+    original = github_client._hold_off
+
+    def hold_off(seconds: float) -> None:
+        assert github_client._REQUEST_LOCK.locked(), "door shut after the lock"
+        doors.append(seconds)
+        original(seconds)
+
+    monkeypatch.setattr(github_client, "_hold_off", hold_off)
+    monkeypatch.setattr(
+        github_client.requests,
+        "post",
+        lambda *a, **k: _Response(
+            403, '{"message":"secondary rate limit"}', {"retry-after": "30"}
+        ),
+    )
+    with pytest.raises(github_client.GitHubConfigError):
+        github_client._graphql("t", "{}", {})
+    assert doors == [pytest.approx(30.0), pytest.approx(30.0), pytest.approx(30.0)]

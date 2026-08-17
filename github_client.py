@@ -171,8 +171,14 @@ def _await_turn(allowance: float) -> float | None:
 
 
 def _throttled(response: requests.Response) -> bool:
-    """Whether a refusal is "too fast", which waiting fixes, or "no", which does not."""
-    if response.status_code == 429:
+    """Whether a refusal is "too fast" or "not now", which waiting fixes.
+
+    A gateway error belongs here as much as a rate limit does. GitHub's edge
+    answers a burst with an nginx ``502`` as readily as with a documented 403, and
+    the dashboard spent days reporting that as "GitHub unavailable" when asking
+    again a moment later would have worked.
+    """
+    if response.status_code in (429, 502, 503, 504):
         return True
     if response.status_code != 403:
         return False
@@ -262,10 +268,15 @@ def _graphql(token: str, query: str, variables: dict) -> dict:
                 },
                 timeout=30,
             )
-        if not _throttled(response):
+            # Shutting the door happens under the same lock that sent the
+            # request. Released first, the reader queued behind would be woken,
+            # read a door that had not yet been shut, and ask inside the window.
+            refused = _throttled(response)
+            pause = _retry_after(response, attempt) if refused else 0.0
+            if refused:
+                _hold_off(pause if pause is not None else _RETRY_CEILING_SECONDS)
+        if not refused:
             break
-        pause = _retry_after(response, attempt)
-        _hold_off(pause if pause is not None else _RETRY_CEILING_SECONDS)
         if (
             pause is None
             or attempt == _RETRY_ATTEMPTS - 1
