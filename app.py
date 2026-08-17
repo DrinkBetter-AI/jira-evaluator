@@ -4002,6 +4002,14 @@ def _render_sprint_capacity(
         else:
             # Create display dataframe with linked key column in the correct position
             epic_df_display = epic_sprint_df[epic_display_cols].sort_values(["assignee", "key"], ascending=[True, True]).copy()
+            # Read as a number rather than dashed like the text columns: it is
+            # drawn by a NumberColumn, and an epic with no percentage painted the
+            # word "None" into Done % - the same leak this table set out to fix.
+            if "completion_pct" in epic_df_display.columns:
+                epic_df_display["completion_pct"] = pd.to_numeric(
+                    epic_df_display["completion_pct"], errors="coerce"
+                )
+            epic_df_display = _dated(epic_df_display, ["created", "updated"])
             # Read-only, so every unfilled field is dashed the way the other
             # tables dash theirs: an epic with no estimate must not paint the
             # word "None" into the Estimate column.
@@ -4557,6 +4565,28 @@ def _shown(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
         out[column] = text.where(
             ~text.str.lower().isin({"", "none", "nan", "nat", "<na>"}), _NO_VALUE
         )
+    return out
+
+
+def _dated(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    """``frame`` with the named timestamps written as ``YYYY-MM-DD``.
+
+    Jira hands these back as epoch milliseconds in places, and a column of
+    ``1774860044168.82`` reads as broken data rather than as a date.
+    """
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        raw = out[column]
+        numbers = pd.to_numeric(raw, errors="coerce")
+        if numbers.notna().any() and not pd.api.types.is_datetime64_any_dtype(raw):
+            # Epoch milliseconds: read as-is pandas would call these nanoseconds
+            # and date every ticket to 1970.
+            stamps = pd.to_datetime(numbers, unit="ms", utc=True, errors="coerce")
+        else:
+            stamps = pd.to_datetime(raw, utc=True, errors="coerce")
+        out[column] = stamps.dt.strftime("%Y-%m-%d").fillna("")
     return out
 
 
