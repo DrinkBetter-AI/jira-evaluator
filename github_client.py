@@ -61,30 +61,69 @@ _REQUEST_LOCK = threading.Lock()
 _RETRY_ATTEMPTS = 4
 _RETRY_BACKOFF_SECONDS = 2.0
 _RETRY_CEILING_SECONDS = 30.0
+# The instant before which nobody may ask again. A throttle applies to the token,
+# not to the thread that happened to hit it: without this, the reader that was
+# refused sleeps politely while the other dozen keep asking inside the very
+# window GitHub closed, and they spend their own retries being refused too.
+_NOT_BEFORE = 0.0
+_STATE_LOCK = threading.Lock()
 # Total seconds one read may spend waiting out throttles before it gives up. A
 # page that says "GitHub is throttling us" after half a minute is more use than
 # one that spins: the reader can come back, and the other sections still draw.
 _RETRY_BUDGET_SECONDS = 45.0
 
 
-def _retry_after(response: requests.Response, attempt: int) -> float:
-    """How long to wait before asking again, GitHub's own answer preferred.
+def _retry_after(response: requests.Response, attempt: int) -> float | None:
+    """How long to wait before asking again, or ``None`` when waiting is futile.
 
     A requested wait longer than the ceiling is cut down to the ceiling, never
     discarded: GitHub's secondary limit routinely asks for a minute, and ignoring
     that in favour of a two-second backoff spends every retry inside the window
     it was told to sit out, which is how a throttle became an error page.
+
+    The hourly *primary* limit is the one exception. Its reset can be forty
+    minutes away, and no retry this function could schedule will outlast it, so
+    it returns ``None`` and the caller reports the exhausted quota at once rather
+    than sleeping through a budget that cannot help.
     """
-    for header in ("retry-after", "x-ratelimit-reset"):
-        raw = response.headers.get(header, "")
-        if not raw.isdigit():
-            continue
-        seconds = int(raw)
-        if header == "x-ratelimit-reset":
-            seconds = int(seconds - time.time())
-        if seconds > 0:
-            return float(min(seconds, _RETRY_CEILING_SECONDS))
+    reset_in = _seconds_until_reset(response)
+    if (
+        response.headers.get("x-ratelimit-remaining") == "0"
+        and reset_in is not None
+        and reset_in > _RETRY_CEILING_SECONDS
+    ):
+        return None
+    raw = response.headers.get("retry-after", "")
+    if raw.isdigit() and int(raw) > 0:
+        return float(min(int(raw), _RETRY_CEILING_SECONDS))
+    if reset_in is not None and reset_in > 0:
+        return float(min(reset_in, _RETRY_CEILING_SECONDS))
     return min(_RETRY_BACKOFF_SECONDS * (2**attempt), _RETRY_CEILING_SECONDS)
+
+
+def _seconds_until_reset(response: requests.Response) -> int | None:
+    """Seconds until the quota named by ``x-ratelimit-reset`` refills."""
+    raw = response.headers.get("x-ratelimit-reset", "")
+    if not raw.isdigit():
+        return None
+    return int(int(raw) - time.time())
+
+
+def _hold_off(seconds: float) -> None:
+    """Close the door on every reader until ``seconds`` from now."""
+    global _NOT_BEFORE
+    with _STATE_LOCK:
+        _NOT_BEFORE = max(_NOT_BEFORE, time.monotonic() + seconds)
+
+
+def _await_turn(allowance: float) -> float:
+    """Sleep until the shared door opens, spending no more than ``allowance``."""
+    with _STATE_LOCK:
+        delay = _NOT_BEFORE - time.monotonic()
+    delay = min(max(delay, 0.0), max(allowance, 0.0))
+    if delay:
+        time.sleep(delay)
+    return delay
 
 
 def _throttled(response: requests.Response) -> bool:
@@ -153,9 +192,14 @@ def _graphql(token: str, query: str, variables: dict) -> dict:
     ``403 Client Error`` cannot distinguish a missing permission, an org IP allow
     list and a secondary limit - the three days this bug survived were spent
     guessing between exactly those.
+
+    The wait is shared rather than private: a refusal shuts the door for every
+    reader until the instant GitHub named, so a dozen concurrent reads back off
+    once together instead of each discovering the same closed window in turn.
     """
     spent = 0.0
     for attempt in range(_RETRY_ATTEMPTS):
+        spent += _await_turn(_RETRY_BUDGET_SECONDS - spent)
         with _REQUEST_LOCK:
             response = requests.post(
                 GITHUB_GRAPHQL_URL,
@@ -169,10 +213,12 @@ def _graphql(token: str, query: str, variables: dict) -> dict:
         if not _throttled(response) or attempt == _RETRY_ATTEMPTS - 1:
             break
         pause = _retry_after(response, attempt)
+        if pause is None:
+            break
+        _hold_off(pause)
         if spent + pause > _RETRY_BUDGET_SECONDS:
             break
-        spent += pause
-        time.sleep(pause)
+        spent += _await_turn(pause)
     if response.status_code >= 400:
         reason = " ".join(response.text.split())[:300]
         raise GitHubConfigError(

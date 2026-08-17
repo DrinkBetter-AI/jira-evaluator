@@ -13,6 +13,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import time as time_module
+
 import pandas as pd
 import pytest
 
@@ -564,6 +566,29 @@ def test_a_refused_read_repeats_what_github_said(monkeypatch):
     assert "IP allow list" in str(raised.value)
 
 
+@pytest.fixture(autouse=True)
+def _open_door():
+    """The shared throttle door is module state; no test inherits another's."""
+    github_client._NOT_BEFORE = 0.0
+    yield
+    github_client._NOT_BEFORE = 0.0
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """A sleep that costs no wall clock but still moves the clock it is measured by."""
+    slept: list[float] = []
+    now = [1000.0]
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(github_client.time, "sleep", sleep)
+    monkeypatch.setattr(github_client.time, "monotonic", lambda: now[0])
+    return slept
+
+
 class _Response:
     def __init__(self, status_code: int, text: str = "", headers: dict | None = None):
         self.status_code = status_code
@@ -574,20 +599,18 @@ class _Response:
         return {"data": {"ok": True}}
 
 
-def test_a_throttled_read_waits_and_asks_again(monkeypatch):
+def test_a_throttled_read_waits_and_asks_again(monkeypatch, clock):
     """A secondary limit is a wait, not an outage: the page must not go blank."""
     replies = [
         _Response(403, '{"message":"You have exceeded a secondary rate limit"}',
                   {"retry-after": "1"}),
         _Response(200),
     ]
-    slept: list[float] = []
-    monkeypatch.setattr(github_client.time, "sleep", slept.append)
     monkeypatch.setattr(
         github_client.requests, "post", lambda *a, **k: replies.pop(0)
     )
     assert github_client._graphql("t", "{}", {}) == {"ok": True}
-    assert slept == [1.0]
+    assert sum(clock) == pytest.approx(1.0)
 
 
 def test_a_refusal_that_waiting_cannot_fix_is_not_retried(monkeypatch):
@@ -637,25 +660,21 @@ def test_reads_are_serialised_so_a_burst_cannot_trip_the_limit(monkeypatch):
     assert max(overlapping) == 1
 
 
-def test_a_minute_long_wait_is_capped_not_discarded(monkeypatch):
+def test_a_minute_long_wait_is_capped_not_discarded(monkeypatch, clock):
     """GitHub asks for 60s; retrying at 2s spends every attempt inside the ban."""
     throttle = _Response(
         403, '{"message":"secondary rate limit"}', {"retry-after": "60"}
     )
-    slept: list[float] = []
     replies = [throttle, _Response(200)]
-    monkeypatch.setattr(github_client.time, "sleep", slept.append)
     monkeypatch.setattr(
         github_client.requests, "post", lambda *a, **k: replies.pop(0)
     )
     github_client._graphql("t", "{}", {})
-    assert slept == [github_client._RETRY_CEILING_SECONDS]
+    assert sum(clock) == pytest.approx(github_client._RETRY_CEILING_SECONDS)
 
 
-def test_waiting_stops_at_the_budget_rather_than_hanging_the_page(monkeypatch):
+def test_waiting_stops_at_the_budget_rather_than_hanging_the_page(monkeypatch, clock):
     """A throttled org gets a message, not a spinner."""
-    slept: list[float] = []
-    monkeypatch.setattr(github_client.time, "sleep", slept.append)
     monkeypatch.setattr(
         github_client.requests,
         "post",
@@ -665,4 +684,46 @@ def test_waiting_stops_at_the_budget_rather_than_hanging_the_page(monkeypatch):
     )
     with pytest.raises(github_client.GitHubConfigError):
         github_client._graphql("t", "{}", {})
-    assert sum(slept) <= github_client._RETRY_BUDGET_SECONDS
+    assert sum(clock) <= github_client._RETRY_BUDGET_SECONDS
+
+
+def test_one_reader_being_throttled_stops_the_others_asking(monkeypatch, clock):
+    """The limit belongs to the token, so the backoff has to as well."""
+    throttle = _Response(
+        403, '{"message":"secondary rate limit"}', {"retry-after": "5"}
+    )
+    monkeypatch.setattr(
+        github_client.requests,
+        "post",
+        lambda *a, **k: throttle if not clock else _Response(200),
+    )
+    github_client._graphql("t", "{}", {})
+    assert clock == [pytest.approx(5.0)]
+
+    # A second reader, arriving while the door the first one shut is still closed,
+    # waits for it rather than spending a request finding out it is closed.
+    github_client._hold_off(7.0)
+    clock.clear()
+    github_client._graphql("t", "{}", {})
+    assert clock == [pytest.approx(7.0)]
+
+
+def test_an_hourly_quota_that_cannot_refill_in_time_is_not_waited_on(
+    monkeypatch, clock
+):
+    """Sleeping 30s against a 40-minute reset wastes the budget and still fails."""
+    monkeypatch.setattr(
+        github_client.requests,
+        "post",
+        lambda *a, **k: _Response(
+            403,
+            '{"message":"API rate limit exceeded for user ID 1"}',
+            {
+                "x-ratelimit-remaining": "0",
+                "x-ratelimit-reset": str(int(time_module.time()) + 2400),
+            },
+        ),
+    )
+    with pytest.raises(github_client.GitHubConfigError):
+        github_client._graphql("t", "{}", {})
+    assert clock == []
