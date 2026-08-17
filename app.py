@@ -4002,13 +4002,17 @@ def _render_sprint_capacity(
         else:
             # Create display dataframe with linked key column in the correct position
             epic_df_display = epic_sprint_df[epic_display_cols].sort_values(["assignee", "key"], ascending=[True, True]).copy()
-            # Read as a number rather than dashed like the text columns: it is
-            # drawn by a NumberColumn, and an epic with no percentage painted the
-            # word "None" into Done % - the same leak this table set out to fix.
+            # Written out as text - "42%" - and drawn by a TextColumn, because
+            # Streamlit 1.61 paints a NaN in a NumberColumn as the literal word
+            # "None": reading it as a number leaves the leak on the screen, so the
+            # percentage is formatted here and the empty ones dashed with the rest.
             if "completion_pct" in epic_df_display.columns:
-                epic_df_display["completion_pct"] = pd.to_numeric(
+                percent = pd.to_numeric(
                     epic_df_display["completion_pct"], errors="coerce"
                 )
+                epic_df_display["completion_pct"] = [
+                    f"{value:.0f}%" if pd.notna(value) else "" for value in percent
+                ]
             epic_df_display = _dated(epic_df_display, ["created", "updated"])
             # Read-only, so every unfilled field is dashed the way the other
             # tables dash theirs: an epic with no estimate must not paint the
@@ -4023,6 +4027,7 @@ def _render_sprint_capacity(
                     "original_estimate",
                     "reporter",
                     "logged_time",
+                    "completion_pct",
                     "issue_type",
                 ],
             )
@@ -4061,7 +4066,7 @@ def _render_sprint_capacity(
                     "original_estimate": st.column_config.TextColumn("Estimate"),
                     "reporter": st.column_config.TextColumn("Reporter"),
                     "logged_time": st.column_config.TextColumn("Logged"),
-                    "completion_pct": st.column_config.NumberColumn("Done %", format="%.0f%%"),
+                    "completion_pct": st.column_config.TextColumn("Done %"),
                     "ticket_age_days": st.column_config.NumberColumn("Age (days)", format="%.1f"),
                     "idle_days": st.column_config.NumberColumn("Idle (days)", format="%.1f"),
                     "created": st.column_config.TextColumn("Created at"),

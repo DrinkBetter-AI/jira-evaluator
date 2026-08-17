@@ -36,17 +36,18 @@ def test_the_frame_it_was_given_is_left_alone():
     app._shown(frame, ("priority",))
     assert frame["priority"].isna().all()
 
-def test_a_number_column_with_nothing_in_it_is_left_empty_not_worded():
-    """``Done %`` is drawn by a NumberColumn, which prints the word "None".
 
-    ``_shown`` cannot help here - it writes text, and text in a number column is
-    dropped - so the column is read as a number and an absent percentage becomes
-    a blank cell.
+def test_a_percentage_is_written_out_as_text_so_the_empty_ones_can_be_dashed():
+    """Streamlit 1.61 paints a NaN in a NumberColumn as the word "None".
+
+    So ``Done %`` is formatted here and drawn by a TextColumn, which lets
+    ``_shown`` dash the unfilled ones like every other column in the table.
     """
-    frame = pd.DataFrame({"completion_pct": [50, None, "nan"]})
-    numbers = pd.to_numeric(frame["completion_pct"], errors="coerce")
-    assert numbers.tolist()[0] == 50
-    assert numbers.isna().tolist() == [False, True, True]
+    percent = pd.to_numeric(pd.Series([50, None, "nan"]), errors="coerce")
+    written = [f"{value:.0f}%" if pd.notna(value) else "" for value in percent]
+    frame = pd.DataFrame({"completion_pct": written})
+    shown = app._shown(frame, ("completion_pct",))
+    assert shown["completion_pct"].tolist() == ["50%", app._NO_VALUE, app._NO_VALUE]
 
 
 def test_epoch_milliseconds_are_dated_rather_than_printed_raw():
