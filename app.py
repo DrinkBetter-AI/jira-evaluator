@@ -11,6 +11,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import Any, Callable, NamedTuple
 from urllib.parse import quote, unquote, urlencode
 
@@ -1302,6 +1303,56 @@ def requested_person(assignees: list[str]) -> str | None:
     return loose[0] if len(loose) == 1 else None
 
 
+# --- Sidebar choices that survive a page switch ------------------------------
+#
+# The six pages are one script, and a page that does not draw the sidebar (Today)
+# lets Streamlit forget the widgets on it: a status filter set on Engineering was
+# gone on Delivery, and still gone on coming back. A keyed widget is not enough
+# for the same reason. So each choice is also kept under a plain session key of
+# its own, which nothing garbage-collects, and read back as the widget's default.
+_CARRIED_PREFIX = "carried_sidebar_"
+
+
+def _carry(name: str, value: object) -> None:
+    """Remember what the reader chose, for the next page they open."""
+    st.session_state[_CARRIED_PREFIX + name] = value
+
+
+def _carried(name: str, default: Any, options: Sequence[Any] | None = None) -> Any:
+    """What they chose last, or ``default`` where there is nothing to carry.
+
+    A carried choice is dropped when the data no longer offers it - a status that
+    has left the board, a person off this JQL - because a default Streamlit
+    cannot find raises rather than narrowing the view to nothing.
+    """
+    if _CARRIED_PREFIX + name not in st.session_state:
+        return default
+    value = st.session_state[_CARRIED_PREFIX + name]
+    if options is None:
+        return value
+    allowed = list(options)
+    if isinstance(value, list):
+        return [item for item in value if item in allowed]
+    return value if value in allowed else default
+
+
+def _carried_roster(name: str, default: list[str], options: Sequence[str]) -> list[str]:
+    """A carried list of names, where an empty one is a decision rather than a loss.
+
+    Three cases, and only the last one is the reader's: nothing carried yet, every
+    carried name gone from the board (both fall back to ``default``, or the view
+    would open showing no tickets), and a selection the reader deliberately
+    emptied, which is kept empty - restoring the whole team under someone who
+    just cleared it is the widening this carry exists to prevent.
+    """
+    key = _CARRIED_PREFIX + name
+    if key not in st.session_state:
+        return default
+    stored = list(st.session_state[key] or [])
+    kept = [item for item in stored if item in list(options)]
+    return default if stored and not kept else kept
+
+
 def person_link(person: str) -> str:
     """The URL that opens this person's own page.
 
@@ -1328,7 +1379,12 @@ def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | No
 
     if scope == SCOPE_TEAM:
         defaults = _roster_matches(ORG_TEAM_MEMBERS, assignees)
-        selected = st.multiselect("Team members", options=assignees, default=defaults)
+        selected = st.multiselect(
+            "Team members",
+            options=assignees,
+            default=_carried_roster("team_members", defaults, assignees),
+        )
+        _carry("team_members", selected)
         if not selected:
             st.warning("No team members selected - showing no tickets.")
         return selected
@@ -1340,11 +1396,17 @@ def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | No
     default_individual = (
         requested_person(assignees) or (matches[0] if matches else assignees[0])
     )
+    # A link that names someone opens on them whatever was carried from the last
+    # page: it was sent about that person.
+    carried = requested_person(assignees) or _carried(
+        "individual", default_individual, assignees
+    )
     selected = st.selectbox(
         "Assignee",
         options=assignees,
-        index=assignees.index(default_individual),
+        index=assignees.index(carried),
     )
+    _carry("individual", selected)
     return [selected]
 
 
@@ -1682,7 +1744,7 @@ def _estimated(row: pd.Series) -> bool:
     ``has_estimate`` can arrive as ``pd.NA`` from a nullable boolean column,
     which cannot be asked whether it is true, and an unknown estimate is not one.
     """
-    flag = row.get("has_estimate", True)
+    flag = row.get("has_estimate", False)
     return False if pd.isna(flag) else bool(flag)
 
 
@@ -2752,6 +2814,7 @@ def _render_stale_cleanup(df: pd.DataFrame) -> None:
 
     display = candidates.copy()
     display["key_url"] = display["key"].map(_jira_ticket_url)
+    display = _shown(display, ("assignee", "status"))
     st.dataframe(
         display[
             [
@@ -2778,7 +2841,9 @@ def _render_stale_cleanup(df: pd.DataFrame) -> None:
     )
     st.download_button(
         "Download stale tickets (CSV)",
-        data=display[
+        # From the frame before the table's em dashes: a spreadsheet wants an
+        # empty cell, not a dash it would have to be taught to read.
+        data=candidates[
             ["key", "summary", "assignee", "status", "idle_days", "ticket_age_days", "stale_reasons"]
         ]
         .to_csv(index=False)
@@ -4423,6 +4488,27 @@ def _metric_value(count: int | None) -> str | int:
     return "—" if count is None else int(count)
 
 
+# What an unfilled Jira field is printed as in a table. Streamlit's grid draws a
+# missing text cell as the word "None", and a table saying a ticket's priority is
+# "None" is a table naming a Jira priority nobody has. The cards say "none" and
+# "Nobody"; the tables say this.
+_NO_VALUE = "—"
+
+
+def _shown(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    """``frame`` with unfilled text in ``columns`` written as an em dash."""
+    out = frame.copy()
+    for column in columns:
+        if column not in out.columns:
+            continue
+        text = out[column].astype("object").where(out[column].notna(), "")
+        text = text.astype(str).str.strip()
+        out[column] = text.where(
+            ~text.str.lower().isin({"", "none", "nan", "nat", "<na>"}), _NO_VALUE
+        )
+    return out
+
+
 def _render_ticket_list(
     df: pd.DataFrame | None, empty_msg: str, total_count: int | None = None
 ) -> None:
@@ -4451,6 +4537,7 @@ def _render_ticket_list(
         view["age_days"] = pd.NA
     cols = ["key_url", "summary", "status", "priority", "assignee", "age_days"]
     cols = [c for c in cols if c in view.columns]
+    view = _shown(view, ("status", "priority", "assignee"))
     st.dataframe(
         view[cols],
         width="stretch",
@@ -8705,9 +8792,27 @@ def _render_pr_section(
     prs = open_prs.copy()
     prs["review"] = prs.apply(_pr_review_label, axis=1)
     # Stuck = open, non-draft, with no approving review (the user's definition).
+    # The draft half of that was written in the comment and the caption but never
+    # in the code, so the stuck table listed drafts directly beneath a footnote
+    # saying drafts were excluded, and read four where Today read three from the
+    # same PRs. A draft says "not handed over yet"; it is not a reviewer's fault.
+    if "is_draft" in prs.columns:
+        drafts = prs["is_draft"].fillna(False).astype(bool)
+    else:
+        drafts = pd.Series(False, index=prs.index)
+    draft_count = int(drafts.sum())
+    prs = prs[~drafts]
+    if prs.empty:
+        st.success(
+            f"No open PRs waiting on a review across the organization"
+            f"{f' ({draft_count} draft(s) excluded)' if draft_count else ''}."
+        )
+        return
     prs["stuck"] = prs["approving_reviews"].fillna(0).astype(int) == 0
 
-    fetched = int(len(prs))
+    # Counted before the drafts came out: this is the paging question ("did we
+    # read every open PR?"), not the review question.
+    fetched = int(len(open_prs))
     # Exact org-wide open count isn't paging-capped; the frame is (max_prs), so
     # fall back to the fetched size only if the exact count is unavailable.
     open_count = fetched if open_count_exact is None else int(open_count_exact)
@@ -8724,6 +8829,11 @@ def _render_pr_section(
         f"{len(stuck)}",
     )
     _tile(c3, TAB_ENGINEERING, review, "Never reviewed", f"{len(no_review)}")
+    if draft_count:
+        st.caption(
+            f"{draft_count} draft PR(s) are in the Open PRs tile but in neither review "
+            "count, nor in the lists below — a draft has not been handed over yet."
+        )
     if open_count_exact is not None and fetched < open_count_exact:
         st.caption(
             f"Per-person and stuck lists cover the {fetched} oldest of {open_count_exact} "
@@ -9658,14 +9768,23 @@ def _stalled_count(df: pd.DataFrame) -> tuple[int, str]:
 
 
 def _estimate_coverage(df: pd.DataFrame) -> tuple[int, int]:
-    """Tickets carrying an original estimate, out of those that should."""
+    """Tickets carrying an original estimate, out of those the policy asks.
+
+    Read through ``estimate_policy`` rather than by hand, because that is where
+    Delivery and Planning read the same number from: a frame arriving here has
+    no ``has_estimate`` column of its own, and counting rows without one as
+    estimated made this page say 100% while the other two said 77% of the very
+    same tickets. The policy also exempts epics and initiatives, which hold
+    other tickets' hours rather than their own.
+    """
     if df.empty:
         return 0, 0
-    scoped = df[~df["status"].fillna("").astype(str).str.strip().str.lower().isin({"backlog"})]
-    if scoped.empty:
+    scored = estimate_policy(df, BACKLOG_STATUSES)
+    in_policy = scored[scored["policy_applies"].fillna(False).astype(bool)]
+    if in_policy.empty:
         return 0, 0
-    estimated = int(scoped.apply(_estimated, axis=1).sum())
-    return estimated, int(len(scoped))
+    estimated = int(in_policy["has_estimate"].fillna(False).astype(bool).sum())
+    return estimated, int(len(in_policy))
 
 
 def _decision_card(column, *, chip: str, accent: str, value: str, headline: str, note: str) -> None:
@@ -9801,7 +9920,7 @@ def _render_today_page() -> None:
     stalled, stalled_clock = _stalled_count(df)
     estimated, estimable = _estimate_coverage(df)
     coverage_note = (
-        f"{estimated} of {estimable} non-backlog tickets" if estimable else "nothing to estimate"
+        f"{estimated} of {estimable} past Backlog" if estimable else "nothing to estimate"
     )
     resolved_7 = bundle.data.get("resolved_count_7")
     merged_7 = bundle.pr_count_7
@@ -9840,7 +9959,7 @@ def _render_today_page() -> None:
     else:
         theme.plot(
             theme.rank_bar(
-                df["status"].fillna("(none)").astype(str),
+                df["status"].fillna("(none)").astype(str).value_counts(),
                 title="",
                 value_label="tickets",
             )
@@ -10006,18 +10125,27 @@ def _engineering_filters(bundle: "_EngineeringData") -> "_EngineeringView":
 
     with st.sidebar:
         st.header("Scope")
+        scopes = [SCOPE_ORG, SCOPE_TEAM, SCOPE_INDIVIDUAL]
         scope = st.radio(
             "View",
-            options=[SCOPE_ORG, SCOPE_TEAM, SCOPE_INDIVIDUAL],
+            options=scopes,
             # A link that names an engineer opens on that engineer, or the page
-            # they were sent would greet them with the whole organization.
-            index=2 if requested_person(assignees) else 0,
+            # they were sent would greet them with the whole organization. Any
+            # other run opens on the scope the reader last chose, so walking from
+            # Engineering to People does not silently widen the view back to the
+            # whole organization.
+            index=scopes.index(
+                SCOPE_INDIVIDUAL
+                if requested_person(assignees)
+                else _carried("scope", SCOPE_ORG, scopes)
+            ),
             help=(
                 "Organization shows every assignee in the JQL scope; "
                 "Team pre-selects the configured team members; "
                 "Individual focuses on a single assignee."
             ),
         )
+        _carry("scope", scope)
         selected_assignees = _resolve_scope_assignees(scope, assignees)
         st.session_state[_SCOPE_ASSIGNEES_KEY] = (
             None if selected_assignees is None else set(selected_assignees)
@@ -10030,19 +10158,40 @@ def _engineering_filters(bundle: "_EngineeringData") -> "_EngineeringView":
         # form cannot do without a second submit.
         st.header("Filters")
         with st.form("engineering_filters", border=False):
-            selected_statuses = st.multiselect("Status", options=statuses, default=[])
-            selected_priorities = st.multiselect("Priority", options=priorities, default=[])
-            min_idle = st.slider("Min idle days", min_value=0, max_value=180, value=0)
-            min_age = st.slider("Min ticket age", min_value=0, max_value=365, value=0)
-            include_backlogs = st.checkbox("Include Backlogs", value=False)
+            selected_statuses = st.multiselect(
+                "Status", options=statuses, default=_carried("statuses", [], statuses)
+            )
+            selected_priorities = st.multiselect(
+                "Priority",
+                options=priorities,
+                default=_carried("priorities", [], priorities),
+            )
+            min_idle = st.slider(
+                "Min idle days", min_value=0, max_value=180, value=int(_carried("min_idle", 0))
+            )
+            min_age = st.slider(
+                "Min ticket age", min_value=0, max_value=365, value=int(_carried("min_age", 0))
+            )
+            include_backlogs = st.checkbox(
+                "Include Backlogs", value=bool(_carried("include_backlogs", False))
+            )
             color_by = st.segmented_control(
                 "Bubble color",
                 options=["priority", "assignee"],
-                default="priority",
+                default=_carried("color_by", "priority", ["priority", "assignee"]),
             )
             st.form_submit_button("Apply filters", width="stretch")
         # A cleared segmented control returns None; the chart needs a column.
         color_by = color_by or "priority"
+        for name, value in (
+            ("statuses", selected_statuses),
+            ("priorities", selected_priorities),
+            ("min_idle", min_idle),
+            ("min_age", min_age),
+            ("include_backlogs", include_backlogs),
+            ("color_by", color_by),
+        ):
+            _carry(name, value)
 
         st.header("Jira writes")
         # Reading the dashboard is the common case; changing Jira is a decision.
