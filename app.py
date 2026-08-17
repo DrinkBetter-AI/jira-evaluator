@@ -10,6 +10,7 @@ import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple
 from urllib.parse import quote, unquote, urlencode
 
@@ -50,6 +51,7 @@ from access_gate import render_sign_out, require_password
 import focus
 import github_client
 import kpi
+import integrity
 import pr_hygiene
 from capacity import (
     capacity_table,
@@ -208,6 +210,7 @@ SCOPE_ORG = "Organization"
 SCOPE_TEAM = "Team"
 SCOPE_INDIVIDUAL = "Individual"
 
+TODAY_PAGE_TITLE = "Today"
 ENGINEERING_PAGE_TITLE = "Engineering"
 BUSINESS_PAGE_TITLE = "Business"
 
@@ -215,6 +218,7 @@ BUSINESS_PAGE_TITLE = "Business"
 # one word each because a top tab strip has no room for more; a heading has, and
 # the two pages are about entirely different things.
 PAGE_HEADINGS = {
+    TODAY_PAGE_TITLE: "Today — What Needs a Decision",
     ENGINEERING_PAGE_TITLE: "Engineering — Ticket & PR Health",
     BUSINESS_PAGE_TITLE: "Business — Orders, Revenue & Spend",
 }
@@ -9564,12 +9568,306 @@ def _render_individual_page(
     _render_sprint_capacity(filtered, status_source_df=filtered, selected_ticket_key=None)
 
 
-def _render_engineering_page() -> None:
-    st.caption("Visual monitoring for stale, idle, and high-risk tickets.")
-    # Reserved before the sections run: the download button can only be built
-    # once they have, but the slot has to sit at the top where a reader looks
-    # for it.
-    engineering_slot = st.columns([5, 1])[1]
+# How old an unreviewed PR has to be before nobody-was-asked counts as a
+# decision rather than a PR opened an hour ago. Two days is the number Angel's
+# own review-latency complaint is about.
+TODAY_NO_REVIEWER_DAYS = 2.0
+
+# Where "stalled" starts. Measured on status age, never on edit age: a label
+# edit resets idle_days and would empty this tile in five minutes.
+TODAY_STALLED_DAYS = 30.0
+
+
+def _open_pr_signals(open_prs: pd.DataFrame, open_count_exact: object) -> dict[str, Any]:
+    """The three PR facts the Today page opens with.
+
+    Draft PRs are excluded from every count here. A draft says "not ready for
+    you yet", so counting it as unreviewed would blame reviewers for work the
+    author has not handed over.
+    """
+    total = _number_or(open_count_exact, float("nan"))
+    if open_prs.empty:
+        return {
+            "total": int(total) if total == total else 0,
+            "unapproved": 0,
+            "never_reviewed": 0,
+            "oldest_unreviewed_days": None,
+            "no_reviewer_asked": 0,
+        }
+
+    live = open_prs
+    if "is_draft" in live.columns:
+        live = live[~live["is_draft"].fillna(False).astype(bool)]
+
+    approvals = live.get("approving_reviews", pd.Series(0, index=live.index))
+    reviews = live.get("total_reviews", pd.Series(0, index=live.index))
+    requests = live.get("review_requests", pd.Series(0, index=live.index))
+    age = live.get("age_days", pd.Series(0.0, index=live.index)).fillna(0.0)
+
+    unapproved = pd.Series(approvals, index=live.index).fillna(0).astype(int) == 0
+    never = pd.Series(reviews, index=live.index).fillna(0).astype(int) == 0
+    unasked = never & (pd.Series(requests, index=live.index).fillna(0).astype(int) == 0)
+
+    oldest = age[never].max() if bool(never.any()) else None
+    return {
+        "total": int(total) if total == total else int(len(live)),
+        "unapproved": int(unapproved.sum()),
+        "never_reviewed": int(never.sum()),
+        "oldest_unreviewed_days": None if oldest is None else float(oldest),
+        "no_reviewer_asked": int((unasked & (age > TODAY_NO_REVIEWER_DAYS)).sum()),
+    }
+
+
+def _ownerless(df: pd.DataFrame) -> int:
+    """Open tickets belonging to nobody.
+
+    Ownerless is worse than badly owned: no scorecard can carry it, so it is
+    invisible in every per-person view on the dashboard.
+    """
+    if df.empty or "assignee" not in df.columns:
+        return 0
+    names = df["assignee"].fillna("").astype(str).str.strip().str.lower()
+    return int(names.isin(_NO_OWNER_NAMES).sum())
+
+
+def _stalled_count(df: pd.DataFrame) -> tuple[int, str]:
+    """How many open tickets have not *moved* in TODAY_STALLED_DAYS.
+
+    Returns the count and the clock it was measured on, because a fallback to
+    edit age has to say so - it is the gameable one.
+    """
+    if df.empty:
+        return 0, "status age"
+    try:
+        ages = integrity.status_age_days(df, integrity.changelog_events(df))
+        column = ages["status_age_days"].dropna()
+        if not column.empty:
+            return int((column >= TODAY_STALLED_DAYS).sum()), "status age"
+    except Exception:  # noqa: BLE001 - a changelog we cannot parse must not blank the page
+        logger.exception("status_age_days failed; falling back to edit age")
+    idle = df.get("idle_days", pd.Series(0.0, index=df.index)).fillna(0.0)
+    return int((idle >= TODAY_STALLED_DAYS).sum()), "edit age (no changelog)"
+
+
+def _estimate_coverage(df: pd.DataFrame) -> tuple[int, int]:
+    """Tickets carrying an original estimate, out of those that should."""
+    if df.empty:
+        return 0, 0
+    scoped = df[~df["status"].fillna("").astype(str).str.strip().str.lower().isin({"backlog"})]
+    if scoped.empty:
+        return 0, 0
+    estimated = int(scoped.apply(_estimated, axis=1).sum())
+    return estimated, int(len(scoped))
+
+
+def _decision_card(column, *, chip: str, accent: str, value: str, headline: str, note: str) -> None:
+    """One "somebody has to decide this" card: chip, number, what it means."""
+    color = theme.ACCENTS.get(accent, theme.ACCENTS["neutral"])
+    with column:
+        with st.container(border=True):
+            st.markdown(
+                f'<div style="font-size:{theme.TYPE_META};font-weight:600;color:{color};'
+                f'text-transform:uppercase;letter-spacing:.04em">{html.escape(chip)}</div>'
+                f'<div style="font-size:{theme.TYPE_DISPLAY};font-weight:700;line-height:1.1;'
+                f'margin:.15rem 0">{html.escape(value)}</div>'
+                f'<div style="font-size:{theme.TYPE_LABEL};font-weight:600">{html.escape(headline)}</div>'
+                f'<div style="font-size:{theme.TYPE_META};color:#64748b;margin-top:.35rem">'
+                f"{html.escape(note)}</div>",
+                unsafe_allow_html=True,
+            )
+
+
+def _render_attention_band(
+    prs: dict[str, Any],
+    *,
+    github_ready: bool,
+    github_error: str,
+    triage_stuck: object,
+    ownerless: int,
+    open_total: int,
+) -> None:
+    """The one number the page exists to put in front of a reader, then three decisions.
+
+    Nineteen sections at one visual level meant the finding that mattered - most
+    open PRs carry no approving review - sat below twenty tiles and two pies. It
+    is the hero here, and nothing else on the page is drawn at its size.
+    """
+    hero, a, b, c = st.columns([2.1, 1, 1, 1])
+
+    with hero:
+        with st.container(border=True):
+            if not github_ready:
+                st.markdown(
+                    f'<div style="font-size:{theme.TYPE_META};font-weight:600;'
+                    f'color:{theme.ACCENTS["warning"]};text-transform:uppercase">GitHub unavailable</div>',
+                    unsafe_allow_html=True,
+                )
+                st.markdown("**PR review health cannot be read**")
+                st.caption(
+                    f"({github_error})" if github_error else "Set DASHBOARD_GITHUB_TOKEN."
+                )
+            else:
+                total = prs["total"] or 0
+                unapproved = prs["unapproved"]
+                share = (unapproved / total) if total else 0.0
+                oldest = prs["oldest_unreviewed_days"]
+                st.markdown(
+                    f'<div style="font-size:{theme.TYPE_META};font-weight:600;'
+                    f'color:{theme.ACCENTS["danger"]};text-transform:uppercase;'
+                    f'letter-spacing:.04em">⚠ Needs a decision</div>'
+                    f'<div style="margin:.2rem 0"><span style="font-size:44px;font-weight:700;'
+                    f'line-height:1">{unapproved}</span>'
+                    f'<span style="font-size:{theme.TYPE_LEAD};color:#64748b"> of {total}</span></div>'
+                    f'<div style="font-size:{theme.TYPE_SECTION};font-weight:600">'
+                    f"open PRs have no approving review</div>",
+                    unsafe_allow_html=True,
+                )
+                st.progress(min(max(share, 0.0), 1.0))
+                oldest_text = (
+                    f" Oldest unreviewed PR: **{oldest:.0f} days**." if oldest else ""
+                )
+                st.markdown(
+                    f"{prs['never_reviewed']} have never been reviewed at all."
+                    f"{oldest_text}"
+                )
+
+    _decision_card(
+        a,
+        chip="Triage",
+        accent="warning",
+        value=_text_or(triage_stuck, "—"),
+        headline=f"tickets stuck in triage > {TRIAGE_STUCK_HOURS:.0f}h",
+        note="Untriaged bugs age silently — nobody has decided they matter.",
+    )
+    _decision_card(
+        b,
+        chip="Review",
+        accent="danger",
+        value=str(prs["no_reviewer_asked"]) if github_ready else "—",
+        headline=f"PRs > {TODAY_NO_REVIEWER_DAYS:.0f} days with no reviewer asked",
+        note="Nobody was requested and nobody has looked. These stall by default.",
+    )
+    share_note = (
+        f"{ownerless / open_total:.0%} of open work belongs to nobody, so nobody's score carries it."
+        if open_total
+        else "No open tickets in scope."
+    )
+    _decision_card(
+        c,
+        chip="Ownership",
+        accent="info",
+        value=str(ownerless),
+        headline="open tickets with no owner",
+        note=share_note,
+    )
+
+
+def _render_today_page() -> None:
+    """The landing page: what needs a decision, then this week in six numbers.
+
+    Deliberately org-wide and filter-free. A reader who lands here is asking
+    "what is wrong right now", not "what is wrong within these four statuses" -
+    the scoped views are the pages behind it.
+    """
+    st.caption(
+        "What needs a decision today, then the week in numbers. "
+        "Counts are telemetry, not performance — people are scored on the People page."
+    )
+    bundle = _engineering_data()
+    df = bundle.df
+
+    prs = _open_pr_signals(bundle.open_prs, bundle.open_count_exact)
+    ownerless = _ownerless(df)
+    _render_attention_band(
+        prs,
+        github_ready=bundle.github_ready,
+        github_error=bundle.github_error,
+        triage_stuck=bundle.data.get("triage_stuck_count"),
+        ownerless=ownerless,
+        open_total=int(len(df)),
+    )
+
+    st.divider()
+    st.subheader("This week")
+
+    stalled, stalled_clock = _stalled_count(df)
+    estimated, estimable = _estimate_coverage(df)
+    coverage_note = (
+        f"{estimated} of {estimable} non-backlog tickets" if estimable else "nothing to estimate"
+    )
+    resolved_7 = bundle.data.get("resolved_count_7")
+    merged_7 = bundle.pr_count_7
+
+    theme.kpi_strip(
+        [
+            ("Tickets resolved · 7d", _text_or(resolved_7, "—"), "changelog-credited", "info"),
+            (
+                "PRs merged · 7d",
+                _text_or(merged_7, "—") if bundle.github_ready else "—",
+                "bots excluded" if bundle.github_ready else "GitHub unavailable",
+                "info",
+            ),
+            ("Open tickets", str(len(df)), "current JQL scope", "neutral"),
+            (
+                f"Stalled {TODAY_STALLED_DAYS:.0f}d+",
+                str(stalled),
+                f"by {stalled_clock}, not edit age",
+                "danger" if stalled else "good",
+            ),
+            (
+                "Estimate coverage",
+                f"{estimated / estimable:.0%}" if estimable else "—",
+                coverage_note,
+                "warning" if estimable and estimated / estimable < 0.8 else "good",
+            ),
+            ("Ownerless", str(ownerless), "no assignee on the board", "warning" if ownerless else "good"),
+        ]
+    )
+
+    st.divider()
+    st.subheader("Where open work sits")
+    st.caption(f"{len(df)} open tickets by status — ranked, not sliced.")
+    if df.empty:
+        st.info("No open tickets returned for the current JQL.")
+    else:
+        theme.plot(
+            theme.rank_bar(
+                df["status"].fillna("(none)").astype(str),
+                title="",
+                value_label="tickets",
+            )
+        )
+
+
+@dataclass(frozen=True)
+class _EngineeringData:
+    """Everything one engineering page draw needs, read exactly once.
+
+    The reads were inlined in the single engineering page. Six pages now share
+    them, and a page that re-derived its own copy would re-run the whole gather
+    on every navigation. The caches make the repeat cheap; this makes it once.
+    """
+
+    data: Any
+    errors: Any
+    raw_df: Any
+    df: Any
+    github_ready: Any
+    github_error: Any
+    open_prs: Any
+    merged_prs: Any
+    pr_count_7: Any
+    pr_count_30: Any
+    open_count_exact: Any
+    assignees: Any
+    statuses: Any
+    priorities: Any
+    max_results: Any
+    page_size: Any
+
+
+def _engineering_data() -> "_EngineeringData":
+    """Load and shape the engineering reads. Calls st.stop() on a fatal read."""
 
     max_results = MAX_RESULTS
     page_size = JIRA_PAGE_SIZE
@@ -9650,6 +9948,51 @@ def _render_engineering_page() -> None:
     )
     statuses = sorted(df["status"].dropna().unique().tolist())
     priorities = sorted(df["priority"].dropna().unique().tolist())
+
+    return _EngineeringData(
+        data=data,
+        errors=errors,
+        raw_df=raw_df,
+        df=df,
+        github_ready=github_ready,
+        github_error=github_error,
+        open_prs=open_prs,
+        merged_prs=merged_prs,
+        pr_count_7=pr_count_7,
+        pr_count_30=pr_count_30,
+        open_count_exact=open_count_exact,
+        assignees=assignees,
+        statuses=statuses,
+        priorities=priorities,
+        max_results=max_results,
+        page_size=page_size,
+    )
+
+
+def _render_engineering_page() -> None:
+    st.caption("Visual monitoring for stale, idle, and high-risk tickets.")
+    # Reserved before the sections run: the download button can only be built
+    # once they have, but the slot has to sit at the top where a reader looks
+    # for it.
+    engineering_slot = st.columns([5, 1])[1]
+
+    bundle = _engineering_data()
+    data = bundle.data
+    errors = bundle.errors
+    raw_df = bundle.raw_df
+    df = bundle.df
+    github_ready = bundle.github_ready
+    github_error = bundle.github_error
+    open_prs = bundle.open_prs
+    merged_prs = bundle.merged_prs
+    pr_count_7 = bundle.pr_count_7
+    pr_count_30 = bundle.pr_count_30
+    open_count_exact = bundle.open_count_exact
+    assignees = bundle.assignees
+    statuses = bundle.statuses
+    priorities = bundle.priorities
+    max_results = bundle.max_results
+    page_size = bundle.page_size
 
     with st.sidebar:
         st.header("Scope")
@@ -10149,10 +10492,15 @@ def main() -> None:
         # bought nothing and /engineering answered with "Page not found". The
         # path is stated as "" to say that out loud, and the same function is
         # registered a second time below at the address people actually paste.
+        # Today is what a reader lands on. The single engineering page opened on
+        # twenty tiles and two pies, and the finding that mattered - most open PRs
+        # carry no approving review - sat below all of it. Today asks one question
+        # ("what needs a decision now") and the pages behind it keep the detail
+        # that used to be stacked on top of the answer.
         st.Page(
-            _render_engineering_page,
-            title=ENGINEERING_PAGE_TITLE,
-            icon=":material/engineering:",
+            _render_today_page,
+            title=TODAY_PAGE_TITLE,
+            icon=":material/priority_high:",
             url_path="",
             default=True,
         ),
@@ -10167,7 +10515,6 @@ def main() -> None:
             title=ENGINEERING_PAGE_TITLE,
             icon=":material/engineering:",
             url_path="engineering",
-            visibility="hidden",
         ),
     ]
     if _business_readable():
