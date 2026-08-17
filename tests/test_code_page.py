@@ -129,6 +129,32 @@ def test_the_caption_names_what_was_excluded(monkeypatch):
     assert "every page" in caption
 
 
+def test_another_owners_repo_is_not_treated_as_this_orgs(monkeypatch):
+    """``-repo:someone-else/scratch`` never matches an ``org:`` search.
+
+    So it must not drop this org's own ``scratch`` rows either, or the page's
+    table and the org-wide counts describe different populations again.
+    """
+    monkeypatch.setenv("GITHUB_EXCLUDE_REPOS", "avosmod8/scratch")
+    monkeypatch.setenv("DASHBOARD_GITHUB_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_ORG", "DrinkBetter-AI")
+    names, caption = app._exclude_repos()
+    assert names == frozenset()
+    assert caption == ""
+    kept = app._team_prs(pd.DataFrame({"repo": ["scratch"], "author": ["tam"]}))
+    assert list(kept["repo"]) == ["scratch"]
+
+
+def test_a_malformed_org_does_not_replace_the_page_with_a_stack_trace(monkeypatch):
+    """The page prints this caption before the check that reports config errors."""
+    monkeypatch.setenv("GITHUB_EXCLUDE_REPOS", "scratch")
+    monkeypatch.setenv("DASHBOARD_GITHUB_TOKEN", "t")
+    monkeypatch.setenv("GITHUB_ORG", "not a valid org")
+    names, caption = app._exclude_repos()
+    assert names == frozenset({"scratch"})  # falls back to the default org
+    assert "`scratch`" in caption
+
+
 def test_no_exclusion_configured_is_a_silent_page(monkeypatch):
     monkeypatch.delenv("GITHUB_EXCLUDE_REPOS", raising=False)
     monkeypatch.setenv("DASHBOARD_GITHUB_TOKEN", "t")

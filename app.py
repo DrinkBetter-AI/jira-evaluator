@@ -10593,9 +10593,11 @@ def _render_people_page() -> None:
 
 def _render_delivery_page() -> None:
     """What finished, and how long it took. Counts, not verdicts."""
+    _, exclusion_caption = _exclude_repos()
     st.caption(
         "Org-wide throughput and the queues behind it. Counts here are telemetry — "
         "people are scored on the People page."
+        + (f" {exclusion_caption}" if exclusion_caption else "")
     )
     bundle, view, slot = _engineering_context()
     if _one_person_instead(bundle, view, slot):
@@ -10633,17 +10635,30 @@ def _exclude_repos() -> tuple[frozenset[str], str]:
 
     Angel's scratch repos are not team output, but dropping them silently would
     let a filtered figure read as a complete one — the disabled-merchant mistake.
-    The caption is the contract: wherever the filter applies, the page says so.
+    The caption is the contract: every page carrying a PR figure prints it.
 
     The exclusion itself is applied by :func:`github_client.excluded_repos` in
     the search queries, so the counts that cannot be filtered afterwards (open
     total, merged in 7/30 days) obey it too and no two pages disagree. Names are
-    read back from there, ``owner/name`` reduced to the repo as the frames spell
-    it, so the caption cannot drift from what was actually excluded.
+    read back from there so the caption cannot drift from what was excluded, and
+    only the ones this org owns: ``-repo:someone-else/scratch`` is vacuous against
+    an ``org:`` search, so treating it as a name to drop would hide this org's own
+    ``scratch`` from the rows while every count kept it.
+
+    A malformed ``GITHUB_ORG`` is not this function's error to raise: the page
+    reads the caption before it reaches the check that reports config failures
+    legibly, so raising here would replace the page with a stack trace.
     """
-    _, org = github_client.load_github_env() or ("", github_client.DEFAULT_ORG)
+    try:
+        env = github_client.load_github_env()
+    except github_client.GitHubConfigError:
+        env = None
+    _, org = env or ("", github_client.DEFAULT_ORG)
+    owned = f"{org.lower()}/"
     names = frozenset(
-        name.rsplit("/", 1)[-1] for name in github_client.excluded_repos(org)
+        name.split("/", 1)[1]
+        for name in github_client.excluded_repos(org)
+        if name.lower().startswith(owned)
     )
     caption = (
         "Excludes " + ", ".join(f"`{n}`" for n in sorted(names)) + " — "
