@@ -267,3 +267,40 @@ def test_today_counts_the_board_delivery_counts_and_not_the_backlog():
     board = app._metrics_df(df, include_backlogs=False)
     assert board["key"].tolist() == ["ENG-1", "ENG-3"]
     assert app._ownerless(board) == 1
+
+
+def test_stalled_is_still_status_age_after_the_backlog_rows_are_dropped():
+    """A gappy index made the mask unalignable, and the honest clock was lost.
+
+    The exception was swallowed, so the tile quietly reported edit age while its
+    own caption said "not edit age" - a filtered board is the normal case here.
+    """
+    df = pd.DataFrame(
+        {
+            "key": ["ENG-1", "ENG-2"],
+            "assignee": ["Tam", "Tam"],
+            "status": ["Backlog", "In Progress"],
+            "idle_days": [1.0, 1.0],
+            "created": [pd.Timestamp("2026-01-01T00:00:00Z")] * 2,
+            "changelog": [
+                None,
+                [
+                    {
+                        "created": "2026-01-02T00:00:00.000+0000",
+                        "items": [
+                            {
+                                "field": "status",
+                                "fromString": "To Do",
+                                "toString": "In Progress",
+                            }
+                        ],
+                        "author": {"displayName": "Tam"},
+                    }
+                ],
+            ],
+        }
+    )
+    board = app._metrics_df(df, include_backlogs=False)
+    rows, clock = app._stalled_rows(board)
+    assert clock == "status age"
+    assert rows["key"].tolist() == ["ENG-2"]

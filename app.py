@@ -9800,7 +9800,12 @@ def _stalled_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
         ages = integrity.status_age_days(df, integrity.changelog_events(df))
         column = ages["status_age_days"]
         if not column.dropna().empty:
-            return df[(column >= TODAY_STALLED_DAYS).fillna(False)], "status age"
+            # By position, not by label: status_age_days hands back a fresh
+            # RangeIndex, and this frame's index has gaps in it wherever a
+            # Backlog row was dropped. Asked by label, pandas refuses the mask
+            # and the whole measurement silently fell through to edit age.
+            keep = (column >= TODAY_STALLED_DAYS).fillna(False).to_numpy()
+            return df[keep], "status age"
     except Exception:  # noqa: BLE001 - a changelog we cannot parse must not blank the page
         logger.exception("status_age_days failed; falling back to edit age")
     idle = df.get("idle_days", pd.Series(0.0, index=df.index)).fillna(0.0)
@@ -9940,13 +9945,18 @@ def _action_queues(
 ) -> dict[str, list[next_actions.Action]]:
     """Every tile's number turned into the named work behind it."""
     stalled, _ = _stalled_rows(board)
+    # The triage read is the raw Jira frame - it has never been through
+    # add_ticket_health_fields, so it carries a created date and no age. Enriched
+    # here rather than defaulted to zero, because "0d in triage" about a ticket
+    # that has been sitting for nine days is worse than no row at all.
+    triage = _as_frame(bundle.data.get("triage_stuck"))
+    if not triage.empty:
+        triage = add_ticket_health_fields(triage)
     return {
         "review": (
             next_actions.review_actions(bundle.open_prs) if bundle.github_ready else []
         ),
-        "triage": next_actions.triage_actions(
-            _as_frame(bundle.data.get("triage_stuck")), url_for=_jira_ticket_url
-        ),
+        "triage": next_actions.triage_actions(triage, url_for=_jira_ticket_url),
         "ownership": next_actions.ownership_actions(
             _ownerless_rows(board), url_for=_jira_ticket_url
         ),

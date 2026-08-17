@@ -181,3 +181,11 @@ def test_an_action_reads_as_one_sentence():
         days=12.0,
     )
     assert action.sentence == "Name a reviewer for frontend#205 — open 12d, tam asked nobody"
+
+
+def test_a_triage_frame_that_carries_no_age_column_still_yields_actions():
+    """The raw triage read has a created date and no age, and used to crash the page."""
+    triage = pd.DataFrame([{"key": "MB-9", "summary": "500s on pay"}])
+    actions = next_actions.triage_actions(triage, url_for=_url)
+    assert [action.subject for action in actions] == ["MB-9"]
+    assert actions[0].days == 0.0

@@ -44,7 +44,15 @@ class Action:
 
 
 def _days(frame: pd.DataFrame, column: str) -> pd.Series:
-    return pd.to_numeric(frame.get(column), errors="coerce").fillna(0.0)
+    """A column of waits, zero where the frame does not carry one.
+
+    Guarded rather than read through ``frame.get``: a missing column comes back
+    as ``None``, ``pd.to_numeric(None)`` is a bare float rather than a series,
+    and asking that to ``fillna`` took the whole landing page down.
+    """
+    if column not in frame.columns:
+        return pd.Series(0.0, index=frame.index)
+    return pd.to_numeric(frame[column], errors="coerce").fillna(0.0)
 
 
 def _counts(frame: pd.DataFrame, column: str) -> pd.Series:
