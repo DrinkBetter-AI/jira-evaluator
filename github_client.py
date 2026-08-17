@@ -32,6 +32,8 @@ import os
 import re
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pandas as pd
 import requests
@@ -70,6 +72,8 @@ _RETRY_CEILING_SECONDS = 60.0
 # window GitHub closed, and they spend their own retries being refused too.
 _NOT_BEFORE = 0.0
 _STATE_LOCK = threading.Lock()
+# The deadline of the read this thread is serving, shared by its every request.
+_BUDGET = threading.local()
 # Total seconds one read may spend waiting out throttles before it gives up: one
 # full minute-long wait and a little more. A page that says "GitHub is throttling
 # us" is more use than one that spins: the reader can come back, and the other
@@ -111,6 +115,35 @@ def _seconds_until_reset(response: requests.Response) -> int | None:
     if not raw.isdigit():
         return None
     return int(int(raw) - time.time())
+
+
+@contextmanager
+def _read_budget() -> Iterator[None]:
+    """Give one logical read a single deadline, however many requests it takes.
+
+    A budget per request is not a budget: a merged-PR read is ten pages and then,
+    if the rich payload fails, ten more, so a per-request allowance multiplies into
+    minutes of a page that was promised a message instead of a spinner. The
+    deadline lives on the thread, so the pages of one read - and the lean retry
+    after them - share the allowance the first page opened, and a read that arrives
+    with nothing left says so rather than waiting again.
+    """
+    if getattr(_BUDGET, "deadline", None) is not None:
+        yield  # An inner read inherits the outer one's deadline, never a new one.
+        return
+    _BUDGET.deadline = time.monotonic() + _RETRY_BUDGET_SECONDS
+    try:
+        yield
+    finally:
+        _BUDGET.deadline = None
+
+
+def _remaining() -> float:
+    """Seconds this read may still spend waiting, counting time blocked on others."""
+    deadline = getattr(_BUDGET, "deadline", None)
+    if deadline is None:
+        return _RETRY_BUDGET_SECONDS
+    return deadline - time.monotonic()
 
 
 def _hold_off(seconds: float) -> None:
@@ -212,14 +245,14 @@ def _graphql(token: str, query: str, variables: dict) -> dict:
     that shut while they waited, and each would spend an attempt learning what the
     first one already knew.
     """
-    spent = 0.0
     response = None
     for attempt in range(_RETRY_ATTEMPTS):
         with _REQUEST_LOCK:
-            waited = _await_turn(_RETRY_BUDGET_SECONDS - spent)
-            if waited is None:
+            # Asked for after the lock, so time spent blocked behind another
+            # reader's wait is charged too: otherwise fourteen readers each
+            # believe they have the whole budget and spend it one after another.
+            if _await_turn(_remaining()) is None:
                 break
-            spent += waited
             response = requests.post(
                 GITHUB_GRAPHQL_URL,
                 json={"query": query, "variables": variables},
@@ -236,7 +269,7 @@ def _graphql(token: str, query: str, variables: dict) -> dict:
         if (
             pause is None
             or attempt == _RETRY_ATTEMPTS - 1
-            or spent + pause > _RETRY_BUDGET_SECONDS
+            or pause > _remaining()
         ):
             break
     if response is None:
@@ -385,7 +418,9 @@ def _search_count(token: str, query: str) -> int:
     Not bounded by pagination, so it stays correct even past the point where
     the result nodes themselves would be capped.
     """
-    return int(_graphql(token, _COUNT_QUERY, {"q": query})["search"]["issueCount"])
+    with _read_budget():
+        data = _graphql(token, _COUNT_QUERY, {"q": query})
+    return int(data["search"]["issueCount"])
 
 
 def _page(token: str, gql: str, query: str, max_prs: int) -> list[dict]:
@@ -427,12 +462,13 @@ def _search_prs(
     shapes; half a frame with detail columns and half without would read as
     "these people had no reviews" instead of "this page was never fetched".
     """
-    try:
-        return _page(token, gql, query, max_prs)
-    except (GitHubConfigError, requests.RequestException):
-        if not fallback_gql or fallback_gql == gql:
-            raise
-    return _page(token, fallback_gql, query, max_prs)
+    with _read_budget():
+        try:
+            return _page(token, gql, query, max_prs)
+        except (GitHubConfigError, requests.RequestException):
+            if not fallback_gql or fallback_gql == gql:
+                raise
+        return _page(token, fallback_gql, query, max_prs)
 
 
 def _int_or_none(value: object) -> int | None:

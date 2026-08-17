@@ -570,8 +570,10 @@ def test_a_refused_read_repeats_what_github_said(monkeypatch):
 def _open_door():
     """The shared throttle door is module state; no test inherits another's."""
     github_client._NOT_BEFORE = 0.0
+    github_client._BUDGET.deadline = None
     yield
     github_client._NOT_BEFORE = 0.0
+    github_client._BUDGET.deadline = None
 
 
 @pytest.fixture
@@ -767,3 +769,22 @@ def test_a_reader_who_cannot_afford_the_wait_does_not_ask_anyway(monkeypatch, cl
         github_client._graphql("t", "{}", {})
     assert asked == []
     assert clock == []
+
+
+def test_the_pages_of_one_read_share_one_budget(monkeypatch, clock):
+    """Ten pages with an allowance each is minutes; one read has one allowance."""
+    replies = [
+        _Response(403, '{"message":"secondary rate limit"}', {"retry-after": "60"}),
+        _Response(200),
+    ]
+    monkeypatch.setattr(
+        github_client.requests, "post", lambda *a, **k: replies.pop(0)
+    )
+    with github_client._read_budget():
+        github_client._graphql("t", "{}", {})  # spends 60 of the 75 waiting
+        github_client._hold_off(60.0)
+        # The next page of the same read cannot afford another minute, so it is
+        # abandoned rather than starting its own budget over.
+        with pytest.raises(github_client.GitHubConfigError, match="throttling"):
+            github_client._graphql("t", "{}", {})
+    assert clock == [pytest.approx(60.0)]
