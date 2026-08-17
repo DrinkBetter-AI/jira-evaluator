@@ -69,7 +69,10 @@ def test_triage_actions_ask_for_a_decision_and_link_the_ticket():
     assert action.verb == "Accept or close"
     assert action.subject == "MB-1"
     assert action.url == "https://jira.example/browse/MB-1"
-    assert "9d in triage" in action.detail
+    # The age of the ticket, not a claim about how long it has been in triage:
+    # the triage read carries no status history to measure that from.
+    assert "9d old, still untriaged" in action.detail
+    assert "in triage" not in action.detail
 
 
 def test_an_empty_triage_queue_has_nothing_to_do():

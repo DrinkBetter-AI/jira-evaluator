@@ -128,7 +128,12 @@ def review_actions(open_prs: pd.DataFrame) -> list[Action]:
 
 
 def triage_actions(triage: pd.DataFrame, *, url_for) -> list[Action]:
-    """Tickets sitting in a triage status: somebody has to say whether they matter."""
+    """Tickets sitting in a triage status: somebody has to say whether they matter.
+
+    Worded as the ticket's age, not as time-in-triage: the triage read carries a
+    created date and no status history, and a ticket made two years ago and moved
+    into triage yesterday would have claimed two years of waiting.
+    """
     if triage is None or triage.empty:
         return []
     age = _days(triage, "ticket_age_days")
@@ -145,7 +150,11 @@ def triage_actions(triage: pd.DataFrame, *, url_for) -> list[Action]:
                 verb="Accept or close",
                 subject=key,
                 url=url_for(key),
-                detail=f"{days:.0f}d in triage — {summary[:60]}" if summary else f"{days:.0f}d in triage",
+                detail=(
+                    f"{days:.0f}d old, still untriaged — {summary[:60]}"
+                    if summary
+                    else f"{days:.0f}d old, still untriaged"
+                ),
                 owner="",
                 days=days,
             )

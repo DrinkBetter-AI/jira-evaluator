@@ -9971,7 +9971,10 @@ _ACTION_QUEUE_NAMES = {
 
 
 def _action_queues(
-    bundle: "_EngineeringData", board: pd.DataFrame
+    bundle: "_EngineeringData",
+    board: pd.DataFrame,
+    *,
+    stalled: pd.DataFrame | None = None,
 ) -> tuple[dict[str, list[next_actions.Action]], set[str]]:
     """Every tile's number turned into the named work behind it, and what could not be read.
 
@@ -9980,7 +9983,11 @@ def _action_queues(
     apart: an outage announced as an all-clear is the one failure of this section
     a reader has no way of detecting.
     """
-    stalled, _ = _stalled_rows(board)
+    # Taken from the caller where it has already been measured: selecting the
+    # stalled rows walks every ticket's changelog, and the tile needs the same
+    # rows, so computing them here again doubled the cost of drawing the page.
+    if stalled is None:
+        stalled, _ = _stalled_rows(board)
     # The triage read is the raw Jira frame - it has never been through
     # add_ticket_health_fields, so it carries a created date and no age. Enriched
     # here rather than defaulted to zero, because "0d in triage" about a ticket
@@ -10143,13 +10150,14 @@ def _render_today_page() -> None:
     )
 
     st.divider()
-    queues, unreadable = _action_queues(bundle, df)
+    stalled_rows, stalled_clock = _stalled_rows(df)
+    queues, unreadable = _action_queues(bundle, df, stalled=stalled_rows)
     _render_next_actions(queues, unknown=unreadable)
 
     st.divider()
     st.subheader("This week")
 
-    stalled, stalled_clock = _stalled_count(df)
+    stalled = int(len(stalled_rows))
     estimated, estimable = _estimate_coverage(df)
     coverage_note = (
         f"{estimated} of {estimable} past Backlog" if estimable else "nothing to estimate"

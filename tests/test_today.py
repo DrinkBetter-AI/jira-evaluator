@@ -374,3 +374,23 @@ def test_a_triage_read_that_worked_and_found_nothing_is_not_unknown():
     )
     _, unknown = app._action_queues(bundle, pd.DataFrame())
     assert unknown == set()
+
+
+def test_the_action_list_reuses_the_stalled_rows_the_tile_measured(monkeypatch):
+    """Selecting stalled rows walks every changelog, so it happens once a render."""
+
+    def refuse(_df):  # pragma: no cover - called only if the rows are recomputed
+        raise AssertionError("_stalled_rows called a second time")
+
+    monkeypatch.setattr(app, "_stalled_rows", refuse)
+    bundle = types.SimpleNamespace(
+        data={"triage_stuck": pd.DataFrame()},
+        github_ready=True,
+        open_prs=pd.DataFrame(),
+    )
+    board = pd.DataFrame(
+        {"key": ["ENG-1"], "assignee": ["Tam"], "status": ["In Progress"]}
+    )
+    stalled = board.assign(**{next_actions.STALLED_AGE_COLUMN: [44.0]})
+    queues, _ = app._action_queues(bundle, board, stalled=stalled)
+    assert queues["stalled"][0].days == 44.0
