@@ -10639,7 +10639,11 @@ def _stale_with_masked(
         ages = integrity.status_age_days(df, integrity.changelog_events(df))
     except Exception:  # noqa: BLE001
         logger.exception("status_age_days failed; the stale table is omitted")
-        return pd.DataFrame()
+        # An unreadable history is not a clean board, and the caller has to be
+        # able to tell the two apart before it congratulates anybody.
+        failed = pd.DataFrame()
+        failed.attrs["stale_unreadable"] = True
+        return failed
     if ages.empty:
         return pd.DataFrame()
     ages = ages[(ages["status_age_days"] >= min_status_age).fillna(False)]
@@ -10692,7 +10696,12 @@ def _render_delivery_page() -> None:
 
     theme_html.tiles(
         [
-            ("Resolved · 7d", _text_or(resolved_7, "—"), "credited to current assignee — changelog credit lands with PR 2", "info"),
+            (
+                "Resolved · 7d",
+                _text_or(resolved_7, "—"),
+                "org-wide — the one tile the sidebar does not narrow",
+                "info",
+            ),
             (
                 "Median In-Progress",
                 f"{overall_median:.1f}d" if overall_median is not None else "—",
@@ -10702,7 +10711,10 @@ def _render_delivery_page() -> None:
             (
                 f"Stalled {TODAY_STALLED_DAYS:.0f}d+",
                 str(stalled),
-                f"by {stalled_clock}, never edit age",
+                # The boilerplate promise only holds when the clock kept it:
+                # "by edit age, never edit age" is what saying both produced.
+                f"by {stalled_clock}"
+                + (", never edit age" if stalled_clock == "status age" else ""),
                 "danger" if stalled else "good",
             ),
             ("Open tickets", str(len(df)), "current scope", "neutral"),
@@ -10748,7 +10760,14 @@ def _render_delivery_page() -> None:
             )
 
     stale = _stale_with_masked(df)
-    if stale.empty:
+    if stale.attrs.get("stale_unreadable"):
+        st.warning(
+            "Status history could not be read, so the stale queue is omitted — "
+            "the stalled count above fell back to edit age."
+        )
+    elif stale.empty and df.empty:
+        st.info("No open tickets in this scope.")
+    elif stale.empty:
         st.success(
             "Nothing stale in scope: every open ticket here has changed status "
             f"within {TODAY_STALLED_DAYS:.0f} days."
