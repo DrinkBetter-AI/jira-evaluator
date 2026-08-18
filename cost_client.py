@@ -14,8 +14,11 @@ billing export. Everything here is a GET.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import os
+import pathlib
+import tempfile
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -823,6 +826,14 @@ def _absent(exc: Exception) -> bool:
     return isinstance(exc, exceptions.NotFound)
 
 
+# How long a correction row can land after the usage day it corrects: the
+# export is written in arrears and backfills over hours according to Google's
+# own guidance, not weeks, so a few days of slack past the usage window catches
+# late-arriving rows without giving up the partition pruning the bound exists
+# for.
+_PARTITION_LAG_DAYS = 3
+
+
 def cloud_costs(
     client, table: str, days: int, now: _dt.date | None = None
 ) -> pd.DataFrame:
@@ -832,6 +843,12 @@ def cloud_costs(
     discount or a free tier is applied against the line it belongs to, and the
     gross figure would report money that was never charged. Twice the window in
     one pass, as everywhere else here, since every figure is a comparison.
+
+    The export is partitioned on ingestion time, not on ``usage_start_time``, so
+    the usage-day filter below prunes no partitions by itself: unfiltered, every
+    partition the table has ever written is a candidate. ``_PARTITIONTIME`` is
+    filtered too, trailing the usage window by ``_PARTITION_LAG_DAYS`` so a
+    correction ingested a day or two after the usage it corrects is still read.
     """
     today = now or _dt.date.today()
     first = today - _dt.timedelta(days=2 * days - 1)
@@ -849,16 +866,23 @@ def cloud_costs(
           )) AS cost
         FROM `{table}`
         WHERE DATE(usage_start_time) BETWEEN @first AND @last
+          AND _PARTITIONTIME BETWEEN TIMESTAMP(@first) AND @partition_last
         GROUP BY day, project, line_item, currency
     """
     from google.cloud import bigquery  # noqa: PLC0415 - optional dependency
 
+    partition_last = _dt.datetime.combine(
+        today + _dt.timedelta(days=_PARTITION_LAG_DAYS), _dt.time.max
+    )
     job = client.query(
         sql,
         job_config=bigquery.QueryJobConfig(
             query_parameters=[
                 bigquery.ScalarQueryParameter("first", "DATE", first),
                 bigquery.ScalarQueryParameter("last", "DATE", today),
+                bigquery.ScalarQueryParameter(
+                    "partition_last", "TIMESTAMP", partition_last
+                ),
             ]
         ),
     )
@@ -882,9 +906,60 @@ def cloud_costs(
 # a cent - and a MIN over every row would call that a month of history.
 _BILLING_DAY_FLOOR = 0.01
 
+# Where the day's answer is written once it has been asked, keyed on the table
+# and the day: a directory rather than a file, since more than one billing
+# account can export into one dataset and each gets its own entry.
+_BILLING_COVERAGE_CACHE_DIR = (
+    pathlib.Path(tempfile.gettempdir()) / "jira-evaluator-billing-coverage"
+)
+
+
+def _billing_coverage_cache_path(
+    directory: pathlib.Path, table: str, day: _dt.date
+) -> pathlib.Path:
+    key = hashlib.sha256(f"{table}:{day.isoformat()}".encode()).hexdigest()
+    return directory / f"{key}.json"
+
+
+def _read_billing_coverage_cache(
+    path: pathlib.Path,
+) -> tuple[_dt.date | None, _dt.date | None] | None:
+    """The cached answer, or ``None`` where there is none yet to trust.
+
+    Any way the file could fail to be a clean answer - not written yet,
+    written by a different version, truncated by a crash mid-write - is read
+    the same as no cache at all, and answered from BigQuery instead. A cache
+    is a speed-up; it must never be the reason a figure comes back wrong.
+    """
+    try:
+        payload = json.loads(path.read_text())
+        first = _dt.date.fromisoformat(payload["first"]) if payload["first"] else None
+        last = _dt.date.fromisoformat(payload["last"]) if payload["last"] else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return first, last
+
+
+def _write_billing_coverage_cache(
+    path: pathlib.Path, result: tuple[_dt.date | None, _dt.date | None]
+) -> None:
+    first, last = result
+    payload = {
+        "first": first.isoformat() if first else None,
+        "last": last.isoformat() if last else None,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload))
+    except OSError:
+        pass  # A cache that fails to write costs a slower tomorrow, not today.
+
 
 def billing_coverage(
-    client, table: str, now: _dt.date | None = None
+    client,
+    table: str,
+    now: _dt.date | None = None,
+    cache_dir: str | pathlib.Path | None = None,
 ) -> tuple[_dt.date | None, _dt.date | None]:
     """The first and last days the export covers.
 
@@ -893,7 +968,23 @@ def billing_coverage(
     week-old export is a week's spend wearing a month's label. And it is
     written in arrears and backfills over hours, so its last day trails the
     calendar - a window ending today would read the missing days as free.
+
+    The range asked for here is exactly the thing no date predicate can be
+    handed in advance - finding it is the query's job - so the scan itself is
+    unbounded over the whole export. What is bounded instead is how often it
+    runs: the answer is cached to disk keyed by the table and the day, so a
+    second call the same day, whether from the next Streamlit rerun or a fresh
+    instance after a redeploy, reads yesterday's file rather than paying for
+    the scan again.
     """
+    today = now or _dt.date.today()
+    directory = (
+        pathlib.Path(cache_dir) if cache_dir is not None else _BILLING_COVERAGE_CACHE_DIR
+    )
+    cache_path = _billing_coverage_cache_path(directory, table, today)
+    cached = _read_billing_coverage_cache(cache_path)
+    if cached is not None:
+        return cached
     job = client.query(
         "SELECT MIN(day) AS first, MAX(day) AS last FROM ("
         "SELECT DATE(usage_start_time) AS day, SUM(cost) AS total "
@@ -902,15 +993,19 @@ def billing_coverage(
     )
     rows = list(job.result())
     if not rows:
-        return None, None
-    first, last = rows[0]["first"], rows[0]["last"]
-    # Never today, wherever the export has reached it: a day still being written
-    # is hours of charges wearing a whole day's label, and ends the window on a
-    # cheap day nobody had. The ads reader excludes today for the same reason.
-    yesterday = (now or _dt.date.today()) - _dt.timedelta(days=1)
-    if last is None or first is None or first > yesterday:
-        return None, None
-    return first, min(last, yesterday)
+        result = (None, None)
+    else:
+        first, last = rows[0]["first"], rows[0]["last"]
+        # Never today, wherever the export has reached it: a day still being
+        # written is hours of charges wearing a whole day's label, and ends the
+        # window on a cheap day nobody had. The ads reader excludes today too.
+        yesterday = today - _dt.timedelta(days=1)
+        if last is None or first is None or first > yesterday:
+            result = (None, None)
+        else:
+            result = (first, min(last, yesterday))
+    _write_billing_coverage_cache(cache_path, result)
+    return result
 
 
 __all__ = [
