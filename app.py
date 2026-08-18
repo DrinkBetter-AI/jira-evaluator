@@ -10451,7 +10451,11 @@ def _write_board_snapshot(bundle: "_EngineeringData") -> None:
             page_size=bundle.page_size,
         )
         _SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = _SNAPSHOT_PATH.with_suffix(".tmp")
+        # Unique per writer: a live gather's own write and a background
+        # refresh's write can land in the same few seconds, and two writers
+        # sharing one temp name means the first to rename it away can leave
+        # the second stat()-ing a file that is no longer there.
+        tmp_path = _SNAPSHOT_PATH.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
         with open(tmp_path, "wb") as fh:
             pickle.dump(persisted, fh, protocol=pickle.HIGHEST_PROTOCOL)
         if tmp_path.stat().st_size > _SNAPSHOT_MAX_BYTES:
@@ -12246,12 +12250,25 @@ def main() -> None:
     # Gathered fresh on every run, because every figure the active page draws
     # is. Only one page runs per rerun, so this resets just its own report.
     _reset_reports()
-    # The page draws exactly as it did before; the recorder only listens, so
-    # that the reader who asks for the board as a file gets the board they are
-    # looking at rather than a second rendering of it.
-    with board.recording(_page_name(page)) as recorded:
+    # Recording costs one call into the snapshot per drawing the page makes -
+    # cheap once, not free at the scale of every reader on every rerun who
+    # never asks for the board. Arming the button sets BOARD_ASKED_KEY on the
+    # rerun the click causes; this run - the very next one - is the first that
+    # needs to listen, and every run after it for as long as a file is held,
+    # so the offer can still tell a stale board from the one on screen. A
+    # reader who never presses the button never pays for any of it.
+    board_wanted = bool(st.session_state.get(BOARD_ASKED_KEY)) or bool(
+        st.session_state.get(BOARD_FILE_KEY)
+    )
+    if board_wanted:
+        # The page draws exactly as it did before; the recorder only listens, so
+        # that the reader who asks for the board as a file gets the board they
+        # are looking at rather than a second rendering of it.
+        with board.recording(_page_name(page)) as recorded:
+            page.run()
+        _deliver_board_snapshot(recorded)
+    else:
         page.run()
-    _deliver_board_snapshot(recorded)
 
     age_caption = _board_age_caption()
     if age_caption:
