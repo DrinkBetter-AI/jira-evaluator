@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 import pandas as pd
 import requests
 
+import read_log
+
 OPENAI_BASE_URL = "https://api.openai.com"
 _OPENAI_KEY_ENV_VAR = "OPENAI_ADMIN_KEY"
 _COSTS_PATH = "/v1/organization/costs"
@@ -886,7 +888,9 @@ def cloud_costs(
             ]
         ),
     )
-    frame = job.result().to_dataframe()
+    result = job.result()
+    read_log.bill_bytes(getattr(job, "total_bytes_billed", None))
+    frame = result.to_dataframe()
     if frame.empty:
         return pd.DataFrame(
             columns=["day", "project", "line_item", "cost", "currency"]
@@ -992,6 +996,7 @@ def billing_coverage(
         f"HAVING ABS(SUM(cost)) >= {_BILLING_DAY_FLOOR})"
     )
     rows = list(job.result())
+    read_log.bill_bytes(getattr(job, "total_bytes_billed", None))
     if not rows:
         result = (None, None)
     else:

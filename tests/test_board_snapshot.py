@@ -17,13 +17,14 @@ import pandas as pd
 import pytest
 
 import app
+import data_layer
 
 
 @pytest.fixture(autouse=True)
 def snapshot_path(tmp_path, monkeypatch):
     """Every test gets its own snapshot file, never the real container path."""
     path = tmp_path / "board_snapshot.pkl"
-    monkeypatch.setattr(app, "_SNAPSHOT_PATH", path)
+    monkeypatch.setattr(data_layer, "_SNAPSHOT_PATH", path)
     return path
 
 

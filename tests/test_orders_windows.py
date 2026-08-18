@@ -71,11 +71,11 @@ def test_an_empty_previous_window_has_no_paid_orders_rather_than_an_error():
 
 
 def test_a_delta_is_read_as_a_number_rather_than_by_its_first_characters():
-    # `_unmoved` lives in app.py, which runs a whole dashboard when imported, so
-    # the function is lifted out of the source rather than imported.
+    # `_unmoved` lives in pages/business.py, which runs a whole dashboard when
+    # imported, so the function is lifted out of the source rather than imported.
     import ast
 
-    source = open(Path(__file__).resolve().parents[1] / "app.py").read()
+    source = open(Path(__file__).resolve().parents[1] / "pages" / "business.py").read()
     tree = ast.parse(source)
     wanted = next(
         node
@@ -83,7 +83,7 @@ def test_a_delta_is_read_as_a_number_rather_than_by_its_first_characters():
         if isinstance(node, ast.FunctionDef) and node.name == "_unmoved"
     )
     namespace: dict = {"re": __import__("re")}
-    exec(compile(ast.Module([wanted], []), "app.py", "exec"), namespace)
+    exec(compile(ast.Module([wanted], []), "pages/business.py", "exec"), namespace)
     unmoved = namespace["_unmoved"]
 
     assert unmoved("flat")

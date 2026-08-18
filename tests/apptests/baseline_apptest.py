@@ -40,6 +40,7 @@ sys.path.insert(0, os.environ["DASHBOARD_REPO"])
 sys.path.insert(0, os.environ["APPTESTS_DIR"])
 
 import app as dashboard
+import data_layer
 from _synthetic_board import build_synthetic_board
 
 BOARD = build_synthetic_board()
@@ -64,7 +65,7 @@ def _fetch_tickets(*args, **kwargs):
     return BOARD.copy()
 
 
-dashboard.fetch_tickets = _fetch_tickets
+data_layer.fetch_tickets = _fetch_tickets
 
 dashboard.inject_styles()
 dashboard._reset_reports()

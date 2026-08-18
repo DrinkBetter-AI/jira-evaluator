@@ -52,7 +52,13 @@ def test_every_chart_states_its_own_text_size():
     through the one helper that puts it there - the readability complaint was
     about the whole dashboard, not the two charts added beside the complaint.
     """
-    source = (Path(__file__).resolve().parents[1] / "app.py").read_text()
+    # Phase 8 split the dashboard across these modules - every one of them can
+    # draw a chart, so all of them are in scope for this check.
+    repo = Path(__file__).resolve().parents[1]
+    source = "".join(
+        (repo / name).read_text()
+        for name in ("app.py", "data_layer.py", "page_shared.py", "pages/business.py")
+    )
     # Any receiver, not only ``st``: a chart written as ``left.plotly_chart``
     # into a column would slip past a check for the one spelling.
     assert ".plotly_chart(" not in source, "a chart drawn around theme.plot()"

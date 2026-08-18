@@ -31,6 +31,8 @@ import pandas as pd
 sys.path.insert(0, os.environ["DASHBOARD_REPO"])
 
 import app as dashboard
+import data_layer
+import pages.business as business
 import ads_client
 import orders_client
 
@@ -67,9 +69,9 @@ def _ledger(days):
     columns = ["day", "type", "category", "amount", "fee", "currency"]
     return pd.DataFrame(rows, columns=columns), False
 
-dashboard._stripe_ledger_cached = _ledger
+business._stripe_ledger_cached = _ledger
 # Disputes are a separate call, and the Payments section makes it.
-dashboard._stripe_disputes_cached = lambda days: 0
+business._stripe_disputes_cached = lambda days: 0
 
 # OpenAI's bill likewise: the printable report asserts the AI section is in
 # it, and that section is only drawn when an admin key answers.
@@ -89,7 +91,7 @@ def _ai_costs(days):
     columns = ["day", "project", "line_item", "cost", "currency"]
     return pd.DataFrame(rows, columns=columns)
 
-dashboard._openai_costs_cached = _ai_costs
+business._openai_costs_cached = _ai_costs
 
 
 
@@ -136,10 +138,10 @@ def _tickets(*a, **k):
     )
 
 
-dashboard.fetch_tickets = _tickets
-dashboard.fetch_all_priorities = lambda *a, **k: ["Highest", "High", "Normal"]
-dashboard.fetch_all_users = lambda *a, **k: {}
-dashboard.fetch_available_transition_statuses = lambda *a, **k: ["Done"]
+data_layer.fetch_tickets = _tickets
+data_layer.fetch_all_priorities = lambda *a, **k: ["Highest", "High", "Normal"]
+data_layer.fetch_all_users = lambda *a, **k: {}
+data_layer.fetch_available_transition_statuses = lambda *a, **k: ["Done"]
 dashboard.github_client.load_github_env = lambda: None
 dashboard.amplitude_client.load_amplitude_env = lambda: None
 # Every source the page draws but this check is not about, refused rather than
@@ -203,8 +205,8 @@ else:
     dashboard.orders_client.load_medusa_env = lambda: orders_client.DbConfig(
         "crm.example", "medusa", "reader", "secret", 5432
     )
-    dashboard._order_book = lambda source, days: _order_book()
-    dashboard.fetch_store_prefixes_cached = lambda *a, **k: {}
+    business._order_book = lambda source, days: _order_book()
+    business.fetch_store_prefixes_cached = lambda *a, **k: {}
 
 if MODE == "nodataset":
     dashboard.ads_client.load_ads_env = lambda: None
@@ -221,7 +223,7 @@ elif MODE == "unreadable":
     def _explode(*a, **k):
         raise RuntimeError("404 Not found: Dataset w266-project-329918:google_ads")
 
-    dashboard._ads_cached = _explode
+    business._ads_cached = _explode
 else:
     dashboard.ads_client.load_ads_env = lambda: ads_client.AdsConfig(
         "w266-project-329918", f"google_ads_{MODE}", None, None
@@ -300,7 +302,7 @@ else:
             other_currencies=["EUR"] if MODE == "gbp" else [],
         )
 
-    dashboard._ads_cached = _cached
+    business._ads_cached = _cached
 
 # main() builds an st.navigation over two pages and runs whichever one the
 # browser asked for, which an AppTest has no browser to do: the page function

@@ -32,6 +32,8 @@ import pandas as pd
 sys.path.insert(0, os.environ["DASHBOARD_REPO"])
 
 import app as dashboard
+import data_layer
+import pages.business as business
 import cost_client
 
 MODE = os.getenv("BURN_MODE", "live")
@@ -78,10 +80,10 @@ def _tickets(*a, **k):
     )
 
 
-dashboard.fetch_tickets = _tickets
-dashboard.fetch_all_priorities = lambda *a, **k: ["Highest", "High", "Normal"]
-dashboard.fetch_all_users = lambda *a, **k: {}
-dashboard.fetch_available_transition_statuses = lambda *a, **k: ["Done"]
+data_layer.fetch_tickets = _tickets
+data_layer.fetch_all_priorities = lambda *a, **k: ["Highest", "High", "Normal"]
+data_layer.fetch_all_users = lambda *a, **k: {}
+data_layer.fetch_available_transition_statuses = lambda *a, **k: ["Done"]
 dashboard.github_client.load_github_env = lambda: None
 dashboard.amplitude_client.load_amplitude_env = lambda: None
 dashboard.orders_client.load_medusa_env = lambda: None
@@ -176,12 +178,12 @@ else:
     )
     EXPORT = "w266-project-329918.billing_export.gcp_billing_export_v1_01DD38"
     if MODE == "cloudempty":
-        dashboard._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
+        business._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
             pd.DataFrame(), None, None, ()
         )
     elif MODE == "cloudnew":
         # Switched on the day before yesterday: three days of the thirty.
-        dashboard._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
+        business._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
             _cloud_costs(days)[
                 _cloud_costs(days)["day"] >= TODAY - dt.timedelta(days=2)
             ],
@@ -192,7 +194,7 @@ else:
     elif MODE == "cloudexact":
         # History exactly as long as the window: nothing at all behind it, which
         # is not a comparison built on nought days.
-        dashboard._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
+        business._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
             _cloud_costs(days)[
                 _cloud_costs(days)["day"] > TODAY - dt.timedelta(days=days)
             ],
@@ -203,7 +205,7 @@ else:
     elif MODE == "cloudpartial":
         # Thirty-two days of export under a thirty-day window: the live case,
         # where the earlier period holds two days and no trend can be drawn.
-        dashboard._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
+        business._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
             _cloud_costs(days)[
                 _cloud_costs(days)["day"] > TODAY - dt.timedelta(days=32)
             ],
@@ -213,7 +215,7 @@ else:
         )
     elif MODE == "cloudeur":
         # A second billing currency, which is set aside rather than added.
-        dashboard._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
+        business._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
             pd.concat(
                 [
                     _cloud_costs(days),
@@ -227,7 +229,7 @@ else:
         )
     elif MODE == "cloudtwo":
         # Two billing accounts exporting into one dataset.
-        dashboard._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
+        business._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
             _cloud_costs(days),
             TODAY - dt.timedelta(days=200),
             TODAY,
@@ -237,7 +239,7 @@ else:
         # Written in arrears and still backfilling: a fortnight behind today,
         # with the window ending where the charges do.
         behind = TODAY - dt.timedelta(days=14)
-        dashboard._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
+        business._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
             _cloud_costs(days).assign(
                 day=lambda frame: frame["day"] - dt.timedelta(days=14)
             ),
@@ -246,7 +248,7 @@ else:
             (EXPORT,),
         )
     else:
-        dashboard._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
+        business._cloud_costs_cached = lambda days, today: dashboard.CloudRead(
             _cloud_costs(days),
             TODAY - dt.timedelta(days=200),
             TODAY,
@@ -275,25 +277,25 @@ elif MODE == "refused":
     def _refused_stripe(days):
         raise cost_client.CostConfigError("Stripe refused the restricted key.")
 
-    dashboard._openai_costs_cached = _refused_openai
-    dashboard._stripe_cached = _refused_stripe
+    business._openai_costs_cached = _refused_openai
+    business._stripe_cached = _refused_stripe
 elif MODE == "mixed":
     dashboard.cost_client.load_openai_env = lambda: "sk-admin-x"
     dashboard.cost_client.load_stripe_env = lambda: None
-    dashboard._openai_costs_cached = _mixed_currency_costs
+    business._openai_costs_cached = _mixed_currency_costs
 elif MODE == "plain":
     dashboard.cost_client.load_openai_env = lambda: None
     dashboard.cost_client.load_stripe_env = lambda: "rk_live_x"
-    dashboard._stripe_cached = lambda days: (_plain_entries(days), False, 0)
+    business._stripe_cached = lambda days: (_plain_entries(days), False, 0)
 elif MODE == "lapsed":
     dashboard.cost_client.load_openai_env = lambda: "sk-admin-x"
     dashboard.cost_client.load_stripe_env = lambda: None
-    dashboard._openai_costs_cached = _lapsed_costs
+    business._openai_costs_cached = _lapsed_costs
 elif MODE == "quietweek":
     # Busy two months ago, nothing since: the download is full, the window empty.
     dashboard.cost_client.load_openai_env = lambda: None
     dashboard.cost_client.load_stripe_env = lambda: "rk_live_x"
-    dashboard._stripe_cached = lambda days: (
+    business._stripe_cached = lambda days: (
         _stripe_entries(days).assign(day=TODAY - dt.timedelta(days=55)),
         False,
         0,
@@ -301,17 +303,17 @@ elif MODE == "quietweek":
 elif MODE == "quietdisputes":
     dashboard.cost_client.load_openai_env = lambda: None
     dashboard.cost_client.load_stripe_env = lambda: "rk_live_x"
-    dashboard._stripe_cached = lambda days: (pd.DataFrame(), False, 3)
+    business._stripe_cached = lambda days: (pd.DataFrame(), False, 3)
 elif MODE == "quiet":
     dashboard.cost_client.load_openai_env = lambda: "sk-admin-x"
     dashboard.cost_client.load_stripe_env = lambda: "rk_live_x"
-    dashboard._openai_costs_cached = lambda days: pd.DataFrame()
-    dashboard._stripe_cached = lambda days: (pd.DataFrame(), False, 0)
+    business._openai_costs_cached = lambda days: pd.DataFrame()
+    business._stripe_cached = lambda days: (pd.DataFrame(), False, 0)
 else:
     dashboard.cost_client.load_openai_env = lambda: "sk-admin-x"
     dashboard.cost_client.load_stripe_env = lambda: "rk_live_x"
-    dashboard._openai_costs_cached = _openai_costs
-    dashboard._stripe_cached = lambda days: (
+    business._openai_costs_cached = _openai_costs
+    business._stripe_cached = lambda days: (
         _stripe_entries(days),
         MODE == "truncated",
         2 if MODE == "disputed" else 0,

@@ -30,6 +30,7 @@ import pandas as pd
 sys.path.insert(0, os.environ["DASHBOARD_REPO"])
 
 import app as dashboard
+import data_layer
 import amplitude_client
 
 MODE = os.getenv("FUNNEL_MODE", "live")
@@ -74,10 +75,10 @@ def _tickets(*a, **k):
     )
 
 
-dashboard.fetch_tickets = _tickets
-dashboard.fetch_all_priorities = lambda *a, **k: ["Highest", "High", "Normal"]
-dashboard.fetch_all_users = lambda *a, **k: {}
-dashboard.fetch_available_transition_statuses = lambda *a, **k: ["Done"]
+data_layer.fetch_tickets = _tickets
+data_layer.fetch_all_priorities = lambda *a, **k: ["Highest", "High", "Normal"]
+data_layer.fetch_all_users = lambda *a, **k: {}
+data_layer.fetch_available_transition_statuses = lambda *a, **k: ["Done"]
 dashboard.github_client.load_github_env = lambda: None
 # The CRM is out of scope here, and a missing key is one of its own branches.
 dashboard.orders_client.load_medusa_env = lambda: None

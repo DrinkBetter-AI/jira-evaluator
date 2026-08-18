@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ads_client  # noqa: E402
 import app as dashboard  # noqa: E402
+import page_shared  # noqa: E402
 
 
 def rows(offers: list[tuple[str, float, int]]) -> pd.DataFrame:
@@ -85,7 +86,7 @@ def test_a_money_verdict_is_drawn_with_its_dollar_signs_intact(monkeypatch):
     noted: list[str] = []
     monkeypatch.setattr(dashboard.st, "markdown", lambda text, **kw: drawn.append(text))
     monkeypatch.setattr(
-        dashboard,
+        page_shared,
         "_report",
         lambda tab: type(
             "Kept", (), {"note": staticmethod(lambda section, line: noted.append(line))}

@@ -40,6 +40,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+import read_log
+
 _DATASET_ENV_VAR = "GOOGLE_ADS_BQ_DATASET"
 _PROJECT_ENV_VAR = "GOOGLE_ADS_BQ_PROJECT"
 _CUSTOMER_ENV_VAR = "GOOGLE_ADS_CUSTOMER_ID"
@@ -315,7 +317,9 @@ def account(client, config: AdsConfig, customer_id: str) -> tuple[str, str]:
         ORDER BY _DATA_DATE DESC
         LIMIT 1
     """
-    rows = list(client.query(sql).result())
+    job = client.query(sql)
+    rows = list(job.result())
+    read_log.bill_bytes(getattr(job, "total_bytes_billed", None))
     if not rows:
         return "", "USD"
     return str(rows[0]["name"] or ""), str(rows[0]["currency"] or "USD")
@@ -462,7 +466,10 @@ def _run(client, sql: str, **params) -> pd.DataFrame:
             for name, value in params.items()
         ]
     )
-    return client.query(sql, job_config=job_config).result().to_dataframe()
+    job = client.query(sql, job_config=job_config)
+    result = job.result()
+    read_log.bill_bytes(getattr(job, "total_bytes_billed", None))
+    return result.to_dataframe()
 
 
 def window_first_day(days: int, now: _dt.date | None = None) -> _dt.date:
@@ -517,7 +524,9 @@ def loaded_from(
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ScalarQueryParameter("floor", "DATE", floor)]
     )
-    rows = list(client.query(sql, job_config=job_config).result())
+    job = client.query(sql, job_config=job_config)
+    rows = list(job.result())
+    read_log.bill_bytes(getattr(job, "total_bytes_billed", None))
     if not rows or rows[0]["first_day"] is None:
         return None
     first = rows[0]["first_day"]
