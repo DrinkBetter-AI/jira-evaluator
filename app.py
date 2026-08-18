@@ -1178,6 +1178,7 @@ def _deliver_board_snapshot(recorded: board.Snapshot) -> None:
     )
 
 
+@st.fragment
 def _render_metrics(
     df: pd.DataFrame,
     include_backlogs: bool = False,
@@ -2968,6 +2969,7 @@ _PLAN_EDITOR_KEY = "_sprint_plan_editor"
 _SPRINT_MOVE_BATCH = 50
 
 
+@st.fragment
 def _render_sprint_plan(df: pd.DataFrame) -> None:
     """Propose a sprint for one team from a few named goals and real hours."""
     st.caption(
@@ -3310,6 +3312,7 @@ def _apply_sprint_plan(plan: pd.DataFrame, team_df: pd.DataFrame) -> None:
     st.success(f"Added {len(to_add)} ticket(s) to {label}. Refresh Data to see it.")
 
 
+@st.fragment
 def _render_sprint_capacity(
     df: pd.DataFrame,
     status_source_df: pd.DataFrame | None = None,
@@ -4668,6 +4671,7 @@ def _render_ticket_list(
         )
 
 
+@st.fragment
 def _render_new_and_triage(
     new_24h: int | None,
     new_7d: int | None,
@@ -8770,6 +8774,7 @@ def _render_event_counts(
     st.caption(caption)
 
 
+@st.fragment
 def _render_resolved_summary(
     ticket_count_7: int | None,
     ticket_count_30: int | None,
@@ -11419,6 +11424,7 @@ def _render_code_kpis(open_prs: pd.DataFrame, merged_prs: pd.DataFrame) -> None:
     )
 
 
+@st.fragment
 def _render_repo_coverage(open_prs: pd.DataFrame) -> None:
     st.subheader("Review coverage by repo")
     st.caption(
@@ -11478,6 +11484,7 @@ def _share_rank_bar(shares: pd.Series):
     return figure
 
 
+@st.fragment
 def _render_stuck_queue(open_prs: pd.DataFrame, tickets: pd.DataFrame) -> None:
     st.subheader("Stuck queue — open, no approving review, oldest first")
     st.caption(
@@ -11521,6 +11528,7 @@ def _render_stuck_queue(open_prs: pd.DataFrame, tickets: pd.DataFrame) -> None:
     )
 
 
+@st.fragment
 def _render_findings_and_citizenship(merged_prs: pd.DataFrame, open_prs: pd.DataFrame) -> None:
     left, right = st.columns(2)
     judged_pool = pd.concat([merged_prs, open_prs], ignore_index=True) if not merged_prs.empty or not open_prs.empty else pd.DataFrame()
