@@ -10645,7 +10645,10 @@ def _stale_with_masked(
     ages = ages[(ages["status_age_days"] >= min_status_age).fillna(False)]
     if ages.empty:
         return pd.DataFrame()
+    total = int(len(ages))
     ages = ages.sort_values("status_age_days", ascending=False).head(top_n)
+    # What was cut travels with the frame, so the card can tell the reader.
+    ages.attrs["stale_total"] = total
     summaries = df.set_index("key").get("summary", pd.Series(dtype=object))
     ages["summary"] = ages["key"].map(summaries).fillna("")
     ages["ticket"] = ages["key"] + "  " + ages["summary"].astype(str).str.slice(0, 60)
@@ -10673,8 +10676,9 @@ def _render_delivery_page() -> None:
 
     # One scope for the whole page: tiles and charts reading the org-wide frame
     # while the tables below read the sidebar's selection left the top half
-    # ignoring every filter while labelling itself "current scope".
-    df = view.filtered
+    # ignoring every filter while labelling itself "current scope". The backlog
+    # choice belongs in that scope too, or Delivery counts a board Today does not.
+    df = _metrics_df(view.filtered, view.include_backlogs)
     data = bundle.data
     stalled, stalled_clock = _stalled_count(df)
     cycle = _cycle_by_status(df)
@@ -10766,10 +10770,15 @@ def _render_delivery_page() -> None:
                 "Days since the ticket actually moved. Masked is apparent freshness "
                 "from edits that moved no work — a label edit resets last-touched, never this."
             ),
-            footer=(
-                "The innocent reading: a comment or a linked ticket is a real edit. The "
-                "pattern worth asking about is a large masked figure across many tickets "
-                "in the same week."
+            footer=" ".join(
+                part
+                for part in (
+                    _truncation_note(int(stale.attrs.get("stale_total", len(stale))), len(stale)),
+                    "The innocent reading: a comment or a linked ticket is a real edit. The "
+                    "pattern worth asking about is a large masked figure across many tickets "
+                    "in the same week.",
+                )
+                if part
             ),
         )
 

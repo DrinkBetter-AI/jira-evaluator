@@ -136,3 +136,14 @@ def test_the_stale_table_keeps_only_rows_past_the_stalled_clock():
     )
     stale = app._stale_with_masked(df)
     assert list(stale["key"]) == ["ENG-STALE"]
+
+
+def test_a_cut_stale_queue_carries_how_much_was_cut():
+    """Fourteen stale tickets shown as twelve owes the reader the other two."""
+    df = pd.DataFrame(
+        [_moved_days_ago(f"ENG-{i}", 40.0 + i) for i in range(1, 15)]
+    )
+    stale = app._stale_with_masked(df)
+    assert len(stale) == 12
+    assert stale.attrs["stale_total"] == 14
+    assert "of 14" in app._truncation_note(stale.attrs["stale_total"], len(stale))
