@@ -457,7 +457,7 @@ and `GCP_BIGQUERY_READONLY_KEY` (Merchant Center feed), plus `MEDUSA_DB_PASSWORD
 and, if the database is only reachable through a bastion, an SSH key for the tunnel. Read-only
 credentials are sufficient and are the only ones that should be used.
 
-## Two traps that a text sweep cannot see
+## Traps that a text sweep cannot see
 
 - **`theme.rank_bar` wants counts, not labels.** It runs `pd.to_numeric(...).fillna(0)` on what it
   is given, so a raw per-ticket `df["status"]` becomes a chart of zero-length bars labelled
@@ -477,3 +477,26 @@ credentials are sufficient and are the only ones that should be used.
 - **"Epics in Sprint" only draws when an Epic-typed row carries the selected `sprint_id`**, so it is
   empty on the stock synthetic board. Give the harness a dataset variant that parks an unfilled epic
   in the selected sprint, or that grid is never tested.
+- **A statistical threshold needs a deliberate trap in the data.** Cycle-time-by-status hides any
+  status with fewer than five closed intervals, so a board where every status clears the bar proves
+  nothing. Build the trap dataset out of tree: give every ticket a real changelog walking
+  To Do -> In Progress -> Code Review -> Review in Staging, then add three tickets that enter
+  `Blocked` *and leave it again* after the longest wait of any status. The closing transition is the
+  point - `_cycle_by_status` drops open intervals before it applies the cut, so a ticket parked in
+  `Blocked` forever is excluded for being open and proves nothing about the threshold. Done right,
+  `Blocked` is the slowest status by median with `n=3`, and its absence from the chart is the cut
+  working.
+- **A malformed changelog does not raise; it reads as no changelog.** `integrity._histories_of`
+  returns `[]` for anything that is not a list or dict, so a stray object in the `changelog` column
+  reaches the page through the *empty* branch ("Not enough closed status intervals to draw cycle time
+  yet."), not the `except` branch. The two look identical on screen and are different bugs: an empty
+  board is honest, an unreadable one must not be reported as clean. To reach the `except` branch the
+  value has to raise while it is read (a mapping whose `get` throws), or the reader itself has to be
+  patched in the harness (`app.integrity.status_age_days` / `app.integrity.changelog_events` replaced
+  with something that raises). Confirm which branch you are in from
+  the Streamlit log: only the `except` paths write `logger.exception` lines
+  ("status_age_days failed; the stale table is omitted").
+- **Hard-reload the tab after restarting an instance.** A tab left open across a restart renders
+  numbers from the previous process, which produced a phantom Delivery-vs-Today mismatch (16/6
+  against 14/4) that vanished on a clean load. Never report a count read from a tab that outlived
+  its server.
