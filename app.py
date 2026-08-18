@@ -7754,10 +7754,11 @@ class CloudRead(NamedTuple):
 
 
 # The bill moves once a day at best and its last day is yesterday, so a quarter
-# of an hour buys no freshness and pays two whole-table scans of the export for
-# it - the coverage probe has no date to filter on, and `DATE(usage_start_time)`
-# does not prune the export's ingestion-time partitions either. Held on the ads
-# panel's cycle instead, keyed on the date so it rolls over when the export does.
+# of an hour buys no freshness for another BigQuery job: `cloud_costs` now bounds
+# its scan with a partition predicate, and `billing_coverage` - which has no
+# window to filter on, since finding its own range is the query's job - caches
+# its answer to disk by day rather than repeating the scan. Held on the ads
+# panel's cycle here too, keyed on the date so it rolls over when the export does.
 CLOUD_TTL_SECONDS = 6 * 3600
 # The widest window the panel offers, which is the only one read: `window`
 # slices narrower ones out of the frame in pandas, so a click on the radio no
