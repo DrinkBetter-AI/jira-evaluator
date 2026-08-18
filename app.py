@@ -102,9 +102,26 @@ import sprint_planner
 import ticket_quality
 from transformations import add_ticket_health_fields
 import write_access
+from contextlib import contextmanager
 
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _log_stage(name: str):
+    """Time one derivation step at INFO level.
+
+    A slow rerun has to be traceable to the one changelog walk or reshape that
+    caused it, not guessed at from the page's total. Every stage worth timing
+    - a changelog parse, a bundle derivation - wraps its work in this so the
+    same log line shape names it and its cost.
+    """
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        logger.info("stage %s: %.3fs", name, time.perf_counter() - started)
 
 
 DEFAULT_JQL = """statusCategory != Done
@@ -9850,7 +9867,8 @@ def _stalled_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     if df.empty:
         return df.iloc[0:0], "status age"
     try:
-        ages = integrity.status_age_days(df, integrity.changelog_events(df))
+        with _log_stage("changelog:stalled_rows"):
+            ages = integrity.status_age_days(df, integrity.changelog_events(df))
         column = ages["status_age_days"]
         if not column.dropna().empty:
             # By position, not by label: status_age_days hands back a fresh
@@ -10599,8 +10617,9 @@ def _cycle_by_status(df: pd.DataFrame) -> pd.DataFrame:
     amount of pressure on authors moves it.
     """
     try:
-        events = integrity.changelog_events(df)
-        cycle = integrity.cycle_time(events, df)
+        with _log_stage("changelog:cycle_by_status"):
+            events = integrity.changelog_events(df)
+            cycle = integrity.cycle_time(events, df)
         detail = cycle.detail
     except Exception:  # noqa: BLE001 - an unparseable changelog must not blank the page
         logger.exception("cycle_time failed; the by-status chart is omitted")
@@ -10636,7 +10655,8 @@ def _stale_with_masked(
     if df.empty:
         return pd.DataFrame()
     try:
-        ages = integrity.status_age_days(df, integrity.changelog_events(df))
+        with _log_stage("changelog:stale_with_masked"):
+            ages = integrity.status_age_days(df, integrity.changelog_events(df))
     except Exception:  # noqa: BLE001
         logger.exception("status_age_days failed; the stale table is omitted")
         # An unreadable history is not a clean board, and the caller has to be
