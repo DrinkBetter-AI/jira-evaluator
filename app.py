@@ -8633,31 +8633,39 @@ def _render_friction_tabs(
     Kept apart from the funnel because neither depends on it: an empty funnel is
     usually an event that stopped being sent, and the errors are the likeliest
     explanation, so they should not disappear along with it.
+
+    ``on_change="rerun"`` makes the tabs report which one is open instead of
+    always reading ``None``, which is what makes the ``.open`` checks below
+    mean something: without it Streamlit renders both bodies on every run
+    regardless of which tab is showing, and the reads below them fire for a
+    tab nobody is looking at.
     """
-    friction_tab, ai_tab = st.tabs(["What went wrong", "Voss AI"])
-    with friction_tab:
-        _render_event_counts(
-            credentials,
-            amplitude_client.FRICTION_EVENTS,
-            days,
-            everyone,
-            "Nothing went wrong in this window, which is worth a second look at "
-            "whether these events are being sent.",
-            f"Share of everyone who {denominator}. An error one person met ten "
-            "times is one person here, not ten.",
-        )
-        _render_error_breakdowns(credentials, days)
-    with ai_tab:
-        _render_event_counts(
-            credentials,
-            amplitude_client.AI_EVENTS,
-            days,
-            everyone,
-            "Amplitude recorded no Voss AI use in this window.",
-            f"Share of everyone who {denominator}, so this is reach rather than "
-            "engagement: it says how many people found it, not how much they used "
-            "it.",
-        )
+    friction_tab, ai_tab = st.tabs(["What went wrong", "Voss AI"], on_change="rerun")
+    if friction_tab.open:
+        with friction_tab:
+            _render_event_counts(
+                credentials,
+                amplitude_client.FRICTION_EVENTS,
+                days,
+                everyone,
+                "Nothing went wrong in this window, which is worth a second look at "
+                "whether these events are being sent.",
+                f"Share of everyone who {denominator}. An error one person met ten "
+                "times is one person here, not ten.",
+            )
+            _render_error_breakdowns(credentials, days)
+    if ai_tab.open:
+        with ai_tab:
+            _render_event_counts(
+                credentials,
+                amplitude_client.AI_EVENTS,
+                days,
+                everyone,
+                "Amplitude recorded no Voss AI use in this window.",
+                f"Share of everyone who {denominator}, so this is reach rather than "
+                "engagement: it says how many people found it, not how much they used "
+                "it.",
+            )
 
 
 def _active_people(credentials: tuple[str, str, str], days: int) -> int | None:
@@ -8863,13 +8871,31 @@ def _render_event_counts(
     caption: str,
 ) -> None:
     """A count of people per event, beside what share of all visitors that is."""
-    pairs = tuple((step.label, step.event) for step in events)
-    try:
-        with st.spinner("Counting..."):
-            counts = _event_users_cached(credentials, pairs, days)
-    except Exception as exc:  # noqa: BLE001
-        st.warning(f"Could not read these counts from Amplitude: {str(exc)[:200]}")
-        return
+    if not events:
+        counts = pd.DataFrame(columns=["label", "event", "users"])
+    else:
+        try:
+            with st.spinner("Counting..."):
+                # One request per event either way - Amplitude has to dedupe each
+                # separately - but run through _parallel so a tab's events go out
+                # together instead of the one-at-a-time loop this used to leave to
+                # amplitude_client.event_users.
+                read = _parallel(
+                    {
+                        step.event: (
+                            lambda label=step.label, event=step.event: _event_users_cached(
+                                credentials, ((label, event),), days
+                            )
+                        )
+                        for step in events
+                    }
+                )
+                counts = pd.concat(
+                    [read[step.event] for step in events], ignore_index=True
+                )
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Could not read these counts from Amplitude: {str(exc)[:200]}")
+            return
     if counts.empty or not counts["users"].sum():
         st.info(empty_note)
         return

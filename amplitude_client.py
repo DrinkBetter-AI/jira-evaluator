@@ -292,7 +292,12 @@ def event_users(
     """How many distinct people fired each event in the window.
 
     One request per event, because each count has to be deduplicated over the
-    whole window independently of the others.
+    whole window independently of the others. Requested serially here on
+    purpose: this module is a plain REST client and has no business owning a
+    thread pool. A caller that wants several events concurrently - the
+    dashboard does, for a tab's worth at once - issues its own one-event
+    calls through Streamlit's run context and gathers them there instead of
+    asking this function to do it.
     """
     rows = []
     for step in events:

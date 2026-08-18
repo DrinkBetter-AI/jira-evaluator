@@ -136,19 +136,38 @@ else:
         )
 
     dashboard.amplitude_client.funnel = _funnel
+    # Keyed by event rather than by position: the dashboard now fetches a tab's
+    # event counts as separate concurrent calls (one event per call, batched
+    # through _parallel) rather than one call carrying the whole list, and a
+    # real Amplitude count depends only on which event was asked for, not on
+    # how many others rode along with it or in what order.
+    EVENT_COUNTS = {
+        "_active": 38482,  # "Used the site", read alone as context for the funnel.
+        "app_error_occurred": 1587,
+        "cart_product_add_failed": 12,
+        "cart_checkout_blocked": 4,
+        "checkout_payment_failed": 3,
+        "search_zero_results": 39,
+        "vossai_opened": 800,
+        "vossai_query_submitted": 250,
+        "vossai_zero_results": 40,
+    }
+
+    # Recorded on the amplitude_client module itself, not a harness-local list,
+    # because the harness re-executes as a script on every run() while the
+    # outer test process's `import amplitude_client` shares the same module
+    # object - this is how the assertions below can see what was actually
+    # asked for, per run, without the harness and the outer script needing a
+    # channel of their own.
+    amplitude_client.event_user_calls = []
+
     def _event_users(creds, events, days, offset_days=0):
-        # "Used the site" is read on its own, as one event, because it is context
-        # for the funnel rather than a step in it.
-        counts = (
-            [38482]
-            if [e.event for e in events] == ["_active"]
-            else [1587, 12, 4, 3, 39][: len(events)]
-        )
+        amplitude_client.event_user_calls.extend(e.event for e in events)
         return pd.DataFrame(
             {
                 "label": [e.label for e in events],
                 "event": [e.event for e in events],
-                "users": counts,
+                "users": [EVENT_COUNTS.get(e.event, 0) for e in events],
             }
         )
 
@@ -220,6 +239,24 @@ assert friction["People"].max() == 1587
 # got as far as the funnel's first step.
 assert friction["Of all visitors"].iloc[0] == "4.1%", friction.to_string(index=False)
 assert funnel["Lost here"].iloc[0] == "\u2014", funnel["Lost here"].tolist()
+
+# Gating: "What went wrong" is the default-open tab, so its events (plus the
+# lone "Used the site" read beside the funnel) must have been fetched - but
+# Voss AI is the tab nobody opened, and asking it anything at all would be
+# exactly the request this change was meant to stop.
+import amplitude_client as ac_gate  # noqa: E402
+
+called = set(ac_gate.event_user_calls)
+assert called == {
+    "_active",
+    "app_error_occurred",
+    "cart_product_add_failed",
+    "cart_checkout_blocked",
+    "checkout_payment_failed",
+    "search_zero_results",
+}, called
+assert not called & {"vossai_opened", "vossai_query_submitted", "vossai_zero_results"}, called
+print("tab gating: ok (Voss AI not fetched while its tab is closed)")
 
 # Trend: the previous window had 21,000 product-page viewers against this one's
 # 28,000, and a cart step that kept 2.9% against this one's 2.1% - so the cart
