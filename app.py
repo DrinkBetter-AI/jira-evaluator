@@ -10372,12 +10372,63 @@ class _EngineeringData:
     page_size: Any
 
 
-def _engineering_data() -> "_EngineeringData":
-    """Load and shape the engineering reads. Calls st.stop() on a fatal read."""
+_ENGINEERING_BUNDLE_KEY = "_engineering_bundle_cache"
+# Matches fetch_tickets' own TTL: the session-held bundle should not outlive
+# the reads it was built from by more than the reads themselves would.
+_ENGINEERING_BUNDLE_TTL_SECONDS = 300.0
 
+
+def _engineering_data() -> "_EngineeringData":
+    """The current bundle: the session's held one if it still matches, a fresh gather otherwise.
+
+    Every one of the six engineering pages calls this on its own navigation,
+    each a separate script rerun. The per-read caches (``fetch_tickets`` and
+    the other fourteen) already make a warm *read* cheap; what still ran on
+    every navigation before this was the orchestration around them - the
+    thread pool that gathers all fifteen together - and the reshape that
+    follows. ``fetch_tickets`` is safe to call speculatively here: it is the
+    exact cache the real read below would hit, so probing it first is not an
+    extra read, and its fingerprint (the Phase 1 key) says whether the board
+    has actually moved since the session last paid for the rest.
+    """
     max_results = MAX_RESULTS
     page_size = JIRA_PAGE_SIZE
 
+    try:
+        probe_df = fetch_tickets(
+            creds_path=CREDS_PATH,
+            profile_name=PROFILE_NAME,
+            jql=JQL,
+            max_results=max_results,
+            page_size=page_size,
+            schema_version=FETCH_SCHEMA_VERSION,
+        )
+    except Exception:  # noqa: BLE001 - the full read below reports this properly
+        probe_df = None
+
+    if probe_df is not None:
+        probe_fingerprint = _board_fingerprint(probe_df, JQL, FETCH_SCHEMA_VERSION)
+        held = st.session_state.get(_ENGINEERING_BUNDLE_KEY)
+        if held is not None:
+            held_fingerprint, held_at, held_bundle = held
+            if held_fingerprint == probe_fingerprint and (
+                time.time() - held_at < _ENGINEERING_BUNDLE_TTL_SECONDS
+            ):
+                return held_bundle
+
+    bundle = _engineering_data_uncached(max_results, page_size)
+    fresh_fingerprint = _board_fingerprint(bundle.raw_df, JQL, FETCH_SCHEMA_VERSION)
+    st.session_state[_ENGINEERING_BUNDLE_KEY] = (fresh_fingerprint, time.time(), bundle)
+    return bundle
+
+
+def _engineering_data_uncached(max_results: int, page_size: int) -> "_EngineeringData":
+    """Load and shape the engineering reads. Calls st.stop() on a fatal read.
+
+    Always does the full gather and reshape - ``_engineering_data`` is the
+    entry point every page calls, and is what decides whether this runs at
+    all.
+    """
     # GitHub PR data is optional: without a token the PR views degrade to a hint
     # rather than an error, so the Jira dashboard still works standalone.
     github_error = ""
@@ -11789,6 +11840,10 @@ def _clear_page_caches(page_title: str) -> None:
         # With the saved Vivino reads gone, the minutes-long pull must wait
         # for its button again rather than restart on the next screen draw.
         st.session_state.pop("vivino_reads", None)
+    else:
+        # The session-held engineering bundle (Phase 2) would otherwise still
+        # match its old fingerprint and hand back the reads just cleared.
+        st.session_state.pop(_ENGINEERING_BUNDLE_KEY, None)
     logger.info("Cleared cached reads for the %s page", page_title)
 
 
