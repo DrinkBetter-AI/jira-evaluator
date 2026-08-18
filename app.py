@@ -10620,12 +10620,18 @@ def _cycle_by_status(df: pd.DataFrame) -> pd.DataFrame:
     return out[out["n"] >= 5].reset_index(drop=True)
 
 
-def _stale_with_masked(df: pd.DataFrame, top_n: int = 12) -> pd.DataFrame:
+def _stale_with_masked(
+    df: pd.DataFrame, top_n: int = 12, min_status_age: float = TODAY_STALLED_DAYS
+) -> pd.DataFrame:
     """The stale queue with the gaming made visible per row.
 
     ``masked_days`` is apparent freshness from edits that moved no work. A row
     with status age 186 and last-touched 2 is a ticket that has not moved in six
     months and looks alive - the exact shape a label-edit sweep produces.
+
+    Only tickets past the clock the stalled tile uses qualify: ranking by status
+    age alone lists a healthy board's newest tickets under a heading that says
+    abandoned.
     """
     if df.empty:
         return pd.DataFrame()
@@ -10634,6 +10640,9 @@ def _stale_with_masked(df: pd.DataFrame, top_n: int = 12) -> pd.DataFrame:
     except Exception:  # noqa: BLE001
         logger.exception("status_age_days failed; the stale table is omitted")
         return pd.DataFrame()
+    if ages.empty:
+        return pd.DataFrame()
+    ages = ages[(ages["status_age_days"] >= min_status_age).fillna(False)]
     if ages.empty:
         return pd.DataFrame()
     ages = ages.sort_values("status_age_days", ascending=False).head(top_n)
@@ -10662,7 +10671,10 @@ def _render_delivery_page() -> None:
     if _one_person_instead(bundle, view, slot):
         return
 
-    df = bundle.df
+    # One scope for the whole page: tiles and charts reading the org-wide frame
+    # while the tables below read the sidebar's selection left the top half
+    # ignoring every filter while labelling itself "current scope".
+    df = view.filtered
     data = bundle.data
     stalled, stalled_clock = _stalled_count(df)
     cycle = _cycle_by_status(df)
@@ -10731,8 +10743,13 @@ def _render_delivery_page() -> None:
                 severity=True,
             )
 
-    stale = _stale_with_masked(view.filtered)
-    if not stale.empty:
+    stale = _stale_with_masked(df)
+    if stale.empty:
+        st.success(
+            "Nothing stale in scope: every open ticket here has changed status "
+            f"within {TODAY_STALLED_DAYS:.0f} days."
+        )
+    else:
         theme_html.table(
             stale,
             [
@@ -10757,7 +10774,7 @@ def _render_delivery_page() -> None:
         )
 
     st.divider()
-    _render_priority_queue(view.filtered, include_backlogs=view.include_backlogs)
+    _render_priority_queue(df, include_backlogs=view.include_backlogs)
     _download_report(slot, TAB_ENGINEERING)
 def _exclude_repos() -> tuple[frozenset[str], str]:
     """The repos left out of every PR read, and the caption naming them.

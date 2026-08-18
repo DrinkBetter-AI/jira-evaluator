@@ -108,3 +108,31 @@ def test_the_stale_table_is_ordered_by_status_age_not_edit_age():
     )
     stale = app._stale_with_masked(pd.DataFrame([young, old_moved_recently_touched]))
     assert stale.iloc[0]["key"] == "ENG-OLD"
+
+
+def _moved_days_ago(key: str, days: float, **fields) -> dict:
+    moved = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=days)
+    return _ticket(
+        key,
+        [(moved.strftime("%Y-%m-%dT%H:%M:%S.000+0000"), "To Do", "In Progress")],
+        **fields,
+    )
+
+
+def test_a_ticket_that_moved_this_week_is_not_called_stale():
+    """A board where everything is moving has an empty stale table, not a top 12."""
+    df = pd.DataFrame(
+        [_moved_days_ago(f"ENG-{i}", float(i)) for i in range(1, 6)]
+    )
+    assert app._stale_with_masked(df).empty
+
+
+def test_the_stale_table_keeps_only_rows_past_the_stalled_clock():
+    df = pd.DataFrame(
+        [
+            _moved_days_ago("ENG-FRESH", 2.0),
+            _moved_days_ago("ENG-STALE", app.TODAY_STALLED_DAYS + 5.0),
+        ]
+    )
+    stale = app._stale_with_masked(df)
+    assert list(stale["key"]) == ["ENG-STALE"]
