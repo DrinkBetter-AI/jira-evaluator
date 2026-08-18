@@ -457,7 +457,7 @@ and `GCP_BIGQUERY_READONLY_KEY` (Merchant Center feed), plus `MEDUSA_DB_PASSWORD
 and, if the database is only reachable through a bastion, an SSH key for the tunnel. Read-only
 credentials are sufficient and are the only ones that should be used.
 
-## Two traps that a text sweep cannot see
+## Traps that a text sweep cannot see
 
 - **`theme.rank_bar` wants counts, not labels.** It runs `pd.to_numeric(...).fillna(0)` on what it
   is given, so a raw per-ticket `df["status"]` becomes a chart of zero-length bars labelled
@@ -479,9 +479,12 @@ credentials are sufficient and are the only ones that should be used.
   in the selected sprint, or that grid is never tested.
 - **A statistical threshold needs a deliberate trap in the data.** Cycle-time-by-status hides any
   status with fewer than five closed intervals, so a board where every status clears the bar proves
-  nothing. `redesign_demo_app.py` (untracked) carries `DEMO70=cycle`, whose slowest status by median
-  is also the one with `n=3`: it must be absent from the chart. `DEMO70=badcl` makes
-  `integrity.changelog_events` raise, which is how the degradation path - fallback clocks, omitted
+  nothing. The harness needs two dataset variants, built the same way the others are: `cycle`, where
+  every ticket carries a real changelog walking To Do -> In Progress -> Code Review -> Review in
+  Staging, plus three tickets whose only status is `Blocked` with the longest medians - the slowest
+  status by median is then the one with `n=3`, and it must be absent from the chart. `badcl` puts a
+  non-changelog object in the `changelog` column so that `integrity.changelog_events` raises, which
+  is how the degradation path - fallback clocks, omitted
   charts, and whether an empty table is reported as a clean board or as an unreadable one - gets
   tested at all.
 - **Hard-reload the tab after restarting an instance.** A tab left open across a restart renders
