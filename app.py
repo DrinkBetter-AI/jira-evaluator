@@ -10711,7 +10711,10 @@ def _render_delivery_page() -> None:
             (
                 f"Stalled {TODAY_STALLED_DAYS:.0f}d+",
                 str(stalled),
-                f"by {stalled_clock}, never edit age",
+                # The boilerplate promise only holds when the clock kept it:
+                # "by edit age, never edit age" is what saying both produced.
+                f"by {stalled_clock}"
+                + (", never edit age" if stalled_clock == "status age" else ""),
                 "danger" if stalled else "good",
             ),
             ("Open tickets", str(len(df)), "current scope", "neutral"),
