@@ -513,46 +513,46 @@ def fetch_person_reopened_count(
     )
 
 
-def _resolved_week_jql(statuses: tuple[str, ...], weeks_ago: int) -> str:
-    """JQL for one whole week of resolutions, ``weeks_ago`` weeks back.
-
-    Windows are half-open and non-overlapping (``AFTER -14d BEFORE -7d`` is the
-    week before last), so a ticket resolved once is counted in one week only.
-    """
-    older = (int(weeks_ago) + 1) * 7
-    newer = int(weeks_ago) * 7
-    jql = f"status CHANGED TO ({_jql_status_list(statuses)}) AFTER -{older}d"
-    if newer:
-        jql += f" BEFORE -{newer}d"
-    return jql
-
-
 # Estimates and issue type are all the weekly delivery view reads; the rest of
 # DEFAULT_FIELDS would be a bigger payload for columns it never shows.
 DELIVERY_FIELDS = ("assignee", "issuetype", "status", "summary", "timetracking")
 
 
 @st.cache_data(ttl=300, show_spinner=False, refresh_mode="background")
-def fetch_person_resolved_week(
+def fetch_person_resolved_history(
     creds_path: str,
     profile_name: str,
     person: str,
-    weeks_ago: int,
+    weeks: int,
     statuses: tuple[str, ...],
     max_results: int,
     page_size: int,
     schema_version: int,
 ) -> pd.DataFrame:
-    """One person's tickets resolved during a single past week."""
+    """One person's tickets resolved anywhere in the last ``weeks`` weeks, in one read.
+
+    The weekly chart wants ``weeks`` separate totals, and used to ask Jira
+    ``weeks`` times to get them - once per week, each search scoped to that
+    week's own date window - which paid for the round trip to Jira as many
+    times over for a person who resolves at most a few dozen tickets in three
+    months. One search over the whole span answers all of them at once; which
+    week each ticket falls into is then a local read of its own history
+    (``expand=changelog``) rather than another trip to Jira. See
+    :func:`_weekly_resolved_buckets`, which does that split.
+    """
     _ = schema_version
     if not statuses or not str(person).strip():
         return pd.DataFrame()
     client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
     return client.search_issues(
-        jql=f"{_person_clause(person)} AND {_resolved_week_jql(statuses, weeks_ago)}",
+        jql=(
+            f"{_person_clause(person)} AND "
+            f"{_resolved_jql(statuses, int(weeks) * 7, ordered=False)}"
+        ),
         fields=list(DELIVERY_FIELDS),
         max_results=max_results,
         page_size=page_size,
+        expand="changelog",
     )
 
 
@@ -5032,7 +5032,9 @@ class BenchmarkRead(NamedTuple):
     sales: merchant_client.Sales = _NO_SALES
 
 
-@st.cache_data(ttl=BENCHMARK_TTL_SECONDS, show_spinner=False)
+@st.cache_data(
+    ttl=BENCHMARK_TTL_SECONDS, show_spinner=False, refresh_mode="background"
+)
 def _price_benchmark_cached(account: str, country: str) -> BenchmarkRead:
     """What Merchant Center says the shop's prices look like against the market.
 
@@ -5046,22 +5048,33 @@ def _price_benchmark_cached(account: str, country: str) -> BenchmarkRead:
             "The Merchant Center configuration changed while it was being read."
         )
     token = merchant_client.access_token(config)
-    prices = merchant_client.price_gaps(config, token)
-    # Suggestions are a second report and a nice-to-have: an account with price
-    # competitiveness but no price insights still gets the headline.
-    try:
-        insights = merchant_client.price_insights(config, token)
-    except Exception:  # noqa: BLE001
-        insights = merchant_client.Insights(pd.DataFrame())
-    # Likewise the clicks: without them the tables lose their ordering, not
-    # their subject, and the headline above them does not depend on demand.
-    try:
-        demand = merchant_client.product_demand(config, token, country)
-    except Exception:  # noqa: BLE001
+    # Three independent Merchant Center reports, so they go out together rather
+    # than one after another. Only the prices are load-bearing, same as before:
+    # a bad reply for either of the other two costs its own column, not the
+    # whole panel, so their failures are swallowed here exactly as they were
+    # when read in series.
+    answers, errors = _gather(
+        {
+            "prices": lambda: merchant_client.price_gaps(config, token),
+            "insights": lambda: merchant_client.price_insights(config, token),
+            "demand": lambda: merchant_client.product_demand(config, token, country),
+        }
+    )
+    if "prices" in errors:
+        raise errors["prices"]
+    insights = (
+        answers["insights"]
+        if "insights" not in errors
+        else merchant_client.Insights(pd.DataFrame())
+    )
+    demand = (
+        answers["demand"]
+        if "demand" not in errors
         # Marked unread rather than empty: an empty report says nobody clicked,
         # and the panel would otherwise print that as a finding about the shop.
-        demand = merchant_client.Demand(pd.DataFrame(), read=False)
-    return BenchmarkRead(prices, insights, demand)
+        else merchant_client.Demand(pd.DataFrame(), read=False)
+    )
+    return BenchmarkRead(answers["prices"], insights, demand)
 
 
 # The catalogue moves slower than the prices in it, and the whole feed's
@@ -5074,7 +5087,9 @@ _OFFER_MERCHANTS_TTL_SECONDS = 24 * 3600
 _OFFER_SALES_TTL_SECONDS = 6 * 3600
 
 
-@st.cache_data(ttl=_OFFER_SALES_TTL_SECONDS, show_spinner=False)
+@st.cache_data(
+    ttl=_OFFER_SALES_TTL_SECONDS, show_spinner=False, refresh_mode="background"
+)
 def _offer_sales_cached(source: str, days: int, today: _dt.date) -> pd.DataFrame:
     """Bottles sold per Google offer, from the shop's own order book.
 
@@ -5284,7 +5299,9 @@ _MAX_CUT_PERCENT = 30
 _DEFAULT_CUT_PERCENT = 10
 
 
-@st.cache_data(ttl=_OFFER_MERCHANTS_TTL_SECONDS, show_spinner=False)
+@st.cache_data(
+    ttl=_OFFER_MERCHANTS_TTL_SECONDS, show_spinner=False, refresh_mode="background"
+)
 def _offer_merchants_cached(
     source: str, offers: tuple[str, ...]
 ) -> dict[str, tuple[str, ...]]:
@@ -5304,8 +5321,15 @@ def _offer_merchants_cached(
         raise orders_client.MedusaConfigError(
             "The order database configuration changed while it was being read."
         )
-    handles = orders_client.fetch_offer_handles(config, list(offers))
-    prefixes = orders_client.fetch_stores(config)
+    # The offer listings and the store prefixes are two unrelated reads of the
+    # same order database, so they go out together rather than one after another.
+    read = _parallel(
+        {
+            "handles": lambda: orders_client.fetch_offer_handles(config, list(offers)),
+            "prefixes": lambda: orders_client.fetch_stores(config),
+        }
+    )
+    handles, prefixes = read["handles"], read["prefixes"]
     return {
         offer: tuple(
             sorted({orders.merchant_of(handle, prefixes) for handle in listings})
@@ -6832,8 +6856,18 @@ def _render_price_benchmark() -> None:
         return
 
     try:
+        # The benchmark and the shop's own sales are unrelated reads - Merchant
+        # Center against the order database - so they go out together rather
+        # than one after another.
         with st.spinner("Reading Merchant Center's price benchmarks..."):
-            read = _price_benchmark_cached(config.account, config.country)
+            parallel_read = _parallel(
+                {
+                    "benchmark": lambda: _price_benchmark_cached(
+                        config.account, config.country
+                    ),
+                    "sales": _offer_sales,
+                }
+            )
     except merchant_client.MerchantConfigError as exc:
         st.warning(str(exc))
         return
@@ -6841,7 +6875,7 @@ def _render_price_benchmark() -> None:
         st.warning(f"Could not read the price benchmarks: {str(exc)[:200]}")
         return
 
-    read = read._replace(sales=_offer_sales())
+    read = parallel_read["benchmark"]._replace(sales=parallel_read["sales"])
     prices, insights = read.prices, read.insights
     # Held before the merchant filter can empty it, so an empty filter is never
     # mistaken below for a feed with no benchmarks in it.
@@ -7682,7 +7716,7 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
 BURN_TTL_SECONDS = 900
 
 
-@st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
+@st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False, refresh_mode="background")
 def _openai_costs_cached(days: int) -> pd.DataFrame:
     """Daily OpenAI cost by project and line item.
 
@@ -7705,7 +7739,7 @@ STRIPE_LEDGER_DAYS = (
 )
 
 
-@st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
+@st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False, refresh_mode="background")
 def _stripe_ledger_cached(days: int) -> tuple[pd.DataFrame, bool]:
     """Stripe's ledger for the window and the window before.
 
@@ -7719,7 +7753,7 @@ def _stripe_ledger_cached(days: int) -> tuple[pd.DataFrame, bool]:
     return cost_client.stripe_ledger(key, days)
 
 
-@st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False)
+@st.cache_data(ttl=BURN_TTL_SECONDS, show_spinner=False, refresh_mode="background")
 def _stripe_disputes_cached(days: int) -> int:
     key = cost_client.load_stripe_env()
     if not key:  # pragma: no cover - the caller checks first
@@ -7729,8 +7763,47 @@ def _stripe_disputes_cached(days: int) -> int:
 
 def _stripe_cached(days: int) -> tuple[pd.DataFrame, bool, int]:
     """Stripe's ledger for the window and the window before, and its disputes."""
-    entries, truncated = _stripe_ledger_cached(STRIPE_LEDGER_DAYS)
-    return entries, truncated, _stripe_disputes_cached(days)
+    # Two independent reads off the same key - a ledger page walk and a
+    # disputes count - so they go out together rather than one after another.
+    read = _parallel(
+        {
+            "ledger": lambda: _stripe_ledger_cached(STRIPE_LEDGER_DAYS),
+            "disputes": lambda: _stripe_disputes_cached(days),
+        }
+    )
+    entries, truncated = read["ledger"]
+    return entries, truncated, read["disputes"]
+
+
+def _burn_reads(days: int) -> dict[str, Callable[[], Any]]:
+    """Burn's independent bills, as callables to run together.
+
+    OpenAI, Google Cloud and Stripe are three unrelated providers - reading
+    one tells you nothing about another - so asking them one after another
+    made the panel as slow as their sum. Only a provider whose configuration
+    is actually present is asked at all; a config error surfaces here just as
+    it would from the direct call, and simply leaves the task out so the other
+    two providers are not held up waiting for it.
+    """
+    tasks: dict[str, Callable[[], Any]] = {}
+    try:
+        if cost_client.load_openai_env():
+            tasks["openai"] = lambda: _openai_costs_cached(days)
+    except cost_client.CostConfigError:
+        pass
+    try:
+        if cost_client.load_billing_env() is not None:
+            tasks["cloud"] = lambda: _cloud_costs_cached(
+                CLOUD_WINDOW_DAYS, _dt.date.today()
+            )
+    except cost_client.CostConfigError:
+        pass
+    try:
+        if cost_client.load_stripe_env():
+            tasks["stripe"] = lambda: _stripe_cached(days)
+    except cost_client.CostConfigError:
+        pass
+    return tasks
 
 
 def _render_burn() -> None:
@@ -7753,9 +7826,14 @@ def _render_burn() -> None:
         horizontal=True,
         key="burn_window_days",
     )
-    _render_ai_costs(days)
-    _render_cloud(days)
-    _render_stripe(days)
+    # The three providers' reads go out together; each panel below still
+    # renders on its own account of what it got, so one dead provider costs
+    # its own section and not the two beside it.
+    with st.spinner("Reading what each provider billed..."):
+        answers, errors = _gather(_burn_reads(days))
+    _render_ai_costs(days, answers.get("openai"), errors.get("openai"))
+    _render_cloud(days, answers.get("cloud"), errors.get("cloud"))
+    _render_stripe(days, answers.get("stripe"), errors.get("stripe"))
 
 
 class CloudRead(NamedTuple):
@@ -7781,7 +7859,7 @@ CLOUD_TTL_SECONDS = 6 * 3600
 CLOUD_WINDOW_DAYS = max(cost_client.LOOKBACK_WINDOWS)
 
 
-@st.cache_data(ttl=CLOUD_TTL_SECONDS, show_spinner=False)
+@st.cache_data(ttl=CLOUD_TTL_SECONDS, show_spinner=False, refresh_mode="background")
 def _cloud_costs_cached(days: int, today: _dt.date) -> CloudRead:
     """Google Cloud's billing export, and what the export covers.
 
@@ -7823,12 +7901,20 @@ def _billing_bigquery_client(project: str, dataset: str):
     return cost_client.build_billing_client(config)
 
 
-def _render_cloud(days: int) -> None:
+def _render_cloud(
+    days: int,
+    read: "CloudRead | None" = None,
+    error: Exception | None = None,
+) -> None:
     """What Google Cloud charged, service by service.
 
     The largest bill of the three and the one nobody sees: it arrives monthly,
     by which time a service left running has been running for a month. Read
     from the billing export, which is the only place the figure exists per day.
+
+    ``read``/``error`` are the answer the caller already gathered alongside
+    the other providers' reads; when neither is given (a direct call, as the
+    tests make) the read happens here instead, exactly as it always did.
     """
     try:
         config = cost_client.load_billing_env()
@@ -7842,15 +7928,22 @@ def _render_cloud(days: int) -> None:
         )
         return
 
-    try:
-        with st.spinner("Reading what Google Cloud charged..."):
-            read = _cloud_costs_cached(CLOUD_WINDOW_DAYS, _dt.date.today())
-    except cost_client.CostConfigError as exc:
-        st.warning(str(exc))
+    if error is not None:
+        if isinstance(error, cost_client.CostConfigError):
+            st.warning(str(error))
+        else:
+            st.warning(f"Could not read the billing export: {str(error)[:200]}")
         return
-    except Exception as exc:  # noqa: BLE001
-        st.warning(f"Could not read the billing export: {str(exc)[:200]}")
-        return
+    if read is None:
+        try:
+            with st.spinner("Reading what Google Cloud charged..."):
+                read = _cloud_costs_cached(CLOUD_WINDOW_DAYS, _dt.date.today())
+        except cost_client.CostConfigError as exc:
+            st.warning(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Could not read the billing export: {str(exc)[:200]}")
+            return
 
     history_start, covered_to = read.history_start, read.covered_to
     if history_start is None or covered_to is None:
@@ -7976,8 +8069,17 @@ def _render_cloud(days: int) -> None:
             _said(TAB_BUSINESS, cloud, lines)
 
 
-def _render_ai_costs(days: int) -> None:
-    """What the AI providers charged, and what the bill is actually made of."""
+def _render_ai_costs(
+    days: int,
+    costs: pd.DataFrame | None = None,
+    error: Exception | None = None,
+) -> None:
+    """What the AI providers charged, and what the bill is actually made of.
+
+    ``costs``/``error`` are the answer the caller already gathered alongside
+    the other providers' reads; when neither is given (a direct call, as the
+    tests make) the read happens here instead, exactly as it always did.
+    """
     try:
         key = cost_client.load_openai_env()
     except cost_client.CostConfigError as exc:
@@ -7991,15 +8093,22 @@ def _render_ai_costs(days: int) -> None:
         )
         return
 
-    try:
-        with st.spinner("Reading what the month cost..."):
-            costs = _openai_costs_cached(days)
-    except cost_client.CostConfigError as exc:
-        st.warning(str(exc))
+    if error is not None:
+        if isinstance(error, cost_client.CostConfigError):
+            st.warning(str(error))
+        else:
+            st.warning(f"Could not read OpenAI costs: {str(error)[:200]}")
         return
-    except Exception as exc:  # noqa: BLE001
-        st.warning(f"Could not read OpenAI costs: {str(exc)[:200]}")
-        return
+    if costs is None:
+        try:
+            with st.spinner("Reading what the month cost..."):
+                costs = _openai_costs_cached(days)
+        except cost_client.CostConfigError as exc:
+            st.warning(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Could not read OpenAI costs: {str(exc)[:200]}")
+            return
 
     burn = cost_client.window(costs, days)
     if not burn.cost and costs.empty:
@@ -8105,13 +8214,21 @@ def _render_ai_costs(days: int) -> None:
     )
 
 
-def _render_stripe(days: int) -> None:
+def _render_stripe(
+    days: int,
+    cached: tuple[pd.DataFrame, bool, int] | None = None,
+    error: Exception | None = None,
+) -> None:
     """What Stripe's books say the platform kept.
 
     Read expecting a cost - card processing fees - and it is not one: this
     account is a Connect platform, so each sale's fees are charged on the
     merchant's own account and what lands here is the marketplace's commission.
     The panel reports what is there rather than what was hoped for.
+
+    ``cached``/``error`` are the answer the caller already gathered alongside
+    the other providers' reads; when neither is given (a direct call, as the
+    tests make) the read happens here instead, exactly as it always did.
     """
     try:
         key = cost_client.load_stripe_env()
@@ -8126,15 +8243,23 @@ def _render_stripe(days: int) -> None:
         )
         return
 
-    try:
-        with st.spinner("Reading Stripe's ledger..."):
-            entries, truncated, disputes = _stripe_cached(days)
-    except cost_client.CostConfigError as exc:
-        st.warning(str(exc))
+    if error is not None:
+        if isinstance(error, cost_client.CostConfigError):
+            st.warning(str(error))
+        else:
+            st.warning(f"Could not read Stripe: {str(error)[:200]}")
         return
-    except Exception as exc:  # noqa: BLE001
-        st.warning(f"Could not read Stripe: {str(exc)[:200]}")
-        return
+    if cached is None:
+        try:
+            with st.spinner("Reading Stripe's ledger..."):
+                cached = _stripe_cached(days)
+        except cost_client.CostConfigError as exc:
+            st.warning(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Could not read Stripe: {str(exc)[:200]}")
+            return
+    entries, truncated, disputes = cached
 
     # Where the read's cap fell short of this window's own start, the window is
     # missing sales too, and neither it nor the comparison can be trusted.
@@ -9618,6 +9743,56 @@ def _jql_identity(owned: pd.DataFrame, person: str) -> str:
     return person
 
 
+def _weekly_resolved_buckets(
+    history: pd.DataFrame, weeks: int, statuses: tuple[str, ...]
+) -> dict[str, pd.DataFrame]:
+    """Split one consolidated read into the per-week frames the old loop of
+    Jira searches used to produce, one search per week, by reading the
+    changelog already carried on ``history`` instead of asking Jira again.
+
+    Mirrors what ``status CHANGED TO (...) AFTER/BEFORE`` matched: any
+    changelog entry whose new status is one of ``statuses``, regardless of
+    what it moved from, buckets the ticket into the week that entry falls in.
+    A ticket that re-entered a resolved status more than once can land in more
+    than one week, exactly as the per-week searches would each have found it.
+    """
+    empty = {str(index): pd.DataFrame() for index in range(weeks)}
+    if history.empty:
+        return empty
+    events = integrity.changelog_events(history)
+    if events.empty:
+        return empty
+    resolved = frozenset(status.strip().lower() for status in statuses if status.strip())
+    status_events = events[events["is_status"].fillna(False).astype(bool)]
+    entered = status_events[
+        status_events["to_string"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .isin(resolved)
+    ]
+    now = pd.Timestamp.now(tz="UTC")
+    by_week: dict[str, set[str]] = {str(index): set() for index in range(weeks)}
+    for key, ts in zip(entered["key"], entered["ts"]):
+        if pd.isna(ts):
+            continue
+        age_days = (now - ts).total_seconds() / 86400.0
+        if age_days < 0:
+            continue
+        index = int(age_days // 7)
+        if index < weeks:
+            by_week[str(index)].add(key)
+    return {
+        index: (
+            history[history["key"].isin(keys)].reset_index(drop=True)
+            if keys
+            else pd.DataFrame()
+        )
+        for index, keys in by_week.items()
+    }
+
+
 def _render_weekly_delivery(person: str, who: str, weeks: int = 12) -> None:
     """Estimated hours delivered per week, backfilled from Jira's own history."""
     st.subheader("Estimated Hours Delivered")
@@ -9630,26 +9805,22 @@ def _render_weekly_delivery(person: str, who: str, weeks: int = 12) -> None:
     )
 
     try:
-        weekly = _parallel(
-            {
-                str(index): (
-                    lambda i=index: fetch_person_resolved_week(
-                        creds_path=CREDS_PATH,
-                        profile_name=PROFILE_NAME,
-                        person=who,
-                        weeks_ago=i,
-                        statuses=RESOLVED_STATUSES,
-                        max_results=MAX_RESULTS,
-                        page_size=JIRA_PAGE_SIZE,
-                        schema_version=FETCH_SCHEMA_VERSION,
-                    )
-                )
-                for index in range(weeks)
-            }
-        )
+        with st.spinner("Reading resolved history..."):
+            history = fetch_person_resolved_history(
+                creds_path=CREDS_PATH,
+                profile_name=PROFILE_NAME,
+                person=who,
+                weeks=weeks,
+                statuses=RESOLVED_STATUSES,
+                max_results=MAX_RESULTS,
+                page_size=JIRA_PAGE_SIZE,
+                schema_version=FETCH_SCHEMA_VERSION,
+            )
     except Exception as exc:  # noqa: BLE001
         st.warning(f"Weekly history could not be read: {str(exc)[:200]}")
         return
+
+    weekly = _weekly_resolved_buckets(history, weeks, RESOLVED_STATUSES)
 
     today = pd.Timestamp.now(tz="UTC").normalize()
     rows = []
