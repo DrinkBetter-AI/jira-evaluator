@@ -477,3 +477,14 @@ credentials are sufficient and are the only ones that should be used.
 - **"Epics in Sprint" only draws when an Epic-typed row carries the selected `sprint_id`**, so it is
   empty on the stock synthetic board. Give the harness a dataset variant that parks an unfilled epic
   in the selected sprint, or that grid is never tested.
+- **A statistical threshold needs a deliberate trap in the data.** Cycle-time-by-status hides any
+  status with fewer than five closed intervals, so a board where every status clears the bar proves
+  nothing. `redesign_demo_app.py` (untracked) carries `DEMO70=cycle`, whose slowest status by median
+  is also the one with `n=3`: it must be absent from the chart. `DEMO70=badcl` makes
+  `integrity.changelog_events` raise, which is how the degradation path - fallback clocks, omitted
+  charts, and whether an empty table is reported as a clean board or as an unreadable one - gets
+  tested at all.
+- **Hard-reload the tab after restarting an instance.** A tab left open across a restart renders
+  numbers from the previous process, which produced a phantom Delivery-vs-Today mismatch (16/6
+  against 14/4) that vanished on a clean load. Never report a count read from a tab that outlived
+  its server.
