@@ -147,3 +147,22 @@ def test_a_cut_stale_queue_carries_how_much_was_cut():
     assert len(stale) == 12
     assert stale.attrs["stale_total"] == 14
     assert "of 14" in app._truncation_note(stale.attrs["stale_total"], len(stale))
+
+
+def test_an_unreadable_history_is_not_reported_as_a_clean_board(monkeypatch):
+    """Empty because it failed, not empty because nothing is stale."""
+
+    def boom(*_args, **_kwargs):
+        raise ValueError("changelog")
+
+    monkeypatch.setattr(app.integrity, "status_age_days", boom)
+    stale = app._stale_with_masked(pd.DataFrame([_moved_days_ago("ENG-1", 90.0)]))
+    assert stale.empty
+    assert stale.attrs.get("stale_unreadable") is True
+
+
+def test_a_board_with_nothing_stale_is_not_flagged_as_unreadable():
+    df = pd.DataFrame([_moved_days_ago("ENG-1", 3.0)])
+    stale = app._stale_with_masked(df)
+    assert stale.empty
+    assert not stale.attrs.get("stale_unreadable")
