@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 import datetime as _dt
 import hashlib
 import html
@@ -105,6 +106,21 @@ import write_access
 
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _log_stage(name: str):
+    """Log how long a named rerun stage took, at INFO, so latency work has numbers.
+
+    ``_gather`` already times the parallel reads; this covers what happens to
+    the answer afterwards - shaping the frame, flattening a changelog - the
+    per-rerun costs the latency plan is aimed at.
+    """
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        logger.info("Stage '%s' took %.3fs", name, time.perf_counter() - started)
 
 
 DEFAULT_JQL = """statusCategory != Done
@@ -9850,7 +9866,8 @@ def _stalled_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     if df.empty:
         return df.iloc[0:0], "status age"
     try:
-        ages = integrity.status_age_days(df, integrity.changelog_events(df))
+        with _log_stage("changelog:today_stalled"):
+            ages = integrity.status_age_days(df, integrity.changelog_events(df))
         column = ages["status_age_days"]
         if not column.dropna().empty:
             # By position, not by label: status_age_days hands back a fresh
@@ -10339,7 +10356,8 @@ def _engineering_data() -> "_EngineeringData":
             "JIRA_DASHBOARD_JQL or raise JIRA_MAX_RESULTS."
         )
 
-    df = add_priority_score(add_ticket_health_fields(raw_df))
+    with _log_stage("shape"):
+        df = add_priority_score(add_ticket_health_fields(raw_df))
 
     # A failed GitHub read leaves the PR sections saying so, rather than
     # reporting an empty org as though nobody had opened a pull request.
@@ -10599,8 +10617,9 @@ def _cycle_by_status(df: pd.DataFrame) -> pd.DataFrame:
     amount of pressure on authors moves it.
     """
     try:
-        events = integrity.changelog_events(df)
-        cycle = integrity.cycle_time(events, df)
+        with _log_stage("changelog:cycle_by_status"):
+            events = integrity.changelog_events(df)
+            cycle = integrity.cycle_time(events, df)
         detail = cycle.detail
     except Exception:  # noqa: BLE001 - an unparseable changelog must not blank the page
         logger.exception("cycle_time failed; the by-status chart is omitted")
@@ -10636,7 +10655,8 @@ def _stale_with_masked(
     if df.empty:
         return pd.DataFrame()
     try:
-        ages = integrity.status_age_days(df, integrity.changelog_events(df))
+        with _log_stage("changelog:stale_with_masked"):
+            ages = integrity.status_age_days(df, integrity.changelog_events(df))
     except Exception:  # noqa: BLE001
         logger.exception("status_age_days failed; the stale table is omitted")
         # An unreadable history is not a clean board, and the caller has to be
