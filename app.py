@@ -8,10 +8,13 @@ import hashlib
 import html
 import logging
 import os
+import pickle
 import re
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from collections.abc import Sequence
 from typing import Any, Callable, NamedTuple
 from urllib.parse import quote, unquote, urlencode
@@ -103,6 +106,7 @@ import sprint_planner
 import ticket_quality
 from transformations import add_ticket_health_fields
 import write_access
+from contextlib import contextmanager
 
 
 logger = logging.getLogger(__name__)
@@ -110,17 +114,18 @@ logger = logging.getLogger(__name__)
 
 @contextmanager
 def _log_stage(name: str):
-    """Log how long a named rerun stage took, at INFO, so latency work has numbers.
+    """Time one derivation step at INFO level.
 
-    ``_gather`` already times the parallel reads; this covers what happens to
-    the answer afterwards - shaping the frame, flattening a changelog - the
-    per-rerun costs the latency plan is aimed at.
+    A slow rerun has to be traceable to the one changelog walk or reshape that
+    caused it, not guessed at from the page's total. Every stage worth timing
+    - a changelog parse, a bundle derivation - wraps its work in this so the
+    same log line shape names it and its cost.
     """
     started = time.perf_counter()
     try:
         yield
     finally:
-        logger.info("Stage '%s' took %.3fs", name, time.perf_counter() - started)
+        logger.info("stage %s: %.3fs", name, time.perf_counter() - started)
 
 
 DEFAULT_JQL = """statusCategory != Done
@@ -1174,6 +1179,7 @@ def _deliver_board_snapshot(recorded: board.Snapshot) -> None:
     )
 
 
+@st.fragment
 def _render_metrics(
     df: pd.DataFrame,
     include_backlogs: bool = False,
@@ -2964,6 +2970,7 @@ _PLAN_EDITOR_KEY = "_sprint_plan_editor"
 _SPRINT_MOVE_BATCH = 50
 
 
+@st.fragment
 def _render_sprint_plan(df: pd.DataFrame) -> None:
     """Propose a sprint for one team from a few named goals and real hours."""
     st.caption(
@@ -3306,6 +3313,7 @@ def _apply_sprint_plan(plan: pd.DataFrame, team_df: pd.DataFrame) -> None:
     st.success(f"Added {len(to_add)} ticket(s) to {label}. Refresh Data to see it.")
 
 
+@st.fragment
 def _render_sprint_capacity(
     df: pd.DataFrame,
     status_source_df: pd.DataFrame | None = None,
@@ -4664,6 +4672,7 @@ def _render_ticket_list(
         )
 
 
+@st.fragment
 def _render_new_and_triage(
     new_24h: int | None,
     new_7d: int | None,
@@ -8918,6 +8927,7 @@ def _render_event_counts(
     st.caption(caption)
 
 
+@st.fragment
 def _render_resolved_summary(
     ticket_count_7: int | None,
     ticket_count_30: int | None,
@@ -10056,16 +10066,25 @@ def _ownerless(df: pd.DataFrame) -> int:
     return int(len(_ownerless_rows(df)))
 
 
-def _stalled_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+def _stalled_rows(
+    df: pd.DataFrame, events: pd.DataFrame | None = None
+) -> tuple[pd.DataFrame, str]:
     """The open tickets that have not *moved* in TODAY_STALLED_DAYS, and the clock.
 
     A fallback to edit age has to say so - it is the gameable one.
+
+    ``events`` is the board's changelog already flattened by the derivation
+    layer (``_engineering_data`` hands it the current bundle's events) - when
+    it is given, no changelog is re-parsed here at all. Callers that still
+    pass a raw ``df`` carrying its own ``changelog`` column (direct tests,
+    chiefly) get the old behaviour: it is parsed from ``df`` itself.
     """
     if df.empty:
         return df.iloc[0:0], "status age"
     try:
-        with _log_stage("changelog:today_stalled"):
-            ages = integrity.status_age_days(df, integrity.changelog_events(df))
+        with _log_stage("changelog:stalled_rows"):
+            resolved_events = events if events is not None else integrity.changelog_events(df)
+            ages = integrity.status_age_days(df, resolved_events)
         column = ages["status_age_days"]
         if not column.dropna().empty:
             # By position, not by label: status_age_days hands back a fresh
@@ -10086,9 +10105,11 @@ def _stalled_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     return rows, "edit age (no changelog)"
 
 
-def _stalled_count(df: pd.DataFrame) -> tuple[int, str]:
+def _stalled_count(
+    df: pd.DataFrame, events: pd.DataFrame | None = None
+) -> tuple[int, str]:
     """How many open tickets have not *moved* in TODAY_STALLED_DAYS."""
-    rows, clock = _stalled_rows(df)
+    rows, clock = _stalled_rows(df, events)
     return int(len(rows)), clock
 
 
@@ -10239,7 +10260,7 @@ def _action_queues(
     # stalled rows walks every ticket's changelog, and the tile needs the same
     # rows, so computing them here again doubled the cost of drawing the page.
     if stalled is None:
-        stalled, _ = _stalled_rows(board)
+        stalled, _ = _stalled_rows(board, events=getattr(bundle, "events", None))
     # The triage read is the raw Jira frame - it has never been through
     # add_ticket_health_fields, so it carries a created date and no age. Enriched
     # here rather than defaulted to zero, because "0d in triage" about a ticket
@@ -10402,7 +10423,7 @@ def _render_today_page() -> None:
     )
 
     st.divider()
-    stalled_rows, stalled_clock = _stalled_rows(df)
+    stalled_rows, stalled_clock = _stalled_rows(df, events=bundle.events)
     queues, unreadable = _action_queues(bundle, df, stalled=stalled_rows)
     _render_next_actions(queues, unknown=unreadable)
 
@@ -10470,6 +10491,66 @@ def _render_today_page() -> None:
         )
 
 
+def _board_fingerprint(raw_df: pd.DataFrame, jql: str, schema_version: int) -> tuple:
+    """A cheap identity for a ticket read - not a hash of its rows.
+
+    Hashing the full frame (nested changelog dicts and all) to decide whether
+    the derived board is still fresh would cost what the derivation itself
+    costs. Row count plus the newest ``updated`` timestamp changes whenever
+    the read does - a ticket added, removed or touched - without walking a
+    single changelog to find out.
+    """
+    if raw_df is None or raw_df.empty or "updated" not in raw_df.columns:
+        max_updated = ""
+    else:
+        max_updated = str(
+            pd.to_datetime(raw_df["updated"], utc=True, errors="coerce").max()
+        )
+    return (0 if raw_df is None else len(raw_df), max_updated, jql, schema_version)
+
+
+@dataclass(frozen=True)
+class _BoardDerivation:
+    """The board, shaped once: the reshaped frame and its flattened changelog.
+
+    ``df`` never carries the ``changelog`` column - that is the one field on
+    this board expensive enough that copying it into every page's frame would
+    be the derivation's whole cost. Anything that genuinely needs raw history
+    asks ``events`` instead, which is parsed once here rather than once per
+    caller.
+    """
+
+    df: pd.DataFrame
+    events: pd.DataFrame
+
+
+@st.cache_data(
+    ttl=300,
+    show_spinner=False,
+    max_entries=4,
+    # ``raw_df`` is hashed to a constant on purpose: the fingerprint argument
+    # is the real cache key (row count, latest ``updated``, JQL, schema
+    # version - see ``_board_fingerprint``), so a cache hit never walks or
+    # re-serialises the frame's nested changelog dicts just to decide whether
+    # it already has the answer.
+    hash_funcs={pd.DataFrame: lambda _df: None},
+)
+def _derive_board(raw_df: pd.DataFrame, fingerprint: tuple) -> _BoardDerivation:
+    """Shape the raw ticket read once: health fields, priority score, changelog events.
+
+    Everything downstream that used to reparse ``df["changelog"]`` on every
+    call - ``_stalled_rows``, ``_cycle_by_status``, ``_stale_with_masked`` -
+    now reads ``events`` from here instead, computed exactly once per board
+    read regardless of how many pages or reruns ask for it.
+    """
+    _ = fingerprint  # part of the cache key only; the real work reads raw_df
+    events = integrity.changelog_events(raw_df)
+    shaped = add_priority_score(add_ticket_health_fields(raw_df))
+    if "changelog" in shaped.columns:
+        shaped = shaped.drop(columns=["changelog"])
+    return _BoardDerivation(df=shaped, events=events)
+
+
 @dataclass(frozen=True)
 class _EngineeringData:
     """Everything one engineering page draw needs, read exactly once.
@@ -10483,6 +10564,7 @@ class _EngineeringData:
     errors: Any
     raw_df: Any
     df: Any
+    events: Any
     github_ready: Any
     github_error: Any
     open_prs: Any
@@ -10497,12 +10579,311 @@ class _EngineeringData:
     page_size: Any
 
 
-def _engineering_data() -> "_EngineeringData":
-    """Load and shape the engineering reads. Calls st.stop() on a fatal read."""
+# --------------------------------------------------------------------------
+# Warm board snapshot: a cold start reads this instead of an empty screen and
+# an eight-second wait, while a background thread brings both it and the
+# session's own cache up to date behind the reader.
+# --------------------------------------------------------------------------
 
+_SNAPSHOT_PATH = Path(tempfile.gettempdir()) / "jira_dashboard_board_snapshot.pkl"
+# Generous past the ~5-15 minutes a healthy background refresh cycle keeps it
+# at: a bound against a stopped or failing refresh serving a board nobody
+# would recognise, not the cadence itself.
+_SNAPSHOT_STALE_LIMIT_SECONDS = 1800.0
+# Comfortably above a real board's derived frame (no changelog column, no raw
+# issue payloads), well below "a snapshot large enough to be its own outage".
+_SNAPSHOT_MAX_BYTES = 25 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _PersistedBoard:
+    """What actually goes to disk: the shaped board, not the raw read.
+
+    ``raw_df`` (and the changelog it carries) never reaches this - the same
+    reason Phase 1's bundle drops it from every page's frame applies doubly to
+    a file every cold start reads back.
+    """
+
+    written_at: float
+    df: pd.DataFrame
+    events: pd.DataFrame
+    data: dict
+    github_ready: bool
+    github_error: str
+    open_prs: pd.DataFrame
+    merged_prs: pd.DataFrame
+    pr_count_7: Any
+    pr_count_30: Any
+    open_count_exact: Any
+    assignees: list
+    statuses: list
+    priorities: list
+    max_results: int
+    page_size: int
+
+
+def _write_board_snapshot(bundle: "_EngineeringData") -> None:
+    """Persist the derived bundle to local disk, with a written-at stamp.
+
+    Written atomically (a temp file, then a rename) so a reader mid-read of
+    the real path never sees a half-written pickle. Errors here are logged
+    and swallowed - a snapshot write is a courtesy to the *next* cold start,
+    not something the run that triggered it depends on.
+    """
+    try:
+        persisted = _PersistedBoard(
+            written_at=time.time(),
+            df=bundle.df,
+            events=bundle.events,
+            data=bundle.data,
+            github_ready=bundle.github_ready,
+            github_error=bundle.github_error,
+            open_prs=bundle.open_prs,
+            merged_prs=bundle.merged_prs,
+            pr_count_7=bundle.pr_count_7,
+            pr_count_30=bundle.pr_count_30,
+            open_count_exact=bundle.open_count_exact,
+            assignees=bundle.assignees,
+            statuses=bundle.statuses,
+            priorities=bundle.priorities,
+            max_results=bundle.max_results,
+            page_size=bundle.page_size,
+        )
+        _SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # Unique per writer: a live gather's own write and a background
+        # refresh's write can land in the same few seconds, and two writers
+        # sharing one temp name means the first to rename it away can leave
+        # the second stat()-ing a file that is no longer there.
+        tmp_path = _SNAPSHOT_PATH.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
+        with open(tmp_path, "wb") as fh:
+            pickle.dump(persisted, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        if tmp_path.stat().st_size > _SNAPSHOT_MAX_BYTES:
+            tmp_path.unlink(missing_ok=True)
+            logger.warning(
+                "Board snapshot exceeded %d bytes; not written", _SNAPSHOT_MAX_BYTES
+            )
+            return
+        tmp_path.replace(_SNAPSHOT_PATH)
+    except Exception:  # noqa: BLE001 - a failed write must not break the page that triggered it
+        logger.exception("Could not write the board snapshot")
+
+
+def _read_board_snapshot() -> tuple["_EngineeringData", float] | None:
+    """The on-disk snapshot and its age, or None on anything but a good, fresh read.
+
+    Fails open, always: a missing file, a snapshot older than the staleness
+    limit, and a corrupt or otherwise unreadable file all take the same path
+    back to the caller - None, meaning "read live" - rather than raising into
+    a page that only wanted a fast start.
+    """
+    try:
+        if not _SNAPSHOT_PATH.exists():
+            return None
+        with open(_SNAPSHOT_PATH, "rb") as fh:
+            persisted: _PersistedBoard = pickle.load(fh)
+        age = time.time() - persisted.written_at
+        if age < 0 or age > _SNAPSHOT_STALE_LIMIT_SECONDS:
+            return None
+        bundle = _EngineeringData(
+            data=persisted.data,
+            errors={},
+            raw_df=persisted.df,
+            df=persisted.df,
+            events=persisted.events,
+            github_ready=persisted.github_ready,
+            github_error=persisted.github_error,
+            open_prs=persisted.open_prs,
+            merged_prs=persisted.merged_prs,
+            pr_count_7=persisted.pr_count_7,
+            pr_count_30=persisted.pr_count_30,
+            open_count_exact=persisted.open_count_exact,
+            assignees=persisted.assignees,
+            statuses=persisted.statuses,
+            priorities=persisted.priorities,
+            max_results=persisted.max_results,
+            page_size=persisted.page_size,
+        )
+        return bundle, persisted.written_at
+    except Exception:  # noqa: BLE001 - any failure to read falls back to a live read
+        logger.exception("Could not read the board snapshot; falling back to a live read")
+        return None
+
+
+def _delete_board_snapshot() -> None:
+    """Drop the on-disk snapshot, so a stale file cannot outlive the reads it came from."""
+    try:
+        _SNAPSHOT_PATH.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 - deleting a snapshot must not break Refresh
+        logger.exception("Could not delete the board snapshot")
+
+
+_ENGINEERING_BG_REFRESH_KEY = "_engineering_bg_refresh_running"
+
+
+def _start_background_board_refresh(max_results: int, page_size: int) -> None:
+    """Bring the live reads and the on-disk snapshot up to date behind a snapshot-served reader.
+
+    Fire-and-forget: no Streamlit element is drawn from this thread, so it
+    needs no progress bar, and nothing it does can raise into the page that is
+    already rendering from the snapshot. At most one refresh runs per session
+    at a time.
+    """
+    if st.session_state.get(_ENGINEERING_BG_REFRESH_KEY):
+        return
+    st.session_state[_ENGINEERING_BG_REFRESH_KEY] = True
+    ctx = get_script_run_ctx()
+
+    def _run() -> None:
+        if ctx is not None:
+            add_script_run_ctx(threading.current_thread(), ctx)
+        try:
+            outcome = _engineering_gather_and_shape(max_results, page_size)
+            if outcome.bundle is not None:
+                _write_board_snapshot(outcome.bundle)
+                fingerprint = _board_fingerprint(outcome.bundle.raw_df, JQL, FETCH_SCHEMA_VERSION)
+                try:
+                    now = time.time()
+                    st.session_state[_ENGINEERING_BUNDLE_KEY] = (
+                        fingerprint,
+                        now,
+                        outcome.bundle,
+                    )
+                    st.session_state[_ENGINEERING_DATA_AS_OF_KEY] = now
+                except Exception:  # noqa: BLE001 - the session may be gone by now
+                    logger.exception(
+                        "Could not update the session's board cache after a background refresh"
+                    )
+            else:
+                logger.warning(
+                    "Background board refresh produced no usable board: %s",
+                    outcome.fatal_error,
+                )
+        except Exception:  # noqa: BLE001 - a failed background refresh must surface nowhere
+            logger.exception("Background board refresh failed")
+        finally:
+            try:
+                st.session_state[_ENGINEERING_BG_REFRESH_KEY] = False
+            except Exception:  # noqa: BLE001 - the session may be gone by now
+                pass
+
+    threading.Thread(target=_run, daemon=True, name="board-snapshot-refresh").start()
+
+
+_ENGINEERING_BUNDLE_KEY = "_engineering_bundle_cache"
+# Matches fetch_tickets' own TTL: the session-held bundle should not outlive
+# the reads it was built from by more than the reads themselves would.
+_ENGINEERING_BUNDLE_TTL_SECONDS = 300.0
+# When the data behind the held bundle was actually read - the snapshot's
+# written-at stamp, or the moment a live gather finished. Separate from the
+# timestamp inside _ENGINEERING_BUNDLE_KEY, which times how long *this
+# session* has trusted what it is holding, not how old the data itself is;
+# the caption next to Refresh reads this one.
+_ENGINEERING_DATA_AS_OF_KEY = "_engineering_data_as_of"
+
+
+def _engineering_data() -> "_EngineeringData":
+    """The current bundle: the session's held one if it still matches, a fresh gather otherwise.
+
+    Every one of the six engineering pages calls this on its own navigation,
+    each a separate script rerun. The per-read caches (``fetch_tickets`` and
+    the other fourteen) already make a warm *read* cheap; what still ran on
+    every navigation before this was the orchestration around them - the
+    thread pool that gathers all fifteen together - and the reshape that
+    follows. ``fetch_tickets`` is safe to call speculatively here: it is the
+    exact cache the real read below would hit, so probing it first is not an
+    extra read, and its fingerprint (the Phase 1 key) says whether the board
+    has actually moved since the session last paid for the rest.
+    """
     max_results = MAX_RESULTS
     page_size = JIRA_PAGE_SIZE
 
+    try:
+        probe_df = fetch_tickets(
+            creds_path=CREDS_PATH,
+            profile_name=PROFILE_NAME,
+            jql=JQL,
+            max_results=max_results,
+            page_size=page_size,
+            schema_version=FETCH_SCHEMA_VERSION,
+        )
+    except Exception:  # noqa: BLE001 - the full read below reports this properly
+        probe_df = None
+
+    if probe_df is not None:
+        probe_fingerprint = _board_fingerprint(probe_df, JQL, FETCH_SCHEMA_VERSION)
+        held = st.session_state.get(_ENGINEERING_BUNDLE_KEY)
+        if held is not None:
+            held_fingerprint, held_at, held_bundle = held
+            if held_fingerprint == probe_fingerprint and (
+                time.time() - held_at < _ENGINEERING_BUNDLE_TTL_SECONDS
+            ):
+                return held_bundle
+
+    # A cold session (nothing held yet) reads the on-disk snapshot before
+    # paying for a live gather - a board a few minutes old beats an empty
+    # screen and an eight-second wait. A background thread brings the
+    # session's own cache and the snapshot up to date behind this reader
+    # without making them wait a second time. A missing, stale-beyond-limit
+    # or unreadable snapshot falls back to the live path exactly - the same
+    # path a reader with no snapshot at all has always taken.
+    if st.session_state.get(_ENGINEERING_BUNDLE_KEY) is None:
+        snapshot = _read_board_snapshot()
+        if snapshot is not None:
+            snapshot_bundle, written_at = snapshot
+            snapshot_fingerprint = _board_fingerprint(
+                snapshot_bundle.raw_df, JQL, FETCH_SCHEMA_VERSION
+            )
+            # Held from *now*, not from the snapshot's own age: the TTL above
+            # guards how long this session trusts what it is holding, and the
+            # background refresh below needs the room to finish before that
+            # guard would otherwise force a second, synchronous live gather
+            # on this same session's very next navigation.
+            st.session_state[_ENGINEERING_BUNDLE_KEY] = (
+                snapshot_fingerprint,
+                time.time(),
+                snapshot_bundle,
+            )
+            st.session_state[_ENGINEERING_DATA_AS_OF_KEY] = written_at
+            _start_background_board_refresh(max_results, page_size)
+            return snapshot_bundle
+
+    bundle = _engineering_data_uncached(max_results, page_size)
+    fresh_fingerprint = _board_fingerprint(bundle.raw_df, JQL, FETCH_SCHEMA_VERSION)
+    now = time.time()
+    st.session_state[_ENGINEERING_BUNDLE_KEY] = (fresh_fingerprint, now, bundle)
+    st.session_state[_ENGINEERING_DATA_AS_OF_KEY] = now
+    _write_board_snapshot(bundle)
+    return bundle
+
+
+class _EngineeringReadOutcome(NamedTuple):
+    """What one gather-and-shape pass produced, with no Streamlit calls in it.
+
+    ``fatal_error``/``empty_board`` are messages, not exceptions, precisely so
+    a caller with no page to draw on - the background snapshot refresh - can
+    tell a real failure from a usable board without a ``try`` around
+    ``st.stop()``.
+    """
+
+    bundle: "_EngineeringData | None"
+    fatal_error: str | None
+    empty_board: bool
+    truncated: bool
+
+
+def _engineering_gather_and_shape(
+    max_results: int,
+    page_size: int,
+    *,
+    on_progress: Callable[[float, str], None] | None = None,
+) -> _EngineeringReadOutcome:
+    """The reads and the reshape, free of Streamlit element calls.
+
+    Split out of the page-facing path so the background snapshot refresh (see
+    ``_start_background_board_refresh``) can run the identical gather-and-shape
+    work off the script thread, where a progress bar or ``st.stop()`` would be
+    meaningless at best and unsafe at worst.
+    """
     # GitHub PR data is optional: without a token the PR views degrade to a hint
     # rather than an error, so the Jira dashboard still works standalone.
     github_error = ""
@@ -10518,44 +10899,27 @@ def _engineering_data() -> "_EngineeringData":
     if github_env is not None:
         reads.update(_github_reads(*github_env))
 
-    # A bar rather than a spinner: a cold load is long enough that a reader
-    # deserves to see it moving and roughly how far along it is. The slot stays
-    # empty on a warm page, where the reads answer before the bar is due.
-    loading_slot = st.empty()
-    loading_bar = None
-
-    def _show_progress(fraction: float, label: str) -> None:
-        nonlocal loading_bar
-        if loading_bar is None:
-            loading_bar = loading_slot.progress(fraction, text=label)
-        else:
-            loading_bar.progress(fraction, text=label)
-
-    data, errors = _gather(reads, on_progress=_show_progress)
-    loading_slot.empty()
+    data, errors = _gather(reads, on_progress=on_progress)
 
     if "tickets" in errors:
         failure = errors["tickets"]
-        if isinstance(failure, JiraConfigError):
-            st.error(f"Configuration error: {failure}")
-        else:
-            st.error(f"Failed to fetch Jira issues: {failure}")
-        st.stop()
+        message = (
+            f"Configuration error: {failure}"
+            if isinstance(failure, JiraConfigError)
+            else f"Failed to fetch Jira issues: {failure}"
+        )
+        return _EngineeringReadOutcome(None, message, False, False)
 
     raw_df = _as_frame(data["tickets"])
     if raw_df.empty:
-        st.warning("No tickets returned for the current JQL.")
-        st.stop()
+        return _EngineeringReadOutcome(None, None, True, False)
 
-    if len(raw_df) >= max_results:
-        st.warning(
-            f"Showing the first {max_results} tickets of a larger result set - the JQL "
-            "orders by least recently updated, so newer tickets are missing. Narrow "
-            "JIRA_DASHBOARD_JQL or raise JIRA_MAX_RESULTS."
-        )
+    truncated = len(raw_df) >= max_results
 
-    with _log_stage("shape"):
-        df = add_priority_score(add_ticket_health_fields(raw_df))
+    with _log_stage("changelog:derive_board"):
+        fingerprint = _board_fingerprint(raw_df, JQL, FETCH_SCHEMA_VERSION)
+        derived = _derive_board(raw_df, fingerprint)
+    df = derived.df
 
     # A failed GitHub read leaves the PR sections saying so, rather than
     # reporting an empty org as though nobody had opened a pull request.
@@ -10581,11 +10945,12 @@ def _engineering_data() -> "_EngineeringData":
     statuses = sorted(df["status"].dropna().unique().tolist())
     priorities = sorted(df["priority"].dropna().unique().tolist())
 
-    return _EngineeringData(
+    bundle = _EngineeringData(
         data=data,
         errors=errors,
         raw_df=raw_df,
         df=df,
+        events=derived.events,
         github_ready=github_ready,
         github_error=github_error,
         open_prs=open_prs,
@@ -10599,6 +10964,51 @@ def _engineering_data() -> "_EngineeringData":
         max_results=max_results,
         page_size=page_size,
     )
+    return _EngineeringReadOutcome(bundle, None, False, truncated)
+
+
+def _engineering_data_uncached(max_results: int, page_size: int) -> "_EngineeringData":
+    """Load and shape the engineering reads. Calls st.stop() on a fatal read.
+
+    Always does the full gather and reshape - ``_engineering_data`` is the
+    entry point every page calls, and is what decides whether this runs at
+    all. This is the UI shell around ``_engineering_gather_and_shape``: the
+    progress bar and the error/warning/stop calls that only make sense on the
+    script thread actually serving a reader.
+    """
+    # A bar rather than a spinner: a cold load is long enough that a reader
+    # deserves to see it moving and roughly how far along it is. The slot stays
+    # empty on a warm page, where the reads answer before the bar is due.
+    loading_slot = st.empty()
+    loading_bar = None
+
+    def _show_progress(fraction: float, label: str) -> None:
+        nonlocal loading_bar
+        if loading_bar is None:
+            loading_bar = loading_slot.progress(fraction, text=label)
+        else:
+            loading_bar.progress(fraction, text=label)
+
+    outcome = _engineering_gather_and_shape(max_results, page_size, on_progress=_show_progress)
+    loading_slot.empty()
+
+    if outcome.fatal_error:
+        st.error(outcome.fatal_error)
+        st.stop()
+
+    if outcome.empty_board:
+        st.warning("No tickets returned for the current JQL.")
+        st.stop()
+
+    if outcome.truncated:
+        st.warning(
+            f"Showing the first {max_results} tickets of a larger result set - the JQL "
+            "orders by least recently updated, so newer tickets are missing. Narrow "
+            "JIRA_DASHBOARD_JQL or raise JIRA_MAX_RESULTS."
+        )
+
+    assert outcome.bundle is not None  # every other outcome branch returned above
+    return outcome.bundle
 
 
 @dataclass(frozen=True)
@@ -10807,17 +11217,23 @@ def _render_people_page() -> None:
     _download_report(slot, TAB_ENGINEERING)
 
 
-def _cycle_by_status(df: pd.DataFrame) -> pd.DataFrame:
+def _cycle_by_status(
+    df: pd.DataFrame, events: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """Median days a ticket sits in each status, from real transitions.
 
     This is the chart that reframes the bottleneck: when the slowest statuses
     are review stages, the constraint is attention, not build capacity - and no
     amount of pressure on authors moves it.
+
+    ``events`` behaves as in ``_stalled_rows``: pass the bundle's already-flat
+    changelog to skip a re-parse, or omit it to parse ``df["changelog"]``
+    directly (what direct callers, chiefly tests, still do).
     """
     try:
         with _log_stage("changelog:cycle_by_status"):
-            events = integrity.changelog_events(df)
-            cycle = integrity.cycle_time(events, df)
+            resolved_events = events if events is not None else integrity.changelog_events(df)
+            cycle = integrity.cycle_time(resolved_events, df)
         detail = cycle.detail
     except Exception:  # noqa: BLE001 - an unparseable changelog must not blank the page
         logger.exception("cycle_time failed; the by-status chart is omitted")
@@ -10838,7 +11254,10 @@ def _cycle_by_status(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _stale_with_masked(
-    df: pd.DataFrame, top_n: int = 12, min_status_age: float = TODAY_STALLED_DAYS
+    df: pd.DataFrame,
+    top_n: int = 12,
+    min_status_age: float = TODAY_STALLED_DAYS,
+    events: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """The stale queue with the gaming made visible per row.
 
@@ -10849,12 +11268,16 @@ def _stale_with_masked(
     Only tickets past the clock the stalled tile uses qualify: ranking by status
     age alone lists a healthy board's newest tickets under a heading that says
     abandoned.
+
+    ``events`` behaves as in ``_stalled_rows``: the bundle's already-flat
+    changelog when the caller has one, otherwise parsed from ``df`` itself.
     """
     if df.empty:
         return pd.DataFrame()
     try:
         with _log_stage("changelog:stale_with_masked"):
-            ages = integrity.status_age_days(df, integrity.changelog_events(df))
+            resolved_events = events if events is not None else integrity.changelog_events(df)
+            ages = integrity.status_age_days(df, resolved_events)
     except Exception:  # noqa: BLE001
         logger.exception("status_age_days failed; the stale table is omitted")
         # An unreadable history is not a clean board, and the caller has to be
@@ -10902,8 +11325,8 @@ def _render_delivery_page() -> None:
     # choice belongs in that scope too, or Delivery counts a board Today does not.
     df = _metrics_df(view.filtered, view.include_backlogs)
     data = bundle.data
-    stalled, stalled_clock = _stalled_count(df)
-    cycle = _cycle_by_status(df)
+    stalled, stalled_clock = _stalled_count(df, events=bundle.events)
+    cycle = _cycle_by_status(df, events=bundle.events)
     overall_median = None
     if not cycle.empty:
         in_progress = cycle[cycle["status"].str.lower().eq("in progress")]
@@ -10977,7 +11400,7 @@ def _render_delivery_page() -> None:
                 severity=True,
             )
 
-    stale = _stale_with_masked(df)
+    stale = _stale_with_masked(df, events=bundle.events)
     if stale.attrs.get("stale_unreadable"):
         st.warning(
             "Status history could not be read, so the stale queue is omitted — "
@@ -11204,6 +11627,7 @@ def _render_code_kpis(open_prs: pd.DataFrame, merged_prs: pd.DataFrame) -> None:
     )
 
 
+@st.fragment
 def _render_repo_coverage(open_prs: pd.DataFrame) -> None:
     st.subheader("Review coverage by repo")
     st.caption(
@@ -11263,6 +11687,7 @@ def _share_rank_bar(shares: pd.Series):
     return figure
 
 
+@st.fragment
 def _render_stuck_queue(open_prs: pd.DataFrame, tickets: pd.DataFrame) -> None:
     st.subheader("Stuck queue — open, no approving review, oldest first")
     st.caption(
@@ -11306,6 +11731,7 @@ def _render_stuck_queue(open_prs: pd.DataFrame, tickets: pd.DataFrame) -> None:
     )
 
 
+@st.fragment
 def _render_findings_and_citizenship(merged_prs: pd.DataFrame, open_prs: pd.DataFrame) -> None:
     left, right = st.columns(2)
     judged_pool = pd.concat([merged_prs, open_prs], ignore_index=True) if not merged_prs.empty or not open_prs.empty else pd.DataFrame()
@@ -11898,6 +12324,15 @@ def _clear_page_caches(page_title: str) -> None:
         # With the saved Vivino reads gone, the minutes-long pull must wait
         # for its button again rather than restart on the next screen draw.
         st.session_state.pop("vivino_reads", None)
+    else:
+        # The session-held engineering bundle (Phase 2) would otherwise still
+        # match its old fingerprint and hand back the reads just cleared.
+        st.session_state.pop(_ENGINEERING_BUNDLE_KEY, None)
+        st.session_state.pop(_ENGINEERING_DATA_AS_OF_KEY, None)
+        # Refresh means a genuinely live read, rewritten to disk once it
+        # finishes (_engineering_data does that itself) - not the file this
+        # button was just asked to make stale.
+        _delete_board_snapshot()
     logger.info("Cleared cached reads for the %s page", page_title)
 
 
@@ -11964,6 +12399,24 @@ def _pages() -> list:
     ]
 
 
+def _board_age_caption() -> str | None:
+    """How old the board behind the current page's figures is, or None off the Business page.
+
+    Reads ``_ENGINEERING_DATA_AS_OF_KEY`` - the moment the data was actually
+    read (a snapshot's written-at stamp, or a live gather's completion), not
+    how long this session has merely been trusting it - so a snapshot-served
+    cold start says what it is rather than claiming to be fresh.
+    """
+    as_of = st.session_state.get(_ENGINEERING_DATA_AS_OF_KEY)
+    if as_of is None:
+        return None
+    age_seconds = max(0.0, time.time() - as_of)
+    if age_seconds < 90:
+        return "Board data: just read"
+    minutes = int(age_seconds // 60)
+    return f"Board data: {minutes}m old"
+
+
 def main() -> None:
     # Neutral, because the browser tab is shared by both pages and the shop's
     # figures are not Jira ticket health. Each page says what it is in its own
@@ -11988,16 +12441,37 @@ def main() -> None:
     st.title(PAGE_HEADINGS.get(page.title, "VinoVoss Dashboard"))
     if st.button("Refresh data", icon=":material/refresh:"):
         _clear_page_caches(page.title)
+    # Reserved before the page runs and filled after: the age is not known
+    # until the page's own read has happened, but the caption's *position*
+    # belongs right under the button regardless of how long that read takes.
+    age_slot = st.empty()
 
     # Gathered fresh on every run, because every figure the active page draws
     # is. Only one page runs per rerun, so this resets just its own report.
     _reset_reports()
-    # The page draws exactly as it did before; the recorder only listens, so
-    # that the reader who asks for the board as a file gets the board they are
-    # looking at rather than a second rendering of it.
-    with board.recording(_page_name(page)) as recorded:
+    # Recording costs one call into the snapshot per drawing the page makes -
+    # cheap once, not free at the scale of every reader on every rerun who
+    # never asks for the board. Arming the button sets BOARD_ASKED_KEY on the
+    # rerun the click causes; this run - the very next one - is the first that
+    # needs to listen, and every run after it for as long as a file is held,
+    # so the offer can still tell a stale board from the one on screen. A
+    # reader who never presses the button never pays for any of it.
+    board_wanted = bool(st.session_state.get(BOARD_ASKED_KEY)) or bool(
+        st.session_state.get(BOARD_FILE_KEY)
+    )
+    if board_wanted:
+        # The page draws exactly as it did before; the recorder only listens, so
+        # that the reader who asks for the board as a file gets the board they
+        # are looking at rather than a second rendering of it.
+        with board.recording(_page_name(page)) as recorded:
+            page.run()
+        _deliver_board_snapshot(recorded)
+    else:
         page.run()
-    _deliver_board_snapshot(recorded)
+
+    age_caption = _board_age_caption()
+    if age_caption:
+        age_slot.caption(age_caption)
 
 
 if __name__ == "__main__":

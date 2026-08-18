@@ -168,6 +168,11 @@ class Snapshot:
 
     page: str
     blocks: list[object] = field(default_factory=list)
+    # Set by fingerprint() on first call, cleared by observe(): a fingerprint
+    # walks every table on the board, and a page that asks twice in the same
+    # rerun - once to build the file, once to check the held one is still
+    # current - must not pay for that walk twice over an unchanged recording.
+    _fingerprint_cache: str | None = field(default=None, repr=False, compare=False)
 
     @property
     def empty(self) -> bool:
@@ -182,6 +187,7 @@ class Snapshot:
             return
         if block is not None:
             self.blocks.append(block)
+            self._fingerprint_cache = None
 
     def html(self, *, now: _dt.datetime | None = None) -> str:
         return _page_html(self, now=now)
@@ -199,7 +205,14 @@ class Snapshot:
         as it is printed and no further: the same count of tickets with different
         keys in them is a different board, but a table nobody sees the foot of
         cannot make the file stale by changing there.
+
+        Cached until the next ``observe()``: naming the board means hashing
+        every table and chart on it, and the caller that builds a file and the
+        caller that checks whether a held one is still current both ask for
+        the same, unchanged recording in the same breath.
         """
+        if self._fingerprint_cache is not None:
+            return self._fingerprint_cache
         named = []
         for block in self.blocks:
             if isinstance(block, (Table, SimpleChart)):
@@ -208,7 +221,9 @@ class Snapshot:
                 named.append(_chart_name(block.figure))
             else:
                 named.append(repr(block))
-        return hashlib.sha256("|".join(named).encode("utf-8")).hexdigest()[:16]
+        computed = hashlib.sha256("|".join(named).encode("utf-8")).hexdigest()[:16]
+        self._fingerprint_cache = computed
+        return computed
 
     def filename(self, suffix: str, *, now: _dt.datetime | None = None) -> str:
         stamp = (now or _dt.datetime.now(_dt.timezone.utc)).strftime("%Y-%m-%d")
