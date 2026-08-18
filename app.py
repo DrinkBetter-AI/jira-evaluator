@@ -9859,16 +9859,25 @@ def _ownerless(df: pd.DataFrame) -> int:
     return int(len(_ownerless_rows(df)))
 
 
-def _stalled_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+def _stalled_rows(
+    df: pd.DataFrame, events: pd.DataFrame | None = None
+) -> tuple[pd.DataFrame, str]:
     """The open tickets that have not *moved* in TODAY_STALLED_DAYS, and the clock.
 
     A fallback to edit age has to say so - it is the gameable one.
+
+    ``events`` is the board's changelog already flattened by the derivation
+    layer (``_engineering_data`` hands it the current bundle's events) - when
+    it is given, no changelog is re-parsed here at all. Callers that still
+    pass a raw ``df`` carrying its own ``changelog`` column (direct tests,
+    chiefly) get the old behaviour: it is parsed from ``df`` itself.
     """
     if df.empty:
         return df.iloc[0:0], "status age"
     try:
         with _log_stage("changelog:stalled_rows"):
-            ages = integrity.status_age_days(df, integrity.changelog_events(df))
+            resolved_events = events if events is not None else integrity.changelog_events(df)
+            ages = integrity.status_age_days(df, resolved_events)
         column = ages["status_age_days"]
         if not column.dropna().empty:
             # By position, not by label: status_age_days hands back a fresh
@@ -9889,9 +9898,11 @@ def _stalled_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
     return rows, "edit age (no changelog)"
 
 
-def _stalled_count(df: pd.DataFrame) -> tuple[int, str]:
+def _stalled_count(
+    df: pd.DataFrame, events: pd.DataFrame | None = None
+) -> tuple[int, str]:
     """How many open tickets have not *moved* in TODAY_STALLED_DAYS."""
-    rows, clock = _stalled_rows(df)
+    rows, clock = _stalled_rows(df, events)
     return int(len(rows)), clock
 
 
@@ -10042,7 +10053,7 @@ def _action_queues(
     # stalled rows walks every ticket's changelog, and the tile needs the same
     # rows, so computing them here again doubled the cost of drawing the page.
     if stalled is None:
-        stalled, _ = _stalled_rows(board)
+        stalled, _ = _stalled_rows(board, events=getattr(bundle, "events", None))
     # The triage read is the raw Jira frame - it has never been through
     # add_ticket_health_fields, so it carries a created date and no age. Enriched
     # here rather than defaulted to zero, because "0d in triage" about a ticket
@@ -10205,7 +10216,7 @@ def _render_today_page() -> None:
     )
 
     st.divider()
-    stalled_rows, stalled_clock = _stalled_rows(df)
+    stalled_rows, stalled_clock = _stalled_rows(df, events=bundle.events)
     queues, unreadable = _action_queues(bundle, df, stalled=stalled_rows)
     _render_next_actions(queues, unknown=unreadable)
 
@@ -10273,6 +10284,66 @@ def _render_today_page() -> None:
         )
 
 
+def _board_fingerprint(raw_df: pd.DataFrame, jql: str, schema_version: int) -> tuple:
+    """A cheap identity for a ticket read - not a hash of its rows.
+
+    Hashing the full frame (nested changelog dicts and all) to decide whether
+    the derived board is still fresh would cost what the derivation itself
+    costs. Row count plus the newest ``updated`` timestamp changes whenever
+    the read does - a ticket added, removed or touched - without walking a
+    single changelog to find out.
+    """
+    if raw_df is None or raw_df.empty or "updated" not in raw_df.columns:
+        max_updated = ""
+    else:
+        max_updated = str(
+            pd.to_datetime(raw_df["updated"], utc=True, errors="coerce").max()
+        )
+    return (0 if raw_df is None else len(raw_df), max_updated, jql, schema_version)
+
+
+@dataclass(frozen=True)
+class _BoardDerivation:
+    """The board, shaped once: the reshaped frame and its flattened changelog.
+
+    ``df`` never carries the ``changelog`` column - that is the one field on
+    this board expensive enough that copying it into every page's frame would
+    be the derivation's whole cost. Anything that genuinely needs raw history
+    asks ``events`` instead, which is parsed once here rather than once per
+    caller.
+    """
+
+    df: pd.DataFrame
+    events: pd.DataFrame
+
+
+@st.cache_data(
+    ttl=300,
+    show_spinner=False,
+    max_entries=4,
+    # ``raw_df`` is hashed to a constant on purpose: the fingerprint argument
+    # is the real cache key (row count, latest ``updated``, JQL, schema
+    # version - see ``_board_fingerprint``), so a cache hit never walks or
+    # re-serialises the frame's nested changelog dicts just to decide whether
+    # it already has the answer.
+    hash_funcs={pd.DataFrame: lambda _df: None},
+)
+def _derive_board(raw_df: pd.DataFrame, fingerprint: tuple) -> _BoardDerivation:
+    """Shape the raw ticket read once: health fields, priority score, changelog events.
+
+    Everything downstream that used to reparse ``df["changelog"]`` on every
+    call - ``_stalled_rows``, ``_cycle_by_status``, ``_stale_with_masked`` -
+    now reads ``events`` from here instead, computed exactly once per board
+    read regardless of how many pages or reruns ask for it.
+    """
+    _ = fingerprint  # part of the cache key only; the real work reads raw_df
+    events = integrity.changelog_events(raw_df)
+    shaped = add_priority_score(add_ticket_health_fields(raw_df))
+    if "changelog" in shaped.columns:
+        shaped = shaped.drop(columns=["changelog"])
+    return _BoardDerivation(df=shaped, events=events)
+
+
 @dataclass(frozen=True)
 class _EngineeringData:
     """Everything one engineering page draw needs, read exactly once.
@@ -10286,6 +10357,7 @@ class _EngineeringData:
     errors: Any
     raw_df: Any
     df: Any
+    events: Any
     github_ready: Any
     github_error: Any
     open_prs: Any
@@ -10357,7 +10429,10 @@ def _engineering_data() -> "_EngineeringData":
             "JIRA_DASHBOARD_JQL or raise JIRA_MAX_RESULTS."
         )
 
-    df = add_priority_score(add_ticket_health_fields(raw_df))
+    with _log_stage("changelog:derive_board"):
+        fingerprint = _board_fingerprint(raw_df, JQL, FETCH_SCHEMA_VERSION)
+        derived = _derive_board(raw_df, fingerprint)
+    df = derived.df
 
     # A failed GitHub read leaves the PR sections saying so, rather than
     # reporting an empty org as though nobody had opened a pull request.
@@ -10388,6 +10463,7 @@ def _engineering_data() -> "_EngineeringData":
         errors=errors,
         raw_df=raw_df,
         df=df,
+        events=derived.events,
         github_ready=github_ready,
         github_error=github_error,
         open_prs=open_prs,
@@ -10609,17 +10685,23 @@ def _render_people_page() -> None:
     _download_report(slot, TAB_ENGINEERING)
 
 
-def _cycle_by_status(df: pd.DataFrame) -> pd.DataFrame:
+def _cycle_by_status(
+    df: pd.DataFrame, events: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """Median days a ticket sits in each status, from real transitions.
 
     This is the chart that reframes the bottleneck: when the slowest statuses
     are review stages, the constraint is attention, not build capacity - and no
     amount of pressure on authors moves it.
+
+    ``events`` behaves as in ``_stalled_rows``: pass the bundle's already-flat
+    changelog to skip a re-parse, or omit it to parse ``df["changelog"]``
+    directly (what direct callers, chiefly tests, still do).
     """
     try:
         with _log_stage("changelog:cycle_by_status"):
-            events = integrity.changelog_events(df)
-            cycle = integrity.cycle_time(events, df)
+            resolved_events = events if events is not None else integrity.changelog_events(df)
+            cycle = integrity.cycle_time(resolved_events, df)
         detail = cycle.detail
     except Exception:  # noqa: BLE001 - an unparseable changelog must not blank the page
         logger.exception("cycle_time failed; the by-status chart is omitted")
@@ -10640,7 +10722,10 @@ def _cycle_by_status(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _stale_with_masked(
-    df: pd.DataFrame, top_n: int = 12, min_status_age: float = TODAY_STALLED_DAYS
+    df: pd.DataFrame,
+    top_n: int = 12,
+    min_status_age: float = TODAY_STALLED_DAYS,
+    events: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """The stale queue with the gaming made visible per row.
 
@@ -10651,12 +10736,16 @@ def _stale_with_masked(
     Only tickets past the clock the stalled tile uses qualify: ranking by status
     age alone lists a healthy board's newest tickets under a heading that says
     abandoned.
+
+    ``events`` behaves as in ``_stalled_rows``: the bundle's already-flat
+    changelog when the caller has one, otherwise parsed from ``df`` itself.
     """
     if df.empty:
         return pd.DataFrame()
     try:
         with _log_stage("changelog:stale_with_masked"):
-            ages = integrity.status_age_days(df, integrity.changelog_events(df))
+            resolved_events = events if events is not None else integrity.changelog_events(df)
+            ages = integrity.status_age_days(df, resolved_events)
     except Exception:  # noqa: BLE001
         logger.exception("status_age_days failed; the stale table is omitted")
         # An unreadable history is not a clean board, and the caller has to be
@@ -10704,8 +10793,8 @@ def _render_delivery_page() -> None:
     # choice belongs in that scope too, or Delivery counts a board Today does not.
     df = _metrics_df(view.filtered, view.include_backlogs)
     data = bundle.data
-    stalled, stalled_clock = _stalled_count(df)
-    cycle = _cycle_by_status(df)
+    stalled, stalled_clock = _stalled_count(df, events=bundle.events)
+    cycle = _cycle_by_status(df, events=bundle.events)
     overall_median = None
     if not cycle.empty:
         in_progress = cycle[cycle["status"].str.lower().eq("in progress")]
@@ -10779,7 +10868,7 @@ def _render_delivery_page() -> None:
                 severity=True,
             )
 
-    stale = _stale_with_masked(df)
+    stale = _stale_with_masked(df, events=bundle.events)
     if stale.attrs.get("stale_unreadable"):
         st.warning(
             "Status history could not be read, so the stale queue is omitted — "
