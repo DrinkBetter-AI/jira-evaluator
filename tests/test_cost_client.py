@@ -516,12 +516,17 @@ def test_cloud_costs_reads_twice_the_window_ending_where_it_is_told():
     client = _FakeBigQuery(["x"], frame=frame)
     read = cc.cloud_costs(client, "p.d.t", 7, now=dt.date(2026, 7, 2))
     assert list(read["line_item"]) == ["Cloud Run"]
-    first, last = (p.value for p in client.params[0])
+    params = {p.name: p.value for p in client.params[0]}
     # Fourteen days inclusive, ending on the day asked for rather than today.
-    assert last == dt.date(2026, 7, 2)
-    assert first == dt.date(2026, 6, 19)
+    assert params["last"] == dt.date(2026, 7, 2)
+    assert params["first"] == dt.date(2026, 6, 19)
     # Credits are netted against the charge they belong to, in the query.
     assert "credits" in client.sql[0]
+    # The export is partitioned on ingestion time, not usage_start_time: the
+    # usage-day filter alone prunes nothing, so the query also bounds
+    # _PARTITIONTIME, trailing the usage window to catch late corrections.
+    assert "_PARTITIONTIME" in client.sql[0]
+    assert params["partition_last"].date() > params["last"]
 
 
 def test_a_day_whose_credits_cancel_it_is_not_a_line_on_the_bill():
@@ -536,9 +541,11 @@ def test_a_day_whose_credits_cancel_it_is_not_a_line_on_the_bill():
     assert list(read["line_item"]) == ["Cloud Run"]
 
 
-def test_the_export_reports_both_ends_of_what_it_covers():
+def test_the_export_reports_both_ends_of_what_it_covers(tmp_path):
     rows = [{"first": dt.date(2026, 6, 1), "last": dt.date(2026, 7, 2)}]
-    first, last = cc.billing_coverage(_FakeBigQuery(["x"], rows=rows), "p.d.t")
+    first, last = cc.billing_coverage(
+        _FakeBigQuery(["x"], rows=rows), "p.d.t", cache_dir=tmp_path
+    )
     assert (first, last) == (dt.date(2026, 6, 1), dt.date(2026, 7, 2))
 
 
@@ -673,7 +680,9 @@ def test_a_cloud_service_with_cache_in_its_name_is_not_context_sent_again():
     assert any("cached context" in line for line in tokens), tokens
 
 
-def test_coverage_ignores_the_rounding_rows_dated_at_the_billing_period_start():
+def test_coverage_ignores_the_rounding_rows_dated_at_the_billing_period_start(
+    tmp_path,
+):
     """The live export's MIN is 1 June and its usage starts on the 28th."""
     captured = {}
 
@@ -682,7 +691,7 @@ def test_coverage_ignores_the_rounding_rows_dated_at_the_billing_period_start():
             captured["sql"] = sql
             return _FakeJob([{"first": dt.date(2026, 6, 28), "last": dt.date(2026, 7, 2)}])
 
-    first, last = cc.billing_coverage(Coverage([]), "p.d.t")
+    first, last = cc.billing_coverage(Coverage([]), "p.d.t", cache_dir=tmp_path)
     assert (first, last) == (dt.date(2026, 6, 28), dt.date(2026, 7, 2))
     # A day is only history where it holds a charge worth a cent.
     assert "HAVING ABS(SUM(cost)) >= 0.01" in captured["sql"], captured["sql"]
@@ -749,7 +758,7 @@ def test_whether_a_capped_read_reaches_past_the_window_it_is_asked_about():
     assert not cc.reaches_past(entries.iloc[:0], 7, now=dt.date(2026, 7, 2))
 
 
-def test_the_window_never_ends_on_a_day_the_export_is_still_writing():
+def test_the_window_never_ends_on_a_day_the_export_is_still_writing(tmp_path):
     """Hours of today's charges are not a day, and would read as a cheap one."""
 
     class Reached(_FakeBigQuery):
@@ -758,16 +767,23 @@ def test_the_window_never_ends_on_a_day_the_export_is_still_writing():
                 [{"first": dt.date(2026, 6, 1), "last": dt.date(2026, 7, 2)}]
             )
 
-    first, last = cc.billing_coverage(Reached([]), "p.d.t", now=dt.date(2026, 7, 2))
+    first, last = cc.billing_coverage(
+        Reached([]), "p.d.t", now=dt.date(2026, 7, 2), cache_dir=tmp_path / "reached"
+    )
     assert (first, last) == (dt.date(2026, 6, 1), dt.date(2026, 7, 1))
-    # An export whose only day is today has no whole day in it yet.
+    # An export whose only day is today has no whole day in it yet. A
+    # different table, and so a different cache entry, since a table this
+    # fresh - and one whose coverage has reached yesterday - cannot truly
+    # coexist on the same day in one deployment.
     class Fresh(_FakeBigQuery):
         def query(self, sql, job_config=None):
             return _FakeJob(
                 [{"first": dt.date(2026, 7, 2), "last": dt.date(2026, 7, 2)}]
             )
 
-    assert cc.billing_coverage(Fresh([]), "p.d.t", now=dt.date(2026, 7, 2)) == (
+    assert cc.billing_coverage(
+        Fresh([]), "p.d.t", now=dt.date(2026, 7, 2), cache_dir=tmp_path / "fresh"
+    ) == (
         None,
         None,
     )

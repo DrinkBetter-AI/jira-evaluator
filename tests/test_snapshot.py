@@ -193,6 +193,45 @@ def test_a_table_of_other_tickets_the_same_size_is_a_different_board():
     assert drawn(["MB-1", "MB-2"]).fingerprint() != drawn(["MB-2", "MB-1"]).fingerprint()
 
 
+def test_a_second_call_to_fingerprint_does_not_rehash_an_unchanged_recording(monkeypatch):
+    """One recording asked for twice in a breath - built, then checked against
+    what is held - must walk its tables once, not twice."""
+    frame = pd.DataFrame({"key": ["MB-1", "MB-2"], "idle_days": [3, 40]})
+    recorded = board(
+        ("metric", ("Open tickets", 13), {}),
+        ("dataframe", (frame,), {"hide_index": True}),
+    )
+
+    calls = []
+    original_sha256 = snapshot.hashlib.sha256
+
+    def counting_sha256(*args, **kwargs):
+        calls.append(1)
+        return original_sha256(*args, **kwargs)
+
+    monkeypatch.setattr(snapshot.hashlib, "sha256", counting_sha256)
+
+    first = recorded.fingerprint()
+    second = recorded.fingerprint()
+
+    assert first == second
+    # sha256 is also used per-cell inside _frame_name; what matters is that the
+    # *second* fingerprint() call added no further calls to it at all.
+    after_first = len(calls)
+    recorded.fingerprint()
+    assert len(calls) == after_first
+
+
+def test_a_new_call_to_observe_drops_the_cached_fingerprint():
+    """The cache is only good for an unchanged recording - a page still being
+    drawn must not be named by what it looked like one drawing call ago."""
+    recorded = board(("metric", ("Open tickets", 13), {}))
+    before = recorded.fingerprint()
+    recorded.observe("metric", ("Open tickets", 41), {})
+    after = recorded.fingerprint()
+    assert before != after
+
+
 def test_a_column_called_data_is_not_mistaken_for_a_styled_table():
     frame = pd.DataFrame({"data": ["BigQuery"], "cost": ["$40"]})
     page = board(("dataframe", (frame,), {"hide_index": True})).html(now=WHEN)
@@ -477,3 +516,45 @@ def test_a_chart_whose_middle_moved_is_a_different_board():
 
     # Same first and last point, a different week underneath.
     assert drawn([1, 2, 3, 4, 5]).fingerprint() != drawn([1, 9, 9, 9, 5]).fingerprint()
+
+
+def test_no_file_held_and_nothing_asked_never_fingerprints_the_recording(monkeypatch):
+    """The point of Phase 5: an ordinary reader who never pressed "Whole board
+    as PDF" must not pay for naming a board nobody asked to keep.
+
+    ``app._deliver_board_snapshot`` is where "held" lives - snapshot.py itself
+    has no notion of it - so this one test reaches into app.py rather than
+    staying offline like the rest of the file above it.
+    """
+    import app  # sys.path already carries the repo root, set at module import above
+
+    calls = []
+    original = snapshot.Snapshot.fingerprint
+
+    def counting_fingerprint(self):
+        calls.append(1)
+        return original(self)
+
+    monkeypatch.setattr(snapshot.Snapshot, "fingerprint", counting_fingerprint)
+    # An ordinary rerun: the button was never pressed (nothing asked) and no
+    # file from an earlier ask is being kept (nothing held).
+    app.st.session_state.pop(app.BOARD_ASKED_KEY, None)
+    app.st.session_state.pop(app.BOARD_FILE_KEY, None)
+    app.st.session_state[app.BOARD_SLOT_KEY] = (_NoDownload(), "Today")
+
+    recorded = board(("metric", ("Open tickets", 13), {}))
+    app._deliver_board_snapshot(recorded)
+
+    assert calls == []
+
+
+class _NoDownload:
+    """A slot that fails the test if anything tries to draw a download button.
+
+    Nothing should be offered here: nothing was asked for and nothing is
+    held, so ``_deliver_board_snapshot`` ought to return immediately after
+    popping the registration - well before it would reach for a fingerprint.
+    """
+
+    def download_button(self, *args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("no file is held; nothing should be offered")

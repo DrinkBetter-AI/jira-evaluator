@@ -39,6 +39,7 @@ import pandas as pd
 sys.path.insert(0, os.environ["DASHBOARD_REPO"])
 
 import app as dashboard
+import pages.business as business
 import merchant_client
 
 MODE = os.getenv("BENCHMARK_MODE", "live")
@@ -111,24 +112,24 @@ ADS = pd.DataFrame(
 ).assign(ad_conversions=0.0)
 
 if MODE == "noads":
-    dashboard._ad_products = lambda days: dashboard._no_ad_products()
+    business._ad_products = lambda days: dashboard._no_ad_products()
 elif MODE == "adsquiet":
     # Configured, read, and nothing spent: a different emptiness from the above,
     # and telling this reader to set environment variables would be a lie.
-    dashboard._ad_products = lambda days: dashboard.AdProducts(ADS.iloc[0:0], "USD", [])
+    business._ad_products = lambda days: dashboard.AdProducts(ADS.iloc[0:0], "USD", [])
 elif MODE in ("adsblind", "adsbadconfig"):
     # Configured, but the report itself could not be read: what each wine cost
     # is unknown rather than nil, and neither of the other two captions is true.
     # A rejected setting fails the read the same way, which is why it is a mode
     # of its own: the reader is meant to be sent to the setting, not to BigQuery.
-    dashboard._ad_products = lambda days: dashboard._no_ad_products(read=False)
+    business._ad_products = lambda days: dashboard._no_ad_products(read=False)
 elif MODE == "adspartial":
     # Configured and spending, but the Shopping product table only reached back a
     # week: the same spend against a whole quarter of orders, which the tab has
     # to say rather than let the return be read as a quarter's. And one account
     # of two could not be read at all, so the total is short by its spend - said
     # rather than left to look like the whole dataset.
-    dashboard._ad_products = lambda days: dashboard.AdProducts(
+    business._ad_products = lambda days: dashboard.AdProducts(
         ADS,
         "USD",
         [],
@@ -138,11 +139,11 @@ elif MODE == "adspartial":
 elif MODE == "adseur":
     # An account billed in euros beside a dollar one: the euro accounts are the
     # majority here, so the dollar one is the one set aside.
-    dashboard._ad_products = lambda days: dashboard.AdProducts(ADS, "EUR", ["USD"])
+    business._ad_products = lambda days: dashboard.AdProducts(ADS, "EUR", ["USD"])
 else:
-    dashboard._ad_products = lambda days: dashboard.AdProducts(ADS, "USD", [])
+    business._ad_products = lambda days: dashboard.AdProducts(ADS, "USD", [])
 
-dashboard._ads_configured = lambda: MODE not in ("noads", "adsbadconfig")
+business._ads_configured = lambda: MODE not in ("noads", "adsbadconfig")
 
 if MODE == "vivino":
     # The merchant is one with a Vivino shop on record, and the comparison
@@ -160,7 +161,7 @@ if MODE == "vivino":
         [{"wine": "Atalon Cabernet Sauvignon", "year": 2019,
           "ours": 84.99, "theirs": 44.99, "gap": (44.99 - 84.99) / 84.99}]
     )
-    dashboard._vivino_comparison_cached = (
+    business._vivino_comparison_cached = (
         lambda source, merchant, slug: vivino_client.Comparison(
             rows=_theirs, listed=400, complete=False, unmatched_ours=3,
             ours_counted=4
@@ -182,10 +183,10 @@ if MODE in (
     dashboard.orders_client.load_medusa_env = lambda: dashboard.orders_client.DbConfig(
         "host", "db", "user", "secret", 5432
     )
-    dashboard._offer_sales_cached = lambda source, days, today: (
+    business._offer_sales_cached = lambda source, days, today: (
         SOLD.iloc[0:0] if MODE == "nomatch" else SOLD
     )
-    dashboard._offer_merchants_cached = lambda source, offers: {
+    business._offer_merchants_cached = lambda source, offers: {
         offer: LISTED[offer] for offer in offers if offer in LISTED
     }
 else:
@@ -224,44 +225,44 @@ else:
                 "as a user of the account under Settings, People and access."
             )
 
-        dashboard._price_benchmark_cached = _refused
+        business._price_benchmark_cached = _refused
     elif MODE == "broken":
         def _broken(account, country):
             raise RuntimeError("503 Service Unavailable")
 
-        dashboard._price_benchmark_cached = _broken
+        business._price_benchmark_cached = _broken
     elif MODE == "empty":
-        dashboard._price_benchmark_cached = lambda account, country: dashboard.BenchmarkRead(
+        business._price_benchmark_cached = lambda account, country: dashboard.BenchmarkRead(
             merchant_client.Prices(offers([]), "", ()),
             merchant_client.Insights(pd.DataFrame()),
             NO_CLICKS,
         )
     elif MODE == "capped":
-        dashboard._price_benchmark_cached = lambda account, country: dashboard.BenchmarkRead(
+        business._price_benchmark_cached = lambda account, country: dashboard.BenchmarkRead(
             merchant_client.Prices(DEAR, "USD", (), True),
             merchant_client.Insights(pd.DataFrame()),
             NO_CLICKS,
         )
     elif MODE == "blind":
-        dashboard._price_benchmark_cached = lambda account, country: dashboard.BenchmarkRead(
+        business._price_benchmark_cached = lambda account, country: dashboard.BenchmarkRead(
             merchant_client.Prices(DEAR, "USD", ()),
             merchant_client.Insights(SUGGESTED),
             NO_CLICKS,
         )
     elif MODE == "unread":
-        dashboard._price_benchmark_cached = lambda account, country: dashboard.BenchmarkRead(
+        business._price_benchmark_cached = lambda account, country: dashboard.BenchmarkRead(
             merchant_client.Prices(DEAR, "USD", ()),
             merchant_client.Insights(SUGGESTED),
             merchant_client.Demand(pd.DataFrame(), read=False),
         )
     elif MODE == "eur":
-        dashboard._price_benchmark_cached = lambda account, country: dashboard.BenchmarkRead(
+        business._price_benchmark_cached = lambda account, country: dashboard.BenchmarkRead(
             merchant_client.Prices(DEAR, "USD", ("EUR",)),
             merchant_client.Insights(pd.DataFrame()),
             NO_CLICKS,
         )
     else:
-        dashboard._price_benchmark_cached = lambda account, country: dashboard.BenchmarkRead(
+        business._price_benchmark_cached = lambda account, country: dashboard.BenchmarkRead(
             merchant_client.Prices(DEAR, "USD", ()),
             merchant_client.Insights(SUGGESTED),
             merchant_client.Demand(CLICKS),

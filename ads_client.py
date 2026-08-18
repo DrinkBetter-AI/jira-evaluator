@@ -40,6 +40,8 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+import read_log
+
 _DATASET_ENV_VAR = "GOOGLE_ADS_BQ_DATASET"
 _PROJECT_ENV_VAR = "GOOGLE_ADS_BQ_PROJECT"
 _CUSTOMER_ENV_VAR = "GOOGLE_ADS_CUSTOMER_ID"
@@ -315,7 +317,9 @@ def account(client, config: AdsConfig, customer_id: str) -> tuple[str, str]:
         ORDER BY _DATA_DATE DESC
         LIMIT 1
     """
-    rows = list(client.query(sql).result())
+    job = client.query(sql)
+    rows = list(job.result())
+    read_log.bill_bytes(getattr(job, "total_bytes_billed", None))
     if not rows:
         return "", "USD"
     return str(rows[0]["name"] or ""), str(rows[0]["currency"] or "USD")
@@ -462,7 +466,10 @@ def _run(client, sql: str, **params) -> pd.DataFrame:
             for name, value in params.items()
         ]
     )
-    return client.query(sql, job_config=job_config).result().to_dataframe()
+    job = client.query(sql, job_config=job_config)
+    result = job.result()
+    read_log.bill_bytes(getattr(job, "total_bytes_billed", None))
+    return result.to_dataframe()
 
 
 def window_first_day(days: int, now: _dt.date | None = None) -> _dt.date:
@@ -474,6 +481,16 @@ def window_first_day(days: int, now: _dt.date | None = None) -> _dt.date:
     return last - _dt.timedelta(days=days - 1)
 
 
+# The longest lookback any caller of ``loaded_from`` ever compares its answer
+# against: the per-wine product tab reads ``merchant_client.SALES_DAYS`` (90)
+# days of the Shopping product table, three times what the campaign-level
+# ``LOOKBACK_WINDOWS`` (max 30) ever asks of the campaign table. Every caller
+# only ever asks "does history reach back as far as my window", so a table
+# whose real history goes back further than this floor is indistinguishable,
+# to any of them, from one that goes back exactly to it.
+_LOADED_FROM_FLOOR_DAYS = 90
+
+
 def loaded_from(
     client,
     config: AdsConfig,
@@ -481,30 +498,42 @@ def loaded_from(
     now: _dt.date | None = None,
     table: str = _STATS_TABLE,
 ) -> _dt.date | None:
-    """The earliest day the transfer has loaded, over the whole table.
+    """The earliest day the transfer has loaded, no earlier than any caller asks.
 
-    Asked separately, and unbounded by any window, because it is the only honest
-    way to tell "these days have not arrived" from "nothing ran on these days":
-    the stats table has no row for a day with no activity, so the earliest row
+    Asked separately from any one window, because it is the only honest way to
+    tell "these days have not arrived" from "nothing ran on these days": the
+    stats table has no row for a day with no activity, so the earliest row
     *within* a window says nothing about whether the window is loaded. Reads one
-    column of a partitioned table, so it is the cheapest query here.
+    column of a partitioned table, floored to ``_LOADED_FROM_FLOOR_DAYS`` back so
+    it prunes the rest of the partitions rather than reading every one a
+    transfer has ever written.
 
     ``table`` because the transfer carries each report separately: the Shopping
     product table is routinely added months after the campaign one, and its own
     history is the only thing that says how much of a per-wine window is real.
     """
+    today = now or _dt.date.today()
+    floor = today - _dt.timedelta(days=_LOADED_FROM_FLOOR_DAYS)
     sql = f"""
         SELECT MIN(segments_date) AS first_day
         FROM {_table(config, table, customer_id)}
+        WHERE segments_date >= @floor
     """
-    rows = list(client.query(sql).result())
+    from google.cloud import bigquery  # noqa: PLC0415 - optional dependency
+
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("floor", "DATE", floor)]
+    )
+    job = client.query(sql, job_config=job_config)
+    rows = list(job.result())
+    read_log.bill_bytes(getattr(job, "total_bytes_billed", None))
     if not rows or rows[0]["first_day"] is None:
         return None
     first = rows[0]["first_day"]
     day = first.date() if isinstance(first, _dt.datetime) else first
     # A transfer part-way through a backfill can hold a day beyond the window;
     # today is never a complete day, so it is not treated as history either.
-    return min(day, (now or _dt.date.today()) - _dt.timedelta(days=1))
+    return min(day, today - _dt.timedelta(days=1))
 
 
 def window(
