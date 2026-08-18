@@ -479,14 +479,23 @@ credentials are sufficient and are the only ones that should be used.
   in the selected sprint, or that grid is never tested.
 - **A statistical threshold needs a deliberate trap in the data.** Cycle-time-by-status hides any
   status with fewer than five closed intervals, so a board where every status clears the bar proves
-  nothing. The harness needs two dataset variants, built the same way the others are: `cycle`, where
-  every ticket carries a real changelog walking To Do -> In Progress -> Code Review -> Review in
-  Staging, plus three tickets whose only status is `Blocked` with the longest medians - the slowest
-  status by median is then the one with `n=3`, and it must be absent from the chart. `badcl` puts a
-  non-changelog object in the `changelog` column so that `integrity.changelog_events` raises, which
-  is how the degradation path - fallback clocks, omitted
-  charts, and whether an empty table is reported as a clean board or as an unreadable one - gets
-  tested at all.
+  nothing. Build the trap dataset out of tree: give every ticket a real changelog walking
+  To Do -> In Progress -> Code Review -> Review in Staging, then add three tickets that enter
+  `Blocked` *and leave it again* after the longest wait of any status. The closing transition is the
+  point - `_cycle_by_status` drops open intervals before it applies the cut, so a ticket parked in
+  `Blocked` forever is excluded for being open and proves nothing about the threshold. Done right,
+  `Blocked` is the slowest status by median with `n=3`, and its absence from the chart is the cut
+  working.
+- **A malformed changelog does not raise; it reads as no changelog.** `integrity._histories_of`
+  returns `[]` for anything that is not a list or dict, so a stray object in the `changelog` column
+  reaches the page through the *empty* branch ("Not enough closed status intervals to draw cycle time
+  yet."), not the `except` branch. The two look identical on screen and are different bugs: an empty
+  board is honest, an unreadable one must not be reported as clean. To reach the `except` branch the
+  value has to raise while it is read (a mapping whose `get` throws), or the reader itself has to be
+  patched in the harness (`app.integrity.status_age_days` / `app.integrity.changelog_events` replaced
+  with something that raises). Confirm which branch you are in from
+  the Streamlit log: only the `except` paths write `logger.exception` lines
+  ("status_age_days failed; the stale table is omitted").
 - **Hard-reload the tab after restarting an instance.** A tab left open across a restart renders
   numbers from the previous process, which produced a phantom Delivery-vs-Today mismatch (16/6
   against 14/4) that vanished on a clean load. Never report a count read from a tab that outlived
