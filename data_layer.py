@@ -151,7 +151,12 @@ SCOPE_ORG = "Organization"
 SCOPE_TEAM = "Team"
 SCOPE_INDIVIDUAL = "Individual"
 
-FETCH_SCHEMA_VERSION = 8
+# Bumped for 2A: fetch_resolved_tickets now requests expand="changelog" so
+# credited_resolvers can attribute resolutions to the changelog author instead
+# of the current assignee. A stale cache entry from before this change carries
+# no changelog column at all, so the version bump forces a fresh read rather
+# than crediting nothing out of an old, changelog-less cache hit.
+FETCH_SCHEMA_VERSION = 9
 # Ceiling on tickets fetched per run; org-wide JQL can exceed the old fixed 1000.
 MAX_RESULTS = _positive_int(os.getenv("JIRA_MAX_RESULTS"), default=1000)
 # Tickets per Jira page. Each page is a round trip, and at 100 the open-ticket
@@ -238,6 +243,8 @@ def fetch_tickets(
 # seventeen default fields - including every ticket's full description - meant
 # fetching megabytes to draw a pie chart of names.
 LIST_FIELDS = ("summary", "status", "priority", "assignee", "created")
+# ``assignee`` here is the current assignee, kept for comparison against the
+# credited resolver - see ``credited_resolvers`` - not the credit itself.
 RESOLVED_FIELDS = ("assignee",)
 
 
@@ -505,6 +512,13 @@ def fetch_resolved_tickets(
     ``CHANGED TO ... AFTER`` matches a ticket that entered any resolved status in
     the window even if it later moved on. Used for the per-person pie; the
     headline tiles use :func:`fetch_resolved_count` so they never cap.
+
+    Carries the changelog (``expand="changelog"``) so :func:`credited_resolvers`
+    can attribute each resolution to the changelog author of the resolving
+    transition instead of ``assignee`` - the current assignee, which is what
+    this frame's ``assignee`` column has always been and remains, kept for
+    comparison rather than as the credit itself. See ``credited_resolvers`` for
+    why that distinction is the whole point.
     """
     read_log.mark_executed()
     _ = schema_version
@@ -516,6 +530,57 @@ def fetch_resolved_tickets(
         fields=list(RESOLVED_FIELDS),
         max_results=max_results,
         page_size=page_size,
+        expand="changelog",
+    )
+
+
+def credited_resolvers(
+    resolved_tickets: pd.DataFrame,
+    *,
+    window_days: float | None = None,
+    now: object | None = None,
+    resolved_statuses: tuple[str, ...] | None = None,
+) -> "integrity.CreditedResolutions":
+    """The credit-attribution join: who resolved these tickets, per the changelog.
+
+    ``fetch_resolved_tickets`` (above) has only ever carried the current
+    ``assignee`` - not who did the work, just who holds the ticket at read time.
+    A ticket resolved by one person and later reassigned credits the new
+    assignee for a resolution they may never have touched; a ticket still
+    assigned to someone who has since left the company credits them for
+    resolutions performed entirely by whoever picks up their old tickets. That
+    is exploit #4 in ``KPI_SPEC.md`` - "Sai Shankar, 194 resolved in 30d, second
+    highest in the company" for a person no longer on the roster.
+
+    This is a thin join, not a new computation: it flattens
+    ``resolved_tickets["changelog"]`` with :func:`integrity.changelog_events` and
+    hands the result to :func:`integrity.credited_resolutions`, which does the
+    actual attribution (changelog author of the resolving transition) and the
+    former-staff flagging (``JIRA_FORMER_STAFF``, see
+    ``integrity._former_staff_from_env``). No new Jira reads happen here - the
+    changelog ``fetch_resolved_tickets`` now carries is already in memory.
+
+    ``window_days`` defaults to ``None`` (no further narrowing): the caller has
+    usually already asked Jira for a specific window via ``days`` on
+    ``fetch_resolved_tickets``, and re-windowing here on ``ts`` would silently
+    disagree with that if the two ever drift. ``resolved_statuses`` defaults to
+    this module's ``RESOLVED_STATUSES`` when not given.
+
+    Returns :class:`integrity.CreditedResolutions` - ``detail`` (one row per
+    resolving transition: key, timestamp, credited author, former-staff flag)
+    and ``by_person`` (the credited ledger). See that function's docstring for
+    the full column list and blind spots; nothing here changes them.
+    """
+    if resolved_tickets is None or resolved_tickets.empty:
+        return integrity.credited_resolutions(integrity.empty_events())
+    events = integrity.changelog_events(resolved_tickets)
+    statuses = resolved_statuses if resolved_statuses is not None else RESOLVED_STATUSES
+    return integrity.credited_resolutions(
+        events,
+        resolved_tickets,
+        window_days=window_days,
+        now=now,
+        resolved_statuses=statuses,
     )
 
 

@@ -34,6 +34,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Callable, NamedTuple
 
 import pandas as pd
 import requests
@@ -380,6 +381,48 @@ timelineItems(itemTypes: [READY_FOR_REVIEW_EVENT, REVIEW_REQUESTED_EVENT], first
 _DETAIL_FIELDS = _PR_FIELDS + _DETAIL_ONLY_FIELDS
 _DETAIL_HYGIENE_FIELDS = _PR_FIELDS + _DETAIL_ONLY_FIELDS + _HYGIENE_ONLY_FIELDS
 
+# The extended payload: everything the detail payload carries, plus a second
+# timeline read that names *who* a review request went to and orders it
+# against draft conversions. Two things the detail payload's own
+# ``timelineItems`` (above) cannot answer at all: KPI_SPEC exploit #6 ("hide a
+# PR in draft" - one click removes it from Open, Stuck and every hygiene tab)
+# needs to know a PR went to draft *after* someone was asked to review it, not
+# merely that it was a draft at some point; and DEVIN_PLAN §6's proactivity
+# signal - a review nobody asked for - needs the reviewer on each request, not
+# just a timestamp. This is a second ``timelineItems`` read (aliased, since
+# GraphQL will not let the same field appear twice with different arguments)
+# rather than a rewrite of the first: the first stays the cheap thing
+# ``review_ready_at`` is built from, and this one is the expensive addition
+# that only the extended query pays for.
+#
+# ``requestedReviewer`` is a union (User | Team | Mannequin | Bot); only User
+# and Bot are read here; a request routed to a team resolves to no reviewer
+# login and is silently absent from unprompted_reviews' evidence rather than
+# guessed at.
+_TIMELINE_EXTENDED_NODES = 30
+
+_DRAFT_REQUEST_TIMELINE_FIELDS = """
+draftRequestTimeline: timelineItems(itemTypes: [READY_FOR_REVIEW_EVENT, REVIEW_REQUESTED_EVENT, CONVERT_TO_DRAFT_EVENT], first: %d) {
+  nodes {
+    __typename
+    ... on ReadyForReviewEvent { createdAt }
+    ... on ConvertToDraftEvent { createdAt }
+    ... on ReviewRequestedEvent {
+      createdAt
+      requestedReviewer {
+        __typename
+        ... on User { login }
+        ... on Bot { login }
+      }
+    }
+  }
+}
+""" % (_TIMELINE_EXTENDED_NODES,)
+
+_EXTENDED_ONLY_FIELDS = _DETAIL_ONLY_FIELDS + _DRAFT_REQUEST_TIMELINE_FIELDS
+_EXTENDED_FIELDS = _PR_FIELDS + _EXTENDED_ONLY_FIELDS
+_EXTENDED_HYGIENE_FIELDS = _PR_FIELDS + _EXTENDED_ONLY_FIELDS + _HYGIENE_ONLY_FIELDS
+
 # A review body is prose written for a human; the AI reviewer's run to hundreds
 # of lines. Only its presence and its first paragraph are ever read, and 1,000
 # PRs times 50 reviews of unbounded text is a frame nobody can hold.
@@ -399,6 +442,8 @@ _SEARCH_QUERY = _SEARCH_TEMPLATE % _PR_FIELDS
 _HYGIENE_SEARCH_QUERY = _SEARCH_TEMPLATE % _HYGIENE_FIELDS
 _DETAIL_SEARCH_QUERY = _SEARCH_TEMPLATE % _DETAIL_FIELDS
 _DETAIL_HYGIENE_SEARCH_QUERY = _SEARCH_TEMPLATE % _DETAIL_HYGIENE_FIELDS
+_EXTENDED_SEARCH_QUERY = _SEARCH_TEMPLATE % _EXTENDED_FIELDS
+_EXTENDED_HYGIENE_SEARCH_QUERY = _SEARCH_TEMPLATE % _EXTENDED_HYGIENE_FIELDS
 
 
 def _query_for(detail: bool, hygiene: bool) -> tuple[str, str]:
@@ -546,6 +591,44 @@ def _review_ready_at(node: dict) -> str | None:
     return min(stamps) if stamps else None
 
 
+def _timeline_events(node: dict) -> list[dict] | None:
+    """Ready/draft/review-request events, in the shape :mod:`pr_quality` reads.
+
+    Powers ``pr_quality.draft_transitions`` and ``pr_quality.unprompted_reviews``.
+    ``None`` when the extended payload was never fetched (the lean and detail
+    queries do not carry ``draftRequestTimeline`` at all); ``[]`` when it was
+    fetched and the PR's timeline simply has none of these three event types.
+    Those two have to stay distinguishable, or a throttled extended fetch
+    reads as "never went to draft" instead of "never asked".
+    """
+    connection = node.get("draftRequestTimeline")
+    if not isinstance(connection, dict):
+        return None
+    rows: list[dict] = []
+    for item in connection.get("nodes") or []:
+        if not isinstance(item, dict):
+            continue
+        typename = item.get("__typename")
+        if typename == "ReadyForReviewEvent":
+            rows.append(
+                {"type": "ready_for_review", "created_at": item.get("createdAt"), "requested_reviewer": None}
+            )
+        elif typename == "ConvertToDraftEvent":
+            rows.append(
+                {"type": "converted_to_draft", "created_at": item.get("createdAt"), "requested_reviewer": None}
+            )
+        elif typename == "ReviewRequestedEvent":
+            reviewer = item.get("requestedReviewer") or {}
+            rows.append(
+                {
+                    "type": "review_requested",
+                    "created_at": item.get("createdAt"),
+                    "requested_reviewer": reviewer.get("login"),
+                }
+            )
+    return rows
+
+
 def _to_frame(nodes: list[dict]) -> pd.DataFrame:
     rows = []
     for n in nodes:
@@ -595,6 +678,11 @@ def _to_frame(nodes: list[dict]) -> pd.DataFrame:
                 "reviews": _review_rows(n),
                 "review_ready_at": _review_ready_at(n),
                 "detail_fetched": "additions" in n,
+                # The extended payload only: None on the lean and detail
+                # queries, [] on a PR the extended query fetched but whose
+                # timeline had none of these events, a list otherwise.
+                "timeline_events": _timeline_events(n),
+                "extended_fetched": "draftRequestTimeline" in n,
             }
         )
     frame = pd.DataFrame(rows)
@@ -709,3 +797,199 @@ def fetch_closed_unmerged_prs(
     return _to_frame(
         _search_prs(token, _closed_unmerged_query(org, days), max_prs, gql, fallback)
     )
+
+
+# --------------------------------------------------------------------------- #
+# The extended payload: draft round-trips and who reviews unprompted
+# --------------------------------------------------------------------------- #
+#
+# Everything below is WP4's "switch on the extended GraphQL". It is opt-in and
+# separately cached, deliberately not folded into fetch_open_prs /
+# fetch_merged_prs above: those two keep answering exactly what they always
+# have, at their existing cost, so nothing that already calls them changes
+# behaviour. A caller that wants the draft-transition and unprompted-review
+# signal asks for it explicitly through the functions below instead.
+
+_EXTENDED_ENV_VAR = "GITHUB_EXTENDED_PR_DATA"
+_EXTENDED_TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def extended_pr_data_enabled() -> bool:
+    """Whether the extended (draft/review-request timeline) query is switched on.
+
+    Off by default. The extended payload adds a second ``timelineItems`` read
+    on top of the detail payload's own - roughly another 3,000 nodes a page on
+    top of the ~1,030 points/hour the detail payload already costs - which is
+    fine behind an hour-long cache and not fine fetched on every rerun. An
+    operator turns it on with ``GITHUB_EXTENDED_PR_DATA=1`` once the 403 from
+    ``DEVIN_PLAN`` prerequisite 1 is resolved.
+    """
+    return os.getenv(_EXTENDED_ENV_VAR, "").strip().lower() in _EXTENDED_TRUE_VALUES
+
+
+class PRFetch(NamedTuple):
+    """A page of PRs from the extended payload, honest about what it actually got.
+
+    ``degraded`` is true whenever ``frame`` is not the extended payload -
+    because the switch is off, because GitHub throttled or refused the
+    extended query and the read fell back to the lean one, or because even
+    the lean fallback failed and ``frame`` is empty. ``reason`` is the
+    sentence a page can show; this module never calls ``st.warning`` or
+    prints - a compute module has no business deciding how a page reports its
+    own data, so the value is handed back instead.
+    """
+
+    frame: pd.DataFrame
+    degraded: bool
+    reason: str = ""
+
+
+# Cache for the extended payload only. data_layer.py wraps the existing
+# fetch_open_prs/fetch_merged_prs in an ``st.cache_data(ttl=300)`` - five
+# minutes, fine for a ~29-1,030 point read. The extended read costs several
+# times that, so it needs its own floor well above Streamlit's cache, not a
+# shorter one riding underneath it: at 5-minute reuse the extended query alone
+# would exhaust a 5,000 point/hour budget in well under an hour. The floor
+# lives here, in the client, so it holds regardless of what TTL a future
+# caller wraps it in.
+_EXTENDED_CACHE_TTL_SECONDS = 3600.0
+_EXTENDED_CACHE_LOCK = threading.Lock()
+_EXTENDED_CACHE: dict[tuple, tuple[float, "PRFetch"]] = {}
+
+
+def _cached_extended_fetch(cache_key: tuple, builder: Callable[[], "PRFetch"]) -> "PRFetch":
+    """Serve a >=1h-old-or-newer extended read from cache, or build and store one."""
+    now = time.monotonic()
+    with _EXTENDED_CACHE_LOCK:
+        cached = _EXTENDED_CACHE.get(cache_key)
+        if cached is not None and now - cached[0] < _EXTENDED_CACHE_TTL_SECONDS:
+            return cached[1]
+    result = builder()
+    with _EXTENDED_CACHE_LOCK:
+        _EXTENDED_CACHE[cache_key] = (now, result)
+    return result
+
+
+def _clear_extended_pr_cache() -> None:
+    """Reset the extended-payload cache. Test isolation only; no production caller."""
+    with _EXTENDED_CACHE_LOCK:
+        _EXTENDED_CACHE.clear()
+
+
+def _search_prs_reporting(
+    token: str,
+    query: str,
+    max_prs: int,
+    gql: str,
+    fallback_gql: str,
+    fallback_reason: str,
+) -> tuple[list[dict], bool, str]:
+    """Like :func:`_search_prs`, but says whether the cheaper fallback ran.
+
+    :func:`_search_prs` only ever returns nodes, which is right for every
+    caller that cannot tell the difference from the frame alone - the detail
+    and lean payloads both produce a usable frame either way. The extended
+    payload's callers need to know *which* query actually answered, because
+    they render a notice when it wasn't the one asked for; this is that
+    version, kept separate rather than adding an output nobody else needs to
+    :func:`_search_prs`.
+
+    A failure of the fallback itself is not caught here and propagates, same
+    as :func:`_search_prs`: that is a real outage, not a throttle, and the
+    caller decides how to represent it.
+    """
+    with _read_budget():
+        try:
+            return _page(token, gql, query, max_prs), False, ""
+        except (GitHubConfigError, requests.RequestException) as exc:
+            nodes = _page(token, fallback_gql, query, max_prs)
+            return nodes, True, f"{fallback_reason}: {exc}"
+
+
+def _finish_open_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    now = pd.Timestamp.now(tz="UTC")
+    frame = frame.copy()
+    frame["age_days"] = (now - frame["created_at"]).dt.total_seconds() / 86400.0
+    frame["idle_days"] = (now - frame["updated_at"]).dt.total_seconds() / 86400.0
+    return frame
+
+
+def fetch_open_prs_extended(token: str, org: str, max_prs: int = 400) -> PRFetch:
+    """Open PRs via the extended payload, for draft round-trips and unprompted reviews.
+
+    Behind :func:`extended_pr_data_enabled` and the module's >=1h cache. When
+    the switch is off, or GitHub refuses the extended query, this degrades to
+    :func:`fetch_open_prs`'s ordinary detail payload rather than the bare lean
+    one - the open-PR view already relies on detail columns for the queues it
+    draws today, and there is no reason to lose those too just because the
+    extended addition failed. ``degraded`` and ``reason`` say which happened;
+    this function never raises.
+    """
+    if not extended_pr_data_enabled():
+        return PRFetch(
+            fetch_open_prs(token, org, max_prs, detail=True),
+            degraded=True,
+            reason=f"Extended PR data is switched off (set {_EXTENDED_ENV_VAR}=1).",
+        )
+
+    query = _open_query(org)
+    cache_key = ("open", org, query, max_prs)
+
+    def _build() -> PRFetch:
+        try:
+            nodes, degraded, reason = _search_prs_reporting(
+                token,
+                query,
+                max_prs,
+                _EXTENDED_HYGIENE_SEARCH_QUERY,
+                _HYGIENE_SEARCH_QUERY,
+                "GitHub could not afford the extended PR read; showing draft-blind data",
+            )
+        except (GitHubConfigError, requests.RequestException) as exc:
+            # Even the lean fallback failed: a real outage, not a throttle.
+            # Still never raises - the caller asked for a value.
+            return PRFetch(pd.DataFrame(), degraded=True, reason=f"GitHub unavailable: {exc}")
+        return PRFetch(_finish_open_frame(_to_frame(nodes)), degraded, reason)
+
+    return _cached_extended_fetch(cache_key, _build)
+
+
+def fetch_merged_prs_extended(
+    token: str, org: str, days: int, max_prs: int = 1000, hygiene: bool = False
+) -> PRFetch:
+    """Merged PRs via the extended payload, for draft round-trips and unprompted reviews.
+
+    Same shape as :func:`fetch_open_prs_extended`: behind the switch and the
+    module cache, degrading - on the switch being off or the extended query
+    failing - to :func:`fetch_merged_prs`'s ordinary detail payload rather
+    than the lean one, and never raising.
+    """
+    if not extended_pr_data_enabled():
+        return PRFetch(
+            fetch_merged_prs(token, org, days, max_prs, detail=True, hygiene=hygiene),
+            degraded=True,
+            reason=f"Extended PR data is switched off (set {_EXTENDED_ENV_VAR}=1).",
+        )
+
+    query = _merged_query(org, days)
+    extended_gql = _EXTENDED_HYGIENE_SEARCH_QUERY if hygiene else _EXTENDED_SEARCH_QUERY
+    lean_gql = _HYGIENE_SEARCH_QUERY if hygiene else _SEARCH_QUERY
+    cache_key = ("merged", org, query, max_prs, hygiene)
+
+    def _build() -> PRFetch:
+        try:
+            nodes, degraded, reason = _search_prs_reporting(
+                token,
+                query,
+                max_prs,
+                extended_gql,
+                lean_gql,
+                "GitHub could not afford the extended PR read; showing draft-blind data",
+            )
+        except (GitHubConfigError, requests.RequestException) as exc:
+            return PRFetch(pd.DataFrame(), degraded=True, reason=f"GitHub unavailable: {exc}")
+        return PRFetch(_to_frame(nodes), degraded, reason)
+
+    return _cached_extended_fetch(cache_key, _build)

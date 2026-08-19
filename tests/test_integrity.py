@@ -21,6 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import integrity  # noqa: E402
+import prioritization  # noqa: E402
 
 
 NOW = pd.Timestamp("2026-08-16T12:00:00Z")
@@ -750,3 +751,265 @@ def test_flags_of_an_empty_changelog_are_an_empty_frame():
     flags = integrity.integrity_flags(pd.DataFrame(), integrity.empty_events())
     assert flags.empty
     assert "board_grooming_evidence" in flags.columns
+
+
+# --------------------------------------------------------------------------
+# 8. Staleness wiring: idle_days can no longer buy a ticket out of a queue
+# --------------------------------------------------------------------------
+
+
+def test_a_label_only_edit_does_not_drop_a_ticket_out_of_the_stale_queue():
+    # Same fixture as the honest-staleness-clock test above: a ticket that
+    # moved 40 days ago and had one label touched yesterday. idle_days reads
+    # 1 - freshly touched - but the ticket has not moved in 40 days.
+    events = integrity.changelog_events(
+        [
+            issue(
+                "VV-1",
+                history(when(40), "Ana", status("To Do", "In Progress")),
+                history(when(1), "Ana", item("labels", "", "reviewed")),
+            )
+        ]
+    )
+    board = tickets(
+        {
+            "key": "VV-1",
+            "assignee": "Ana",
+            "status": "In Progress",
+            "idle_days": 1.0,
+            "ticket_age_days": 41.0,
+            "priority": "Medium",
+            "carry_over_count": 0,
+        }
+    )
+    scored = prioritization.add_priority_score(board, events)
+    # The score used the honest clock, not the gamed one.
+    assert scored["staleness_days"].iloc[0] > 40.0
+    assert scored["masked_days"].iloc[0] > 38.0
+    assert "stale 4" in scored["priority_reasons"].iloc[0]
+
+    rollup = prioritization.assignee_rollup(scored, events)
+    row = rollup[rollup["assignee"] == "Ana"].iloc[0]
+    # The queue a label edit was supposed to buy this ticket out of.
+    assert row["stale_15d_plus"] == 1
+    assert row["avg_status_age_days"] > 40.0
+
+    # Without events (the pre-2A call sites), the same board is still read the
+    # old way - idle_days alone - so the fix is opt-in, not a silent change of
+    # every caller's numbers underneath them.
+    scored_no_events = prioritization.add_priority_score(board)
+    assert scored_no_events["staleness_days"].iloc[0] == 1.0
+    rollup_no_events = prioritization.assignee_rollup(scored_no_events)
+    assert rollup_no_events[rollup_no_events["assignee"] == "Ana"].iloc[0]["stale_15d_plus"] == 0
+    assert "masked_days" not in scored_no_events.columns
+    assert "avg_status_age_days" not in rollup_no_events.columns
+
+
+# --------------------------------------------------------------------------
+# 9. Resolution credit: the changelog author, not the current assignee
+# --------------------------------------------------------------------------
+
+
+def test_resolution_credit_goes_to_the_changelog_author_not_the_assignee():
+    events = integrity.changelog_events(
+        [
+            issue(
+                "VV-70",
+                history(when(20), "Ana", status("To Do", "In Progress")),
+                history(when(5), "Ana", status("In Progress", "Done")),
+            )
+        ]
+    )
+    # The ticket sits assigned to someone else entirely today - Ana did the work.
+    credit = integrity.credited_resolutions(
+        events, tickets({"key": "VV-70", "assignee": "SomeoneElse", "status": "Done"}),
+        window_days=90, now=NOW,
+    )
+    row = credit.by_person.iloc[0]
+    assert row["person"] == "Ana"
+    assert row["credited_resolutions"] == 1
+    assert "VV-70" in row["evidence"]
+
+
+def test_the_tail_of_the_pipeline_credits_one_resolution_not_three():
+    events = integrity.changelog_events(
+        [
+            issue(
+                "VV-71",
+                history(when(10), "Ana", status("In Progress", "Review in Staging")),
+                history(when(9), "Ana", status("Review in Staging", "Ready for Production")),
+                history(when(8), "Ana", status("Ready for Production", "Released")),
+            )
+        ]
+    )
+    credit = integrity.credited_resolutions(events, window_days=90, now=NOW)
+    assert len(credit.detail) == 1
+    assert credit.by_person.iloc[0]["credited_resolutions"] == 1
+
+
+def test_a_ticket_resolved_twice_credits_two_resolutions_not_one():
+    # Genuinely different from the tail-walk: this ticket left a resolved
+    # status and came back into one, so it earned the credit twice.
+    credit = integrity.credited_resolutions(hider_events(), window_days=90, now=NOW)
+    row = credit.by_person[credit.by_person["person"] == "Hider"].iloc[0]
+    assert row["credited_resolutions"] == 2
+    assert row["tickets"] == 1
+
+
+def test_a_former_staff_resolution_is_flagged_not_counted():
+    events = integrity.changelog_events(
+        [
+            issue(
+                "VV-72",
+                # A departed tester's account is still authoring transitions on
+                # a ticket nobody reassigned - exploit #4 from KPI_SPEC.md.
+                history(when(3), "Sai Shankar", status("In Progress", "Done")),
+            )
+        ]
+    )
+    credit = integrity.credited_resolutions(events, window_days=90, now=NOW)
+    # Visible in the detail, and marked why.
+    detail_row = credit.detail.iloc[0]
+    assert bool(detail_row["is_former_staff"])
+    assert not bool(detail_row["credited"])
+    assert detail_row["reason"] == "former_staff"
+    # Not in the credited ledger at all - "second highest in the company" for
+    # someone who no longer works here is exactly what this closes.
+    assert credit.by_person.empty or not (
+        (credit.by_person["person"] == "Sai Shankar")
+        & (credit.by_person["credited_resolutions"] > 0)
+    ).any()
+
+
+def test_a_custom_former_staff_list_overrides_the_default():
+    events = integrity.changelog_events(
+        [issue("VV-73", history(when(3), "Ana", status("In Progress", "Done")))]
+    )
+    credit = integrity.credited_resolutions(
+        events, window_days=90, now=NOW, former_staff=["Ana"]
+    )
+    row = credit.detail.iloc[0]
+    assert bool(row["is_former_staff"])
+    assert not bool(row["credited"])
+
+
+def test_credited_resolutions_of_an_empty_changelog_is_empty_not_a_crash():
+    credit = integrity.credited_resolutions(integrity.empty_events())
+    assert credit.detail.empty
+    assert credit.by_person.empty
+    assert "credited_resolutions" in credit.by_person.columns
+
+
+def test_unattributed_resolutions_finds_a_resolution_with_no_named_author():
+    # A resolving transition Jira recorded with no author object at all - the
+    # raw shape ``changelog_events`` reduces to the "Unknown" sentinel.
+    no_author_history = {
+        "id": "no-author-1",
+        "created": when(2),
+        "author": {},
+        "items": [status("In Progress", "Done")],
+    }
+    events = integrity.changelog_events(
+        [
+            {
+                "key": "VV-74",
+                "changelog": {
+                    "histories": [
+                        {
+                            "id": "start-1",
+                            "created": when(20),
+                            "author": {"displayName": "Ana"},
+                            "items": [status("To Do", "In Progress")],
+                        },
+                        no_author_history,
+                    ]
+                },
+            }
+        ]
+    )
+    unattributed = integrity.unattributed_resolutions(events, window_days=90, now=NOW)
+    assert list(unattributed["key"]) == ["VV-74"]
+    assert "author" not in unattributed.columns
+
+    # And it must not crash on a changelog with no history in it at all.
+    assert integrity.unattributed_resolutions(integrity.empty_events()).empty
+    assert integrity.unattributed_resolutions(
+        integrity.changelog_events([{"key": "VV-75"}])
+    ).empty
+
+
+def test_org_reopen_rate_returns_the_count_and_its_denominator():
+    result = integrity.org_reopen_rate(hider_events(), window_days=90, now=NOW)
+    assert result.resolved_count == 1  # VV-20
+    assert result.count == 1  # it came back once
+    assert result.share == pytest.approx(1.0)
+    assert "VV-20" in result.reopened_keys
+
+
+def test_org_reopen_rate_share_is_none_not_zero_with_nothing_resolved():
+    result = integrity.org_reopen_rate(integrity.empty_events(), window_days=30, now=NOW)
+    assert result.count == 0
+    assert result.resolved_count == 0
+    assert result.share is None
+
+
+def test_org_reopen_rate_of_a_clean_resolution_is_a_real_zero():
+    events = integrity.changelog_events(
+        [issue("VV-76", history(when(5), "Ana", status("In Progress", "Done")))]
+    )
+    result = integrity.org_reopen_rate(events, window_days=90, now=NOW)
+    assert result.resolved_count == 1
+    assert result.count == 0
+    assert result.share == pytest.approx(0.0)
+
+
+# --------------------------------------------------------------------------
+# 10. The one cycle-time headline
+# --------------------------------------------------------------------------
+
+
+def _finished_ticket(key: str, started_days_ago: float, resolved_days_ago: float) -> dict:
+    return issue(
+        key,
+        history(when(started_days_ago), "Ana", status("To Do", "In Progress")),
+        history(when(resolved_days_ago), "Ana", status("In Progress", "Done")),
+    )
+
+
+def test_end_to_end_cycle_reports_none_with_a_reason_under_three_tickets():
+    events = integrity.changelog_events(
+        [_finished_ticket("VV-80", 10, 2), _finished_ticket("VV-81", 12, 4)]
+    )
+    result = integrity.end_to_end_cycle(events, now=NOW)
+    assert result.median_days is None
+    assert result.n == 2
+    assert "fewer than 3" in result.reason
+
+
+def test_end_to_end_cycle_medians_current_against_baseline():
+    current = [
+        _finished_ticket("VV-90", 20, 10),
+        _finished_ticket("VV-91", 24, 12),
+        _finished_ticket("VV-92", 28, 14),
+    ]
+    # Longer cycles a hundred-odd days ago, so the comparison actually differs.
+    baseline = [
+        _finished_ticket("VV-93", 150, 120),
+        _finished_ticket("VV-94", 160, 130),
+        _finished_ticket("VV-95", 170, 140),
+    ]
+    events = integrity.changelog_events(current + baseline)
+    result = integrity.end_to_end_cycle(events, baseline_days=90, now=NOW)
+    assert result.n == 3
+    assert result.reason is None
+    assert result.median_days == pytest.approx(12.0, abs=0.1)
+    assert result.baseline_n == 3
+    assert result.baseline_median_days == pytest.approx(30.0, abs=0.1)
+    assert set(result.detail["period"]) == {"current", "baseline"}
+
+
+def test_end_to_end_cycle_of_an_empty_changelog_states_why():
+    result = integrity.end_to_end_cycle(integrity.empty_events())
+    assert result.median_days is None
+    assert result.reason
+    assert result.detail.empty

@@ -4053,16 +4053,35 @@ def _render_scorecard(
     parts = kpi.components(owned, gradable, resolved_7, resolved_90, reopened_90, prs)
     score = kpi.overall(parts)
 
+    # ``coverage`` was computed by ``kpi`` and thrown away before this fix - the
+    # honest denominator (how many of the 100 weighted points actually had data)
+    # never reached the page. It is read here instead of recomputed, so this
+    # always agrees with whatever ``kpi.overall`` used to build ``score``.
+    cov = kpi.coverage(parts)
+
     left, right = st.columns([1, 2])
     with left:
         st.metric(
             "Overall",
-            "n/a" if score is None else f"{score:.0f} / 100",
+            "n/a" if score is None else f"{score:.0f} over {cov.covered_weight:.0f} measurable points",
             help=(
                 "Weighted mean of the components on the right; a component with "
-                "nothing to measure is dropped and the weights renormalize."
+                "nothing to measure is dropped and the weights renormalize. The "
+                "denominator is the weight that was actually measurable, not a "
+                "flat 100 - a person with a mostly-empty board is not being "
+                "scored against the tickets they don't have."
             ),
         )
+        pct_measurable = (
+            (cov.covered_weight / cov.total_weight * 100) if cov.total_weight else 0.0
+        )
+        if cov.missing:
+            st.caption(
+                f"{pct_measurable:.0f}% measurable "
+                f"({', '.join(cov.missing)} could not be measured)."
+            )
+        else:
+            st.caption("100% measurable.")
         earned = kpi.badges(
             parts, owned, gradable, resolved_7, resolved_30, resolved_90, reopened_90, prs
         )
@@ -4079,18 +4098,21 @@ def _render_scorecard(
                 pd.DataFrame(
                     {
                         "Component": [p.name for p in parts],
-                        "Score": [round(p.score) for p in parts],
+                        # A row with nothing to measure (``sufficient=False``, the
+                        # gap rows ``kpi.components(include_gaps=True)`` appends)
+                        # must never print as a 0 - that reads as "failed" when
+                        # it means "not applicable to this person's board". Only
+                        # a real score is a number; everything else is "n/a".
+                        "Score": [
+                            "n/a" if not p.sufficient else str(round(p.score))
+                            for p in parts
+                        ],
                         "Weight": [kpi.WEIGHTS.get(p.name, 0.0) for p in parts],
                         "Evidence": [p.detail for p in parts],
                     }
                 ),
                 width="stretch",
                 hide_index=True,
-                column_config={
-                    "Score": st.column_config.ProgressColumn(
-                        "Score", min_value=0, max_value=100, format="%d"
-                    ),
-                },
             )
         else:
             st.info("Not enough data yet to score any component.")

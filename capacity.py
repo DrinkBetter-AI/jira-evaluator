@@ -26,6 +26,18 @@ UNASSIGNED = "Unassigned"
 OVER_COMMITTED_RATIO = 1.0
 AT_CAPACITY_RATIO = 0.85
 
+# Worst-first display order, shared by capacity_table and capacity_table_by_sprint's
+# totals so a person's row sorts identically whether it comes from one sprint or a sum.
+_STATUS_ORDER = {
+    OVER_COMMITTED: 0,
+    AT_CAPACITY: 1,
+    HAS_ROOM: 2,
+    NO_AVAILABILITY: 3,
+    UNALLOCATED: 4,
+    AMBIGUOUS_AVAILABILITY: 5,
+    UNKNOWN_AVAILABILITY: 6,
+}
+
 
 def parse_weekly_hours(spec: str) -> dict[str, float]:
     """Parse ``"Tam=10,Shivanand=20"`` into ``{"Tam": 10.0, "Shivanand": 20.0}``.
@@ -208,18 +220,173 @@ def capacity_table(
     # dtype is the same whether or not anyone's availability is known.
     for column in ("Committed (h)", "Available (h)", "Utilization %", "Delta (h)"):
         table[column] = pd.to_numeric(table[column], errors="coerce")
-    order = {
-        OVER_COMMITTED: 0,
-        AT_CAPACITY: 1,
-        HAS_ROOM: 2,
-        NO_AVAILABILITY: 3,
-        UNALLOCATED: 4,
-        AMBIGUOUS_AVAILABILITY: 5,
-        UNKNOWN_AVAILABILITY: 6,
-    }
     return (
-        table.assign(_order=table["Status"].map(order))
+        table.assign(_order=table["Status"].map(_STATUS_ORDER))
         .sort_values(["_order", "Committed (h)"], ascending=[True, False])
         .drop(columns=["_order"])
         .reset_index(drop=True)
     )
+
+
+CROSS_SPRINT_ROW_COLUMNS = [
+    "Assignee",
+    "Sprint",
+    "Committed (h)",
+    "Available (h)",
+    "Utilization %",
+    "Delta (h)",
+    "Status",
+]
+
+CROSS_SPRINT_TOTAL_COLUMNS = [
+    "Assignee",
+    "Committed (h)",
+    "Available (h)",
+    "Utilization %",
+    "Delta (h)",
+    "Status",
+    "Sprints",
+]
+
+
+def capacity_table_by_sprint(
+    df: pd.DataFrame,
+    weekly_hours: dict[str, float],
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """Cross-sprint capacity: one row per (assignee, sprint), plus a per-person total.
+
+    ``capacity_table`` above is one-sprint-only and indexed by assignee alone
+    - a person who sits in two boards' active sprints at once (a real shape
+    here: App, Marketplace and ML each run their own sprint) gets one row per
+    sprint under that function and nothing that adds them together. This
+    calls ``capacity_table`` once per sprint present in ``df`` and sums the
+    rows for each person across the sprints that have dates, so "the row
+    that matters is the total, not either sprint alone" is a value the
+    caller reads off the second return value, not something it has to
+    re-aggregate itself. ``capacity_table`` keeps working standalone for
+    call sites that still pass one sprint at a time.
+
+    A sprint with no start/end date in Jira cannot produce available hours -
+    each such sprint still gets its per-person rows in the first return
+    value (``capacity_table`` already renders "No hours this sprint" per
+    person rather than inventing a 0), but it is left out of the totals in
+    the second return value rather than folded in as a silent zero, and its
+    name comes back in the third return value so the page can say so.
+
+    Blind spot: a person's committed hours in a sprint are only ever the sum
+    of numeric estimates on tickets carrying that sprint right now; a ticket
+    whose sprint field is blank, or points at the wrong sprint, is invisible
+    to every sprint's row, not just the one it should have counted against.
+    A second, structural blind spot: ``weekly_hours`` is one global
+    declaration, not a per-board one, so a person declared there who
+    genuinely works a single board still gets an idle "Has room" row -  and
+    that board's worth of available hours added to their total - for every
+    *other* dated sprint in ``df``, even ones they hold no ticket on and may
+    not even sit on the board for. There is no per-board roster to filter
+    against here, so this is not corrected; it is why the per-person
+    ``Sprints`` column is returned alongside the total, so a reviewer can
+    see which sprints actually contributed.
+    """
+    if df is None or df.empty or "sprint_name" not in df.columns:
+        return (
+            pd.DataFrame(columns=CROSS_SPRINT_ROW_COLUMNS),
+            pd.DataFrame(columns=CROSS_SPRINT_TOTAL_COLUMNS),
+            [],
+        )
+
+    scoped = df[df["sprint_name"].notna()].copy()
+    if scoped.empty:
+        return (
+            pd.DataFrame(columns=CROSS_SPRINT_ROW_COLUMNS),
+            pd.DataFrame(columns=CROSS_SPRINT_TOTAL_COLUMNS),
+            [],
+        )
+
+    assignee = scoped["assignee"].fillna(UNASSIGNED).astype(str).str.strip()
+    scoped["_assignee"] = assignee.mask(assignee.eq(""), UNASSIGNED)
+    estimate_hours = (
+        pd.to_numeric(scoped.get("original_estimate_sec"), errors="coerce").fillna(0.0) / 3600.0
+    )
+
+    per_sprint_rows: list[pd.DataFrame] = []
+    excluded: list[str] = []
+    # Per person: running committed/available totals over dated sprints only,
+    # whether any dated sprint gave them a real (non-None) available figure,
+    # whether any of their per-sprint rows came back ambiguous, and which
+    # dated sprints actually contributed - the evidence behind the total.
+    contributions: dict[str, dict[str, object]] = {}
+
+    for sprint_name, group in scoped.groupby(scoped["sprint_name"].astype(str), sort=True):
+        start = group["sprint_start"].dropna().iloc[0] if group["sprint_start"].notna().any() else None
+        end = group["sprint_end"].dropna().iloc[0] if group["sprint_end"].notna().any() else None
+        committed = estimate_hours.loc[group.index].groupby(group["_assignee"]).sum()
+        table = capacity_table(committed, weekly_hours, start, end)
+        if table.empty:
+            continue
+
+        dated = working_days(start, end) > 0
+        if not dated:
+            excluded.append(sprint_name)
+
+        labeled = table.copy()
+        labeled.insert(1, "Sprint", sprint_name)
+        per_sprint_rows.append(labeled)
+
+        if not dated:
+            continue
+        for _, row in table.iterrows():
+            name = str(row["Assignee"])
+            entry = contributions.setdefault(
+                name,
+                {"committed": 0.0, "available": 0.0, "has_available": False, "ambiguous": False, "sprints": []},
+            )
+            entry["committed"] = float(entry["committed"]) + float(row["Committed (h)"] or 0.0)
+            available_val = row["Available (h)"]
+            if available_val is not None and not pd.isna(available_val):
+                entry["available"] = float(entry["available"]) + float(available_val)
+                entry["has_available"] = True
+            if row["Status"] == AMBIGUOUS_AVAILABILITY:
+                entry["ambiguous"] = True
+            entry["sprints"].append(sprint_name)
+
+    rows = (
+        pd.concat(per_sprint_rows, ignore_index=True)
+        if per_sprint_rows
+        else pd.DataFrame(columns=CROSS_SPRINT_ROW_COLUMNS)
+    )
+
+    total_rows = []
+    for name, entry in contributions.items():
+        committed_total = float(entry["committed"])
+        has_available = bool(entry["has_available"])
+        available_total = float(entry["available"]) if has_available else 0.0
+        total_rows.append(
+            {
+                "Assignee": name,
+                "Committed (h)": round(committed_total, 1),
+                "Available (h)": round(available_total, 1) if has_available else None,
+                "Utilization %": (
+                    round(committed_total / available_total * 100.0, 0)
+                    if has_available and available_total > 0
+                    else None
+                ),
+                "Delta (h)": round(available_total - committed_total, 1) if has_available else None,
+                "Status": _status(
+                    name, committed_total, available_total, has_available, ambiguous=bool(entry["ambiguous"])
+                ),
+                "Sprints": ", ".join(entry["sprints"]),
+            }
+        )
+
+    totals = pd.DataFrame(total_rows, columns=CROSS_SPRINT_TOTAL_COLUMNS)
+    if not totals.empty:
+        for column in ("Committed (h)", "Available (h)", "Utilization %", "Delta (h)"):
+            totals[column] = pd.to_numeric(totals[column], errors="coerce")
+        totals = (
+            totals.assign(_order=totals["Status"].map(_STATUS_ORDER))
+            .sort_values(["_order", "Committed (h)"], ascending=[True, False])
+            .drop(columns=["_order"])
+            .reset_index(drop=True)
+        )
+
+    return rows, totals, excluded

@@ -42,9 +42,17 @@ def pr(
     threads: int | None = 0,
     ready_at: str | None = None,
     created_at: str = "2026-08-01T09:00:00Z",
+    timeline_events: list[dict] | None = "unset",  # type: ignore[assignment]
 ) -> dict:
-    """One PR row shaped like :func:`github_client._to_frame` builds them."""
-    return {
+    """One PR row shaped like :func:`github_client._to_frame` builds them.
+
+    ``timeline_events`` defaults to the sentinel ``"unset"`` rather than
+    ``None`` so a fixture that never mentions it drops the column entirely
+    (an extended-payload-blind row, same as a real lean/detail fetch) instead
+    of accidentally asserting "extended payload fetched, zero events" for
+    every existing test in this file.
+    """
+    row = {
         "number": number,
         "url": f"https://github.com/acme/repo/pull/{number}",
         "title": title,
@@ -68,10 +76,28 @@ def pr(
         "comments": threads,
         "reviews": reviews,
     }
+    if timeline_events != "unset":
+        row["timeline_events"] = timeline_events
+    return row
 
 
 def review(reviewer: str, state: str, at: str = "2026-08-01T12:00:00Z", body: str = "") -> dict:
     return {"reviewer": reviewer, "state": state, "submitted_at": at, "body": body}
+
+
+def requested(reviewer: str, at: str) -> dict:
+    """A ``ReviewRequestedEvent``, shaped like :func:`github_client._timeline_events`."""
+    return {"type": "review_requested", "created_at": at, "requested_reviewer": reviewer}
+
+
+def drafted(at: str) -> dict:
+    """A ``ConvertToDraftEvent``."""
+    return {"type": "converted_to_draft", "created_at": at, "requested_reviewer": None}
+
+
+def ready(at: str) -> dict:
+    """A ``ReadyForReviewEvent``."""
+    return {"type": "ready_for_review", "created_at": at, "requested_reviewer": None}
 
 
 # --------------------------------------------------------------------------- #
@@ -399,6 +425,213 @@ def test_a_pr_whose_key_was_never_looked_for_is_not_counted_as_missing_one():
 
 
 # --------------------------------------------------------------------------- #
+# Reviews nobody asked for
+# --------------------------------------------------------------------------- #
+
+
+def test_a_review_by_someone_who_was_requested_is_not_unprompted():
+    frame = pd.DataFrame(
+        [
+            pr(
+                1,
+                "alice",
+                reviews=[review("bob", "APPROVED", "2026-08-01T12:00:00Z")],
+                timeline_events=[requested("bob", "2026-08-01T10:00:00Z")],
+            )
+        ]
+    )
+    out = pr_quality.unprompted_reviews(frame)
+    assert out.empty
+
+
+def test_a_review_by_someone_never_requested_is_unprompted():
+    frame = pd.DataFrame(
+        [
+            pr(
+                1,
+                "alice",
+                reviews=[review("carol", "APPROVED", "2026-08-01T12:00:00Z")],
+                timeline_events=[requested("bob", "2026-08-01T10:00:00Z")],
+            )
+        ]
+    )
+    out = pr_quality.unprompted_reviews(frame).set_index("reviewer")
+    assert out.loc["carol", "unprompted_reviews"] == 1
+    assert out.loc["carol", "prs"] == (1,)
+    assert "bob" not in out.index
+
+
+def test_a_review_request_arriving_after_the_review_still_counts_it_unprompted():
+    # Ordering pinned: the request timestamp is *after* the review's.
+    frame = pd.DataFrame(
+        [
+            pr(
+                1,
+                "alice",
+                reviews=[review("bob", "APPROVED", "2026-08-01T09:00:00Z")],
+                timeline_events=[requested("bob", "2026-08-01T15:00:00Z")],
+            )
+        ]
+    )
+    out = pr_quality.unprompted_reviews(frame).set_index("reviewer")
+    assert out.loc["bob", "unprompted_reviews"] == 1
+
+
+def test_unprompted_reviews_is_read_alongside_reciprocity():
+    # bob reviews alice unprompted four times and reviews nobody else: the
+    # concentration/top_partner columns must say so, straight from reciprocity.
+    rows = [
+        pr(n, "alice", reviews=[review("bob", "APPROVED")], timeline_events=[])
+        for n in range(1, 5)
+    ]
+    out = pr_quality.unprompted_reviews(pd.DataFrame(rows)).set_index("reviewer")
+    assert out.loc["bob", "unprompted_reviews"] == 4
+    assert out.loc["bob", "top_partner"] == "alice"
+    assert out.loc["bob", "concentration"] == 1.0
+
+
+def test_self_reviews_and_the_ai_are_never_unprompted_evidence():
+    frame = pd.DataFrame(
+        [
+            pr(
+                1,
+                "alice",
+                reviews=[
+                    review("alice", "COMMENTED"),
+                    review(DEVIN, "CHANGES_REQUESTED"),
+                ],
+                timeline_events=[],
+            )
+        ]
+    )
+    assert pr_quality.unprompted_reviews(frame).empty
+
+
+def test_unprompted_reviews_without_the_extended_payload_is_empty_not_wrong():
+    lean = pd.DataFrame([pr(1, "alice", reviews=[review("bob", "APPROVED")])])
+    assert "timeline_events" not in lean.columns
+    assert pr_quality.unprompted_reviews(lean).empty
+
+
+# --------------------------------------------------------------------------- #
+# Hiding in draft
+# --------------------------------------------------------------------------- #
+
+
+def test_going_draft_after_a_review_request_is_flagged():
+    frame = pd.DataFrame(
+        [
+            pr(
+                1,
+                "alice",
+                state="CLOSED",
+                timeline_events=[
+                    requested("bob", "2026-08-01T09:00:00Z"),
+                    drafted("2026-08-01T10:00:00Z"),
+                ],
+            )
+        ]
+    )
+    detail = pr_quality.draft_transitions(frame).detail.set_index("number")
+    assert detail.loc[1, "draft_round_trips"] == 1
+    assert bool(detail.loc[1, "after_review_request"]) is True
+
+
+def test_a_pr_opened_as_a_draft_and_marked_ready_once_is_not_flagged():
+    frame = pd.DataFrame(
+        [pr(1, "alice", timeline_events=[ready("2026-08-01T09:00:00Z")])]
+    )
+    detail = pr_quality.draft_transitions(frame).detail.set_index("number")
+    assert detail.loc[1, "draft_round_trips"] == 0
+    assert bool(detail.loc[1, "after_review_request"]) is False
+
+
+def test_going_draft_before_any_request_is_not_flagged():
+    # The draft conversion precedes the request: an author's own choice to
+    # keep working, not a reaction to being asked for review.
+    frame = pd.DataFrame(
+        [
+            pr(
+                1,
+                "alice",
+                timeline_events=[
+                    drafted("2026-08-01T08:00:00Z"),
+                    requested("bob", "2026-08-01T09:00:00Z"),
+                ],
+            )
+        ]
+    )
+    detail = pr_quality.draft_transitions(frame).detail.set_index("number")
+    assert detail.loc[1, "draft_round_trips"] == 1
+    assert bool(detail.loc[1, "after_review_request"]) is False
+
+
+def test_the_flagged_subset_gets_a_real_abandoned_rate_not_a_second_metric():
+    frame = pd.DataFrame(
+        [
+            pr(
+                1,
+                "alice",
+                state="CLOSED",
+                timeline_events=[requested("bob", "2026-08-01T09:00:00Z"), drafted("2026-08-01T10:00:00Z")],
+            ),
+            pr(
+                2,
+                "alice",
+                state="MERGED",
+                timeline_events=[requested("bob", "2026-08-01T09:00:00Z"), drafted("2026-08-01T10:00:00Z")],
+            ),
+            # Not flagged: opened as a draft, never asked for review first.
+            pr(3, "alice", state="CLOSED", timeline_events=[ready("2026-08-01T09:00:00Z")]),
+        ]
+    )
+    outcome = pr_quality.draft_transitions(frame).outcome.set_index("author")
+    assert outcome.loc["alice", "closed_prs"] == 2  # only the two flagged PRs
+    assert outcome.loc["alice", "abandoned"] == 1
+    assert outcome.loc["alice", "merged"] == 1
+
+
+def test_draft_transitions_without_the_extended_payload_is_empty_not_wrong():
+    lean = pd.DataFrame([pr(1, "alice")])
+    result = pr_quality.draft_transitions(lean)
+    assert result.detail.empty
+    assert result.outcome.empty
+
+
+# --------------------------------------------------------------------------- #
+# Size in points
+# --------------------------------------------------------------------------- #
+
+
+def test_delivered_points_binds_count_to_median_size_structurally():
+    with pytest.raises(TypeError):
+        pr_quality.DeliveredPoints(author="x", prs=5, points=10.0, trivial_share=0.0)  # type: ignore[call-arg]
+
+
+def test_five_trivial_prs_score_below_one_medium_pr():
+    splitter = pd.DataFrame([pr(n, "splitter", changed_lines=4) for n in range(1, 6)])
+    shipper = pd.DataFrame([pr(9, "shipper", changed_lines=300)])
+    split_points = {d.author: d for d in pr_quality.delivered_points(splitter)}
+    ship_points = {d.author: d for d in pr_quality.delivered_points(shipper)}
+    assert split_points["splitter"].prs == 5
+    assert split_points["splitter"].points < ship_points["shipper"].points
+    # The binding itself: every element carries both together.
+    assert split_points["splitter"].median_changed_lines == 4
+
+
+def test_delivered_points_returns_a_list_not_a_frame_with_a_bare_count_column():
+    frame = pd.DataFrame([pr(1, "alice", changed_lines=50)])
+    out = pr_quality.delivered_points(frame)
+    assert isinstance(out, list)
+    assert all(isinstance(item, pr_quality.DeliveredPoints) for item in out)
+    assert not isinstance(out, pd.DataFrame)
+
+
+def test_delivered_points_survives_an_empty_frame():
+    assert pr_quality.delivered_points(pd.DataFrame()) == []
+
+
+# --------------------------------------------------------------------------- #
 # The payload underneath all of it
 # --------------------------------------------------------------------------- #
 
@@ -530,6 +763,135 @@ def test_a_failure_of_the_lean_query_is_still_an_error(monkeypatch):
         raise AssertionError("a broken token must not look like an empty org")
 
 
+# --------------------------------------------------------------------------- #
+# The extended payload's switch and its degrade behaviour
+# --------------------------------------------------------------------------- #
+
+
+def test_the_switch_is_off_by_default_and_says_so(monkeypatch):
+    monkeypatch.delenv("GITHUB_EXTENDED_PR_DATA", raising=False)
+    assert github_client.extended_pr_data_enabled() is False
+
+    monkeypatch.setattr(
+        github_client,
+        "fetch_open_prs",
+        lambda token, org, max_prs, detail=True: pd.DataFrame([pr(1, "alice")]),
+    )
+    result = github_client.fetch_open_prs_extended("token", "acme")
+    assert isinstance(result, github_client.PRFetch)
+    assert result.degraded is True
+    assert "switched off" in result.reason
+    assert not result.frame.empty
+
+
+def test_the_extended_query_degrades_to_the_lean_one_and_never_raises(monkeypatch):
+    monkeypatch.setenv("GITHUB_EXTENDED_PR_DATA", "1")
+    seen: list[str] = []
+
+    def fake_graphql(token, query, variables):
+        seen.append(query)
+        if query is github_client._EXTENDED_HYGIENE_SEARCH_QUERY:
+            raise github_client.GitHubConfigError("API rate limit exceeded")
+        return {
+            "search": {
+                "issueCount": 1,
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [{"number": 1, "author": {"login": "alice"}}],
+            }
+        }
+
+    monkeypatch.setattr(github_client, "_graphql", fake_graphql)
+    result = github_client.fetch_open_prs_extended("token", "acme")
+    assert isinstance(result, github_client.PRFetch)
+    assert result.degraded is True
+    assert result.reason  # a non-empty, human reason
+    assert list(result.frame["number"]) == [1]
+    assert seen == [
+        github_client._EXTENDED_HYGIENE_SEARCH_QUERY,
+        github_client._HYGIENE_SEARCH_QUERY,
+    ]
+
+
+def test_an_outright_outage_still_returns_a_value_not_an_exception(monkeypatch):
+    monkeypatch.setenv("GITHUB_EXTENDED_PR_DATA", "1")
+
+    def always_fails(token, query, variables):
+        raise github_client.GitHubConfigError("Bad credentials")
+
+    monkeypatch.setattr(github_client, "_graphql", always_fails)
+    result = github_client.fetch_open_prs_extended("token", "acme")
+    assert isinstance(result, github_client.PRFetch)
+    assert result.degraded is True
+    assert "unavailable" in result.reason.lower()
+    assert result.frame.empty
+
+
+def test_the_extended_read_is_cached_for_at_least_an_hour(monkeypatch):
+    monkeypatch.setenv("GITHUB_EXTENDED_PR_DATA", "1")
+    calls = {"n": 0}
+
+    def fake_graphql(token, query, variables):
+        calls["n"] += 1
+        return {
+            "search": {
+                "issueCount": 1,
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [{"number": 1, "author": {"login": "alice"}}],
+            }
+        }
+
+    monkeypatch.setattr(github_client, "_graphql", fake_graphql)
+    first = github_client.fetch_open_prs_extended("token", "acme")
+    second = github_client.fetch_open_prs_extended("token", "acme")
+    assert first.degraded is False
+    assert calls["n"] == 1  # the second call was served from cache
+    assert second.frame.equals(first.frame)
+    assert github_client._EXTENDED_CACHE_TTL_SECONDS >= 3600.0
+
+
+def test_a_successful_extended_read_carries_the_new_columns(monkeypatch):
+    monkeypatch.setenv("GITHUB_EXTENDED_PR_DATA", "1")
+
+    def fake_graphql(token, query, variables):
+        return {
+            "search": {
+                "issueCount": 1,
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                "nodes": [
+                    {
+                        "number": 1,
+                        "author": {"login": "alice"},
+                        "createdAt": "2026-08-01T09:00:00Z",
+                        "updatedAt": "2026-08-01T09:00:00Z",
+                        "draftRequestTimeline": {
+                            "nodes": [
+                                {
+                                    "__typename": "ReviewRequestedEvent",
+                                    "createdAt": "2026-08-01T10:00:00Z",
+                                    "requestedReviewer": {"__typename": "User", "login": "bob"},
+                                },
+                                {
+                                    "__typename": "ConvertToDraftEvent",
+                                    "createdAt": "2026-08-01T11:00:00Z",
+                                },
+                            ]
+                        },
+                    }
+                ],
+            }
+        }
+
+    monkeypatch.setattr(github_client, "_graphql", fake_graphql)
+    result = github_client.fetch_open_prs_extended("token", "acme")
+    assert result.degraded is False
+    row = result.frame.iloc[0]
+    assert bool(row["extended_fetched"]) is True
+    assert row["timeline_events"] == [
+        {"type": "review_requested", "created_at": "2026-08-01T10:00:00Z", "requested_reviewer": "bob"},
+        {"type": "converted_to_draft", "created_at": "2026-08-01T11:00:00Z", "requested_reviewer": None},
+    ]
+
+
 def test_every_rollup_survives_an_empty_frame():
     empty = pd.DataFrame()
     for call in (
@@ -542,11 +904,15 @@ def test_every_rollup_survives_an_empty_frame():
         pr_quality.flag_self_merges,
         pr_quality.abandoned_rate,
         pr_quality.traceability,
+        pr_quality.unprompted_reviews,
     ):
         out = call(empty)
         assert isinstance(out, pd.DataFrame) and out.empty
     pairs, people = pr_quality.reciprocity(empty)
     assert pairs.empty and people.empty
+    detail, outcome = pr_quality.draft_transitions(empty)
+    assert detail.empty and outcome.empty
+    assert pr_quality.delivered_points(empty) == []
 
 
 def test_a_refused_read_repeats_what_github_said(monkeypatch):
@@ -571,9 +937,11 @@ def _open_door():
     """The shared throttle door is module state; no test inherits another's."""
     github_client._NOT_BEFORE = 0.0
     github_client._BUDGET.deadline = None
+    github_client._clear_extended_pr_cache()
     yield
     github_client._NOT_BEFORE = 0.0
     github_client._BUDGET.deadline = None
+    github_client._clear_extended_pr_cache()
 
 
 @pytest.fixture

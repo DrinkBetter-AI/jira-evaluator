@@ -13,8 +13,11 @@ import pytest
 
 import app
 import hygiene
+import kpi
+import render_shared
 import theme
 import next_actions
+from pages import today
 
 
 def _prs(**columns) -> pd.DataFrame:
@@ -394,3 +397,222 @@ def test_the_action_list_reuses_the_stalled_rows_the_tile_measured(monkeypatch):
     stalled = board.assign(**{next_actions.STALLED_AGE_COLUMN: [44.0]})
     queues, _ = app._action_queues(bundle, board, stalled=stalled)
     assert queues["stalled"][0].days == 44.0
+
+
+# --- Task 2G: the attention band's three decide cards (render_shared.py bug 1) ---
+#
+# Pre-split, `hero, a, b, c = st.columns(...)` and the three `_decision_card`
+# calls all sat inside `_render_attention_band`'s `try`, but the cards were
+# indented under its `except` - so a hero that rendered fine (the normal
+# case) never drew them, a second `except Exception` on the same `try` could
+# never fire (the first always matches first), and an exception at the
+# `st.columns()` line itself left `a`/`b`/`c` unbound, so the except handler
+# raised an uncaught `NameError` instead of the real error. All three are
+# fixed together: the cards are dedented to always run, the dead second
+# `except` is gone, and column allocation gets its own try with a fallback
+# binding so `a`/`b`/`c` are never unbound.
+
+
+def _attention_band_prs(**overrides) -> dict:
+    base = {
+        "total": 10,
+        "unapproved": 4,
+        "oldest_unreviewed_days": 6,
+        "never_reviewed": 1,
+        "no_reviewer_asked": 2,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_the_three_decide_cards_render_on_the_happy_path(monkeypatch):
+    """Fault 1: the cards were indented into the except, so a clean hero drew none."""
+    calls = []
+    monkeypatch.setattr(
+        today, "_decision_card", lambda column, **kw: calls.append(kw["chip"])
+    )
+    today._render_attention_band(
+        _attention_band_prs(),
+        github_ready=True,
+        github_error="",
+        triage_stuck=3,
+        ownerless=5,
+        open_total=40,
+    )
+    assert calls == ["Triage", "Review", "Ownership"]
+
+
+def test_the_three_decide_cards_still_render_when_the_hero_raises(monkeypatch):
+    """A broken hero must degrade the headline number, not the three decisions."""
+    calls = []
+    monkeypatch.setattr(
+        today, "_decision_card", lambda column, **kw: calls.append(kw["chip"])
+    )
+
+    def boom(*_a, **_k):
+        raise RuntimeError("hero exploded")
+
+    monkeypatch.setattr(today.st, "progress", boom)
+    today._render_attention_band(
+        _attention_band_prs(),
+        github_ready=True,
+        github_error="",
+        triage_stuck=3,
+        ownerless=5,
+        open_total=40,
+    )
+    assert calls == ["Triage", "Review", "Ownership"]
+
+
+def test_the_hero_try_has_exactly_one_except_clause_each():
+    """Fault 2: a second, always-unreachable `except Exception` sat on the same
+    try as the first. Dead code changes nothing on its own, so this is pinned
+    structurally rather than by behavior: neither try in the function may carry
+    two stacked handlers that can never both fire.
+    """
+    import ast
+    import inspect
+
+    source = inspect.getsource(today._render_attention_band)
+    tree = ast.parse(source)
+    try_nodes = [n for n in ast.walk(tree) if isinstance(n, ast.Try)]
+    assert try_nodes, "expected the function to still guard its rendering with try/except"
+    for node in try_nodes:
+        assert len(node.handlers) == 1
+
+
+def test_no_nameerror_when_column_allocation_itself_fails(monkeypatch):
+    """Fault 3: st.columns() raising left a/b/c unbound, so the except handler
+    that referenced them raised an uncaught NameError instead of the real
+    error, and the page below it never rendered. This must raise neither
+    NameError nor anything else, and the three cards must still be drawn
+    against a fallback container.
+    """
+    calls = []
+    monkeypatch.setattr(
+        today, "_decision_card", lambda column, **kw: calls.append(kw["chip"])
+    )
+
+    def boom(*_a, **_k):
+        raise ValueError("columns exploded")
+
+    monkeypatch.setattr(today.st, "columns", boom)
+    # No exception at all is the bar - and specifically, never the NameError
+    # this bug used to raise instead of the real one.
+    today._render_attention_band(
+        _attention_band_prs(),
+        github_ready=True,
+        github_error="",
+        triage_stuck=3,
+        ownerless=5,
+        open_total=40,
+    )
+    assert calls == ["Triage", "Review", "Ownership"]
+
+
+# --- Task 2G: the scorecard's unentitled score (render_shared.py bug 2) ---
+#
+# `_render_scorecard` built its "Score" column with no check of
+# `Component.sufficient`, so a placeholder gap row (score=0.0 by
+# construction, meaning "nothing to measure") would print as a real 0 the
+# moment a caller passed `include_gaps=True` to `kpi.components`. Latent
+# today because no caller does, but the People page is about to. These pin
+# the guard, plus the coverage numbers `_render_scorecard` was computing and
+# throwing away.
+
+
+def _scorecard_owned() -> pd.DataFrame:
+    # Carries has_estimate/estimate_hours already, so _render_scorecard does
+    # not re-run estimate_policy over it.
+    return pd.DataFrame(
+        {
+            "assignee": ["Tam"],
+            "status": ["In Progress"],
+            "has_estimate": [True],
+            "estimate_hours": [4.0],
+        }
+    )
+
+
+def _patch_scorecard_network(monkeypatch) -> None:
+    """No real Jira reads: history is unavailable, same as the trend-hidden case."""
+    monkeypatch.setattr(render_shared, "fetch_person_resolved_count", lambda **_k: None)
+    monkeypatch.setattr(render_shared, "fetch_person_reopened_count", lambda **_k: None)
+
+
+def test_a_component_with_no_data_renders_n_a_never_zero(monkeypatch):
+    _patch_scorecard_network(monkeypatch)
+    parts = [
+        kpi.Component("Delivery", 80.0, "8 of 8 resolved this week", n=8),
+        kpi.Component(
+            "Urgent response",
+            0.0,
+            "insufficient data - needs open High+ priority tickets",
+            n=0,
+            sufficient=False,
+        ),
+    ]
+    monkeypatch.setattr(render_shared.kpi, "components", lambda *a, **k: parts)
+
+    captured = {}
+    monkeypatch.setattr(
+        render_shared.st,
+        "dataframe",
+        lambda data, **kw: captured.setdefault("df", data),
+    )
+
+    render_shared._render_scorecard(
+        "Tam", _scorecard_owned(), pd.DataFrame(), pd.DataFrame(), github_ready=True
+    )
+
+    df = captured["df"]
+    scores = dict(zip(df["Component"], df["Score"]))
+    assert scores["Delivery"] == "80"
+    assert scores["Urgent response"] == "n/a"
+    assert "0" != scores["Urgent response"]
+    assert 0 not in df["Score"].tolist()
+
+
+def test_the_scorecard_surfaces_the_measurable_denominator(monkeypatch):
+    _patch_scorecard_network(monkeypatch)
+    # Every weighted component except "Urgent response" (5 of the 100 points)
+    # has data, all scored at 80 - so the honest denominator is 95, not 100,
+    # and the weighted mean over what was actually measured is 80.
+    parts = [
+        kpi.Component(name, 80.0, "measured", n=4)
+        for name in kpi.WEIGHTS
+        if name != "Urgent response"
+    ] + [
+        kpi.Component(
+            "Urgent response",
+            0.0,
+            "insufficient data - needs open High+ priority tickets",
+            n=0,
+            sufficient=False,
+        ),
+    ]
+    monkeypatch.setattr(render_shared.kpi, "components", lambda *a, **k: parts)
+
+    metrics = []
+    captions = []
+    monkeypatch.setattr(
+        render_shared.st,
+        "metric",
+        lambda label, value, **kw: metrics.append((label, value)),
+    )
+    monkeypatch.setattr(render_shared.st, "caption", lambda text: captions.append(text))
+    monkeypatch.setattr(render_shared.st, "dataframe", lambda *a, **k: None)
+
+    render_shared._render_scorecard(
+        "Tam", _scorecard_owned(), pd.DataFrame(), pd.DataFrame(), github_ready=True
+    )
+
+    cov = kpi.coverage(parts)
+    overall_label, overall_value = metrics[0]
+    assert overall_label == "Overall"
+    # The denominator is the measurable weight (95, "Urgent response" missing 5
+    # of 100), never a flat "/ 100" that hides how much of the board could not
+    # be read.
+    assert overall_value == f"80 over {cov.covered_weight:.0f} measurable points"
+    assert "/ 100" not in overall_value
+    assert any("Urgent response" in c for c in captions)

@@ -100,9 +100,20 @@ def _render_attention_band(
     open PRs carry no approving review - sat below twenty tiles and two pies. It
     is the hero here, and nothing else on the page is drawn at its size.
     """
+    # Allocated in its own try, separate from the hero body below, so that
+    # even a failure in st.columns itself (the literal pre-split bug: an
+    # exception "at or before" the allocation line) leaves hero/a/b/c bound
+    # to something rather than unbound - the three decide cards need them
+    # regardless of whether the hero rendered at all (docs/assumptions/2G.md,
+    # bug 1).
     try:
         hero, a, b, c = st.columns([2.1, 1, 1, 1])
+    except Exception as e:
+        logger.exception("Error allocating attention band columns: %s", str(e))
+        st.error(f"Error displaying PR metrics: {str(e)}")
+        hero = a = b = c = st.container()
 
+    try:
         with hero:
             with st.container(border=True):
                 if not github_ready:
@@ -145,38 +156,38 @@ def _render_attention_band(
         logger.exception("Error rendering attention band PR section: %s", str(e))
         st.error(f"Error displaying PR metrics: {str(e)}")
 
-        _decision_card(
-            a,
-            chip="Triage",
-            accent="warning",
-            value=_text_or(triage_stuck, "—"),
-            headline=f"tickets stuck in triage > {TRIAGE_STUCK_HOURS:.0f}h",
-            note="Untriaged bugs age silently — nobody has decided they matter.",
-        )
-        _decision_card(
-            b,
-            chip="Review",
-            accent="danger",
-            value=str(prs.get("no_reviewer_asked", 0)) if github_ready else "—",
-            headline=f"PRs > {TODAY_NO_REVIEWER_DAYS:.0f} days with no reviewer asked",
-            note="Nobody was requested and nobody has looked. These stall by default.",
-        )
-        share_note = (
-            f"{ownerless / open_total:.0%} of open work belongs to nobody, so nobody's score carries it."
-            if open_total
-            else "No open tickets in scope."
-        )
-        _decision_card(
-            c,
-            chip="Ownership",
-            accent="info",
-            value=str(ownerless),
-            headline="open tickets with no owner",
-            note=share_note,
-        )
-    except Exception as e:
-        logger.exception("Error rendering decision cards: %s", str(e))
-        st.error(f"Error displaying decision metrics: {str(e)}")
+    # Dedented out of the try/except above: these three cards are the page's
+    # reason to exist and must render on the happy path, not only when the
+    # hero throws (see docs/assumptions/2G.md, bug 1).
+    _decision_card(
+        a,
+        chip="Triage",
+        accent="warning",
+        value=_text_or(triage_stuck, "—"),
+        headline=f"tickets stuck in triage > {TRIAGE_STUCK_HOURS:.0f}h",
+        note="Untriaged bugs age silently — nobody has decided they matter.",
+    )
+    _decision_card(
+        b,
+        chip="Review",
+        accent="danger",
+        value=str(prs.get("no_reviewer_asked", 0)) if github_ready else "—",
+        headline=f"PRs > {TODAY_NO_REVIEWER_DAYS:.0f} days with no reviewer asked",
+        note="Nobody was requested and nobody has looked. These stall by default.",
+    )
+    share_note = (
+        f"{ownerless / open_total:.0%} of open work belongs to nobody, so nobody's score carries it."
+        if open_total
+        else "No open tickets in scope."
+    )
+    _decision_card(
+        c,
+        chip="Ownership",
+        accent="info",
+        value=str(ownerless),
+        headline="open tickets with no owner",
+        note=share_note,
+    )
 
 
 _ACTION_QUEUE_NAMES = {
