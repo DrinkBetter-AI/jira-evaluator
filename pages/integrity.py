@@ -413,6 +413,8 @@ def _rollup_card(integrity_mod, tickets: pd.DataFrame, events: pd.DataFrame) -> 
             ]
             for r in tripped.itertuples()
         ]
+        # No tab=/section=: this page never offers a printable report - see
+        # _render_integrity_page's own comment on why.
         body = theme_html.table(columns, table_rows)
     else:
         body = _empty_note(
@@ -448,6 +450,18 @@ def _render_integrity_page() -> None:
     from data_layer import _engineering_context
 
     theme_html.css()
+    # ``_engineering_context()`` still hands back a reserved report-button
+    # slot, same as every other Engineering page - deliberately unused here.
+    # This page's own point is that a flag stays inside the gated screen,
+    # next to the evidence and the innocent reading that make it checkable,
+    # not printed to a standalone file someone can forward without either.
+    # No call below passes ``tab=``/``section=`` to ``theme_html.table()``
+    # for the same reason (see ``_rollup_card``'s own ``theme_html.table()``
+    # call) - so this page never calls ``_download_report`` at all, and its
+    # figures never reach ``st.session_state["tab_reports"]``. See
+    # ``docs/assumptions/5B.md`` (the decision point raised) and
+    # ``docs/assumptions/5C.md`` (the decision made) - do not "fix" this by
+    # wiring the button back in.
     bundle, view, _slot = _engineering_context()
     tickets = view.filtered if view.filtered is not None and not view.filtered.empty else bundle.df
     events = bundle.events

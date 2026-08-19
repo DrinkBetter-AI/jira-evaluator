@@ -464,6 +464,8 @@ def _render_delivery_page() -> None:
                 [(row.team, float(row.open), str(int(row.open))) for row in summary.itertuples()],
                 title="Where open work sits, by team",
                 subtitle=f"{len(df)} open tickets — ranked, never sliced",
+                tab=TAB_ENGINEERING,
+                section="Where open work sits, by team",
             )
     with right:
         if cycle.empty:
@@ -485,6 +487,8 @@ def _render_delivery_page() -> None:
                 subtitle="Median days a ticket sits before it moves on (n ≥ 5)",
                 footer=footer,
                 severity=True,
+                tab=TAB_ENGINEERING,
+                section="Cycle time by status",
             )
 
     stale = _stale_with_masked(df, events=bundle.events)
@@ -527,7 +531,9 @@ def _render_delivery_page() -> None:
             ]
             for row in stale.itertuples()
         ]
-        table_html = theme_html.table(columns, rows)
+        table_html = theme_html.table(
+            columns, rows, tab=TAB_ENGINEERING, section="Stale & abandoned"
+        )
         theme_html.render(
             _card(
                 table_html,

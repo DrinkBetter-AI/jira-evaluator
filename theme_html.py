@@ -48,7 +48,9 @@ shape can be forced to write immediately with ``write=True`` if a page ever
 wants that. Phase 3 pages should use the new, returning form - build
 fragments, hand them all to ``render()`` once per section. See
 ``docs/assumptions/1B.md`` for the full reasoning and for the report-recording
-mechanism folded into ``tiles``/``hbars`` at the same time.
+mechanism folded into ``tiles``/``hbars`` at the same time, and
+``docs/assumptions/5C.md`` for ``table()`` getting the same ``tab=``/
+``section=`` pair afterward.
 """
 
 from __future__ import annotations
@@ -330,28 +332,91 @@ def render(*fragments: str) -> None:
 # page_shared to fix the call sites itself (page_shared already imports
 # theme_html - that would be a cycle) and pages/code.py, pages/delivery.py
 # are out of this file's ownership. What is here instead: an optional
-# ``tab=``/``section=`` pair on ``tiles``/``hbars`` that, when a caller
-# supplies them, records into the exact ``st.session_state["tab_reports"]``
+# ``tab=``/``section=`` pair on ``tiles``/``hbars``/``table`` that, when a
+# caller supplies them, records into the exact ``st.session_state["tab_reports"]``
 # structure page_shared._report() builds, through the standalone ``report``
 # module both already depend on. "tab_reports" is the same string as
 # page_shared.REPORTS_KEY, duplicated rather than imported - see
 # docs/assumptions/1B.md for why, and for what breaks if that key is ever
 # renamed without this literal moving with it.
+#
+# ``table()`` got the same pair later (docs/assumptions/5C.md), on the same
+# opt-in shape: nothing changes for a call site that does not pass them.
 # ---------------------------------------------------------------------------
 
 _REPORTS_KEY = "tab_reports"
 
 
-def _record(tab: str | None, section: str | None, entries: Sequence[tuple[str, str, str]]) -> None:
-    if not tab or not section:
-        return
+def _report_for(tab: str) -> reporting.Report | None:
+    """The in-progress ``Report`` for ``tab``, or ``None`` outside a live session."""
     try:
         reports = st.session_state.setdefault(_REPORTS_KEY, {})
     except Exception:  # noqa: BLE001 - no live session state (a script, a test) costs nothing
+        return None
+    return reports.setdefault(tab, reporting.Report(tab))
+
+
+def _record(tab: str | None, section: str | None, entries: Sequence[tuple[str, str, str]]) -> None:
+    if not tab or not section:
         return
-    built = reports.setdefault(tab, reporting.Report(tab))
+    built = _report_for(tab)
+    if built is None:
+        return
     for label, value, note in entries:
         built.figure(section, label, str(value), note)
+
+
+def _plain(value: Any) -> str:
+    """A cell's raw value as report prose - never HTML-escaped, unlike ``_fmt_text``/``_fmt_num``.
+
+    ``report.Report.note()`` escapes what it is given itself (``report._rich()``);
+    handing it an already-``_esc``-ed string would escape the ampersands twice.
+    """
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, float):
+        return f"{value:.0f}"
+    return str(value).strip()
+
+
+def _record_table(
+    tab: str | None,
+    section: str | None,
+    kinds: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+) -> None:
+    """Record a table into the report as one sentence per row, not one figure per row.
+
+    A table has no single number the way a tile or a bar does, so each row
+    becomes a note under ``section`` - the same "sentences, not tiles"
+    convention ``page_shared._said()`` already uses for prose. ``"link"``
+    cells (a bare URL - nothing to read) and ``"html"`` cells (a fragment
+    built for the page, e.g. a chip or an avatar, not for a printed page) are
+    left out; every other kind's plain value is joined with " · ". A row that
+    reduces to nothing (every column skipped or blank) records no note at
+    all, matching ``Report.figure``'s "a tile showing nothing is left out"
+    rule for the same reason.
+    """
+    if not tab or not section:
+        return
+    built = _report_for(tab)
+    if built is None:
+        return
+    for row in rows:
+        parts = []
+        for kind, value in zip(kinds, row):
+            if kind in ("link", "html"):
+                continue
+            text = _plain(value)
+            if text:
+                parts.append(text)
+        if parts:
+            built.note(section, " · ".join(parts))
 
 
 # ---------------------------------------------------------------------------
@@ -1000,6 +1065,8 @@ def table(
     footer: str = "",
     max_rows: int = 25,
     write: bool | None = None,
+    tab: str | None = None,
+    section: str | None = None,
 ) -> str | None:
     """The card-free ``<table class="t">``. New form: ``(columns, rows)``.
 
@@ -1016,9 +1083,21 @@ def table(
     ``max_rows`` are not drawn in that form either way - these blocks
     display, they do not page - so a caller with a longer frame owes the
     reader a ``footer`` saying how much was cut.
+
+    ``tab=``/``section=`` record the rows actually drawn into the printable
+    report, the same opt-in pair ``tiles()``/``hbars()`` already take - see
+    ``_record_table``'s own docstring for the row-to-sentence shape. Only the
+    rows within ``max_rows`` are recorded, matching what is actually drawn.
     """
     if isinstance(columns, pd.DataFrame):
         legacy_columns = rows if rows is not None else []
+        shown = columns.head(max_rows)
+        _record_table(
+            tab,
+            section,
+            [kind for _, _, kind in legacy_columns],
+            [[row.get(source, "") for source, _, _ in legacy_columns] for _, row in shown.iterrows()],
+        )
         html_out = _legacy_table_html(
             columns, legacy_columns, title=title or "", subtitle=subtitle, footer=footer, max_rows=max_rows
         )
@@ -1026,7 +1105,9 @@ def table(
             return html_out
         st.markdown(f'<div class="vv">{html_out}</div>', unsafe_allow_html=True)
         return None
-    html_out = _table_html(columns, rows or [])
+    rows = rows or []
+    _record_table(tab, section, [c.kind for c in columns], [[cell.value for cell in row] for row in rows])
+    html_out = _table_html(columns, rows)
     if write:
         st.markdown(f'<div class="vv">{html_out}</div>', unsafe_allow_html=True)
         return None

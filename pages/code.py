@@ -192,7 +192,9 @@ def _render_code_kpis(
                 ),
                 "danger" if unapproved_share > 0.25 else "neutral",
             ),
-        ]
+        ],
+        tab=TAB_ENGINEERING,
+        section="Code",
     )
 
 
@@ -223,6 +225,8 @@ def _render_repo_coverage(open_prs: pd.DataFrame) -> None:
         title="",
         footer=footer,
         severity=True,
+        tab=TAB_ENGINEERING,
+        section="Review coverage by repo",
     )
 
 
@@ -316,6 +320,8 @@ def _render_stuck_queue(open_prs: pd.DataFrame, tickets: pd.DataFrame) -> None:
         title="",
         footer=_truncation_note(len(stuck), _STUCK_QUEUE_ROWS),
         max_rows=_STUCK_QUEUE_ROWS,
+        tab=TAB_ENGINEERING,
+        section="Stuck queue",
     )
 
 
@@ -483,7 +489,9 @@ def _render_unprompted_reviews(pool: pd.DataFrame) -> None:
                 theme_html.Cell(partner),
             ]
         )
-    theme_html.render(theme_html.table(columns, rows))
+    theme_html.render(
+        theme_html.table(columns, rows, tab=TAB_ENGINEERING, section="Unprompted reviews")
+    )
 
 
 def _devin_findings_rows(judged_pool: pd.DataFrame, merged_prs: pd.DataFrame) -> pd.DataFrame:
@@ -560,7 +568,7 @@ def _findings_table_html(findings: pd.DataFrame) -> str:
                 theme_html.Cell(role_html),
             ]
         )
-    return theme_html.table(columns, rows)
+    return theme_html.table(columns, rows, tab=TAB_ENGINEERING, section="Devin findings per author")
 
 
 def _draft_hiding_rows(pool: pd.DataFrame) -> pd.DataFrame:
@@ -614,6 +622,8 @@ def _render_draft_hiding_row(pool: pd.DataFrame) -> None:
                 ]
                 for row in flagged.itertuples()
             ],
+            tab=TAB_ENGINEERING,
+            section="Went to draft after a review was requested",
         )
     )
 

@@ -592,7 +592,9 @@ def _scorecard_fragment(
         [theme_html.Cell(f"{label} ({count})"), theme_html.Cell(url)]
         for label, count, url in evidence
     ]
-    evidence_html = theme_html.table(evidence_columns, evidence_rows)
+    evidence_html = theme_html.table(
+        evidence_columns, evidence_rows, tab=TAB_ENGINEERING, section="People"
+    )
 
     right_card = _card(
         f'<p class="chart-title">Delivered, {WEEKS} weeks <span class="nnote">'
@@ -670,7 +672,9 @@ def _render_people_page() -> None:
     shown = _sorted_table(shown)
 
     rows = [_table_row(row) for _, row in shown.iterrows()]
-    theme_html.render(_card(theme_html.table(_TABLE_COLUMNS, rows)))
+    theme_html.render(
+        _card(theme_html.table(_TABLE_COLUMNS, rows, tab=TAB_ENGINEERING, section="People"))
+    )
 
     person_options = shown["person"].tolist() if not shown.empty else table_df["person"].tolist()
     if not person_options:

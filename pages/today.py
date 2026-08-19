@@ -44,7 +44,7 @@ import theme
 import theme_html
 import theme_tokens
 from data_layer import TRIAGE_STUCK_HOURS, _NO_OWNER_NAMES, _engineering_data
-from page_shared import _as_frame, _text_or
+from page_shared import TAB_ENGINEERING, _as_frame, _download_report, _text_or
 from render_shared import (
     JIRA_BROWSE_BASE,
     TODAY_NO_REVIEWER_DAYS,
@@ -954,7 +954,7 @@ def _status_hbars_fragment(df: pd.DataFrame, parked: int) -> str:
     return (
         '<div class="card"><p class="chart-title">Where open work sits</p>'
         f'<p class="chart-sub">{html.escape(sub)}</p>'
-        f"{theme_html.hbars(bars)}</div>"
+        f'{theme_html.hbars(bars, tab=TAB_ENGINEERING, section="Today")}</div>'
     )
 
 
@@ -1011,6 +1011,11 @@ def _render_today_page() -> None:
     next" alone stays Streamlit widgets.
     """
     theme_html.css()
+    # Reserved before the page draws anything, same as _engineering_context()
+    # does for every sibling page: the file can only be built once the
+    # sections below have run, but the button's position is fixed regardless
+    # of how long that takes.
+    slot = st.columns([5, 1])[1]
     bundle = _engineering_data()
     # Backlog rows are left out here as they are on Delivery and Engineering by
     # default. Counting them made this page open with "16 open tickets" above a
@@ -1052,7 +1057,7 @@ def _render_today_page() -> None:
             "This week",
             "Counts are telemetry, not performance — people are scored on the People page.",
         ),
-        theme_html.tiles(tiles),
+        theme_html.tiles(tiles, tab=TAB_ENGINEERING, section="Today"),
         '<div class="charts2" style="margin-top:14px">'
         + _throughput_chart_fragment(throughput)
         + _status_hbars_fragment(df, parked)
@@ -1061,3 +1066,4 @@ def _render_today_page() -> None:
             "Today is org-wide and filter-free by design — scoped views live on the pages behind it."
         ),
     )
+    _download_report(slot, TAB_ENGINEERING)

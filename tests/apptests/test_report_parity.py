@@ -1,32 +1,33 @@
-"""Task 5B: does "Download report" actually carry what the page shows?
+"""Task 5B/5C: does "Download report" actually carry what the page shows?
 
 Agent 1B found that ``theme_html.tiles()``/``theme_html.hbars()`` never
 recorded into the printable report and added an optional ``tab=``/
 ``section=`` keyword pair that, when a caller supplies it, records the same
-way ``page_shared._tile``/``_kpis`` always have. This file is the follow-up
-the task brief asked for: render each page for real, build its report, and
-check - per page, per component - whether what is on screen is actually in
-the file the "Download report" button hands over.
+way ``page_shared._tile``/``_kpis`` always have. Agent 5B rendered every
+page for real, built its report, and checked - per page, per component -
+whether what was on screen was actually in the file the "Download report"
+button hands over. The answer at that point was "partially": Delivery's
+tiles held; Delivery's hbars, Code's tiles/hbars/table and People's table
+did not, because those call sites never passed ``tab=``/``section=`` (and,
+for the table cases, because ``theme_html.table()`` had no such keywords to
+pass at all). Six gaps, pinned as ``xfail(strict=True)`` cases below.
 
-The answer is "partially". Where a call site was updated to pass
-``tab=``/``section=`` (``pages/delivery.py``'s ``theme_html.tiles(...)``
-call), the fix holds and is asserted plainly below. Where a call site was
-not - ``pages/code.py``'s ``theme_html.tiles()``/``theme_html.hbars()``
-calls, both pages' ``theme_html.hbars()``/``theme_html.table()`` calls that
-draw ranked bars and tables, and every page that only ever calls
-``theme_html.table()`` (``pages/people.py``) - the gap is real, end to end,
-with real rendered data, not just by reading the source. Those are pinned
-below as ``xfail`` cases: each asserts the parity that *should* hold, with a
-reason pointing at which file the fix belongs to (none of them are pages/
-theme_html.py/render_shared.py, which are out of this task's ownership -
-see ``docs/assumptions/5B.md``). An ``xfail`` that starts passing
-(``XPASS``) is the signal that a fix landed and the marker should come off.
+Task 5C closed all six: ``theme_html.table()`` gained the same ``tab=``/
+``section=`` pair ``tiles()``/``hbars()`` already had (recording one report
+note per row rather than one figure - see ``theme_html._record_table``'s own
+docstring), and every named call site in ``pages/delivery.py``,
+``pages/code.py`` and ``pages/people.py`` now passes it. Every test below
+that used to be ``xfail`` now asserts the parity plainly, with no marker -
+see ``docs/assumptions/5C.md``.
 
-Today and Integrity are not here at all: neither page calls
-``_download_report`` in the first place (confirmed by
-``grep -n _download_report pages/today.py pages/integrity.py`` returning
-nothing), so there is no report to check parity against - see
-``docs/assumptions/5B.md``.
+Today and Integrity were flagged by 5B as a decision point rather than a
+gap - neither page called ``_download_report`` at all, so there was no
+report to check parity against. 5C decided both, deliberately, in opposite
+directions (``docs/assumptions/5C.md``): Today, the landing page, now
+records like every sibling Engineering page (see the "Today" tests below).
+Integrity does not, and the tests below prove it stays that way even when
+the page renders real flag content under an admin session - see
+``pages/integrity.py``'s own comment on ``_render_integrity_page`` for why.
 """
 
 from __future__ import annotations
@@ -249,8 +250,8 @@ def _report_html(test: AppTest, tab: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Delivery: the fixed call site (tiles) holds; the un-fixed ones (hbars,
-# table) don't - all against the same render, same synthetic board.
+# Delivery: tiles, hbars and the stale-queue table all record now, all
+# against the same render, same synthetic board.
 # ---------------------------------------------------------------------------
 
 
@@ -265,16 +266,8 @@ def test_delivery_tiles_are_recorded_in_the_report():
         assert label in report, f"{label!r} is on screen but missing from the report"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "pages/delivery.py's two theme_html.hbars() calls ('Where open work "
-        "sits, by team' and 'Cycle time by status') don't pass tab=/section=, "
-        "so 1B's recording fix never fires for them. Fix belongs to "
-        "pages/delivery.py, a page module outside this task's ownership."
-    ),
-    strict=True,
-)
 def test_delivery_hbars_are_recorded_in_the_report():
+    """5C: pages/delivery.py's two hbars() calls now pass tab=/section=."""
     test = _run_baseline("delivery")
     rendered = _rendered_text(test)
     report = _report_html(test, page_shared.TAB_ENGINEERING)
@@ -282,16 +275,8 @@ def test_delivery_hbars_are_recorded_in_the_report():
     assert "Where open work sits, by team" in report
 
 
-@pytest.mark.xfail(
-    reason=(
-        "theme_html.table() has no tab=/section= parameters at all (only "
-        "tiles()/hbars() got 1B's fix), so no call to it can ever record "
-        "into the report regardless of the call site. Fix belongs to "
-        "theme_html.py, outside this task's ownership."
-    ),
-    strict=True,
-)
 def test_delivery_stale_table_is_recorded_in_the_report():
+    """5C: theme_html.table() now takes tab=/section= too, and Delivery uses it."""
     test = _run_baseline("delivery")
     rendered = _rendered_text(test)
     report = _report_html(test, page_shared.TAB_ENGINEERING)
@@ -300,11 +285,10 @@ def test_delivery_stale_table_is_recorded_in_the_report():
 
 
 # ---------------------------------------------------------------------------
-# Code: nothing is recorded at all - the KPI tiles, the review-coverage
-# bars and the stuck-code table are all on screen and all absent from the
-# report. Needs GitHub "ready" (the credential-free baseline harness proves
-# the page degrades safely without it, but never reaches these sections at
-# all in that state - see _code_report_data.py's own docstring).
+# Code: the KPI tiles, the review-coverage bars and the stuck-code table all
+# record now. Needs GitHub "ready" (the credential-free baseline harness
+# proves the page degrades safely without it, but never reaches these
+# sections at all in that state - see _code_report_data.py's own docstring).
 # ---------------------------------------------------------------------------
 
 
@@ -318,76 +302,95 @@ def test_code_page_renders_its_pr_sections_with_github_ready():
     assert any(s.startswith("Stuck queue") for s in subheaders)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "pages/code.py's _render_code_kpis() calls theme_html.tiles([...]) "
-        "with no tab=/section= - the five headline PR numbers never reach "
-        "1B's recording path. Fix belongs to pages/code.py, a page module "
-        "outside this task's ownership."
-    ),
-    strict=True,
-)
 def test_code_kpi_tiles_are_recorded_in_the_report():
+    """5C: pages/code.py's _render_code_kpis() now passes tab=/section=."""
     test = _run_code_with_github()
     report = _report_html(test, page_shared.TAB_ENGINEERING)
     assert "Open PRs" in report
     assert "No approving review" in report
 
 
-@pytest.mark.xfail(
-    reason=(
-        "pages/code.py's _render_repo_coverage() calls theme_html.hbars() "
-        "with no tab=/section=. Fix belongs to pages/code.py."
-    ),
-    strict=True,
-)
 def test_code_repo_coverage_bars_are_recorded_in_the_report():
+    """5C: pages/code.py's _render_repo_coverage() now passes tab=/section=."""
     test = _run_code_with_github()
     report = _report_html(test, page_shared.TAB_ENGINEERING)
     assert "vinovoss-api" in report  # the repo with no approving review
 
 
-@pytest.mark.xfail(
-    reason=(
-        "pages/code.py's stuck-queue table is drawn through theme_html.table(), "
-        "which has no tab=/section= parameters at all - see the delivery-table "
-        "xfail above for the same root cause. Fix belongs to theme_html.py."
-    ),
-    strict=True,
-)
 def test_code_stuck_queue_table_is_recorded_in_the_report():
+    """5C: pages/code.py's stuck-queue table() call now passes tab=/section=."""
     test = _run_code_with_github()
     report = _report_html(test, page_shared.TAB_ENGINEERING)
     assert "ENG-11 fix checkout crash" in report
 
 
 # ---------------------------------------------------------------------------
-# People: the page renders real content (tables, via theme_html.table()) but
-# never calls page_shared._tile/_kpis/_said or theme_html.tiles()/hbars()
-# with tab=/section= at all - its report is unconditionally empty, so the
-# "Download report" button never even appears.
+# People: the page renders real content (tables, via theme_html.table()),
+# and both of its table() calls now pass tab=/section=, so the report is
+# non-empty and the "Download report" button - already called via
+# _download_report, but drawing nothing while the report stayed empty -
+# finally appears.
 # ---------------------------------------------------------------------------
 
 
 def test_people_page_renders_real_content():
-    """Fixture sanity for the xfail below: the page has something to report."""
+    """Fixture sanity for the test below: the page has something to report."""
     test = _run_baseline("people")
     rendered = _rendered_text(test)
     assert len(rendered) > 5000
     assert "<table" in rendered
 
 
-@pytest.mark.xfail(
-    reason=(
-        "pages/people.py never calls page_shared._tile/_kpis/_said or "
-        "theme_html.tiles()/hbars() with tab=/section= - it only calls the "
-        "unrecordable theme_html.table() (see the delivery-table xfail "
-        "above). Its report is unconditionally empty and the 'Download "
-        "report' button never renders. Fix belongs to pages/people.py."
-    ),
-    strict=True,
-)
 def test_people_page_offers_a_download_report_button():
+    """5C: pages/people.py's two table() calls now pass tab=/section=, so the
+    report is non-empty and _download_report's "Download report" button (the
+    call site was already there - see docs/assumptions/5B.md) finally draws.
+    """
     test = _run_baseline("people")
     labels = [b.label for b in test.download_button]
     assert "Download report" in labels
+
+
+# ---------------------------------------------------------------------------
+# Today: 5C's own decision (docs/assumptions/5C.md) - the landing page gets a
+# report, the same as every other Engineering page.
+# ---------------------------------------------------------------------------
+
+
+def test_today_page_offers_a_download_report_button():
+    test = _run_baseline("today")
+    labels = [b.label for b in test.download_button]
+    assert "Download report" in labels
+
+
+def test_today_tiles_are_recorded_in_the_report():
+    test = _run_baseline("today")
+    rendered = _rendered_text(test)
+    report = _report_html(test, page_shared.TAB_ENGINEERING)
+    assert report, "Today offered no report at all"
+    for label in ("Open tickets", "Stalled 30d+"):
+        assert label in rendered, f"{label!r} is not even on screen - fixture drifted"
+        assert label in report, f"{label!r} is on screen but missing from the report"
+
+
+# ---------------------------------------------------------------------------
+# Integrity: 5C's own decision (docs/assumptions/5C.md) - deliberately not
+# recorded. An admin session that renders the page must still find nothing
+# under "Engineering" that this page alone put there - a printable Integrity
+# artifact would be exactly the forwardable-out-of-context document its own
+# page docstring says the design is trying to avoid.
+# ---------------------------------------------------------------------------
+
+
+def test_integrity_page_is_not_in_the_report():
+    """The admin-gated page renders real flag content and still records nothing."""
+    os.environ["BASELINE_ADMIN"] = "1"
+    test = AppTest.from_file(BASELINE_HARNESS, default_timeout=300)
+    os.environ["BASELINE_PAGE"] = "integrity"
+    test.run()
+    assert not test.exception, [e.value for e in test.exception]
+    rendered = _rendered_text(test)
+    assert "Integrity" in rendered  # fixture sanity: the page actually drew something
+    report = _report_html(test, page_shared.TAB_ENGINEERING)
+    assert "Integrity" not in report
+    assert "tripped a flag" not in report

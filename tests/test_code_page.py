@@ -40,7 +40,7 @@ def test_the_merge_tile_counts_unapproved_merges_not_self_presses(monkeypatch):
     normal merge as danger.
     """
     captured: dict = {}
-    monkeypatch.setattr(app.theme_html, "tiles", lambda cards: captured.setdefault("cards", cards))
+    monkeypatch.setattr(app.theme_html, "tiles", lambda cards, **_: captured.setdefault("cards", cards))
     monkeypatch.setattr(app.theme_html, "hbars", lambda *a, **k: None)
 
     # Two self-presses; only one of them went in with nobody else's approval.
@@ -59,7 +59,7 @@ def test_the_merge_tile_counts_unapproved_merges_not_self_presses(monkeypatch):
 def test_the_open_pr_tile_does_not_promise_a_draft_count_it_cannot_have(monkeypatch):
     """``_open_query`` searches ``draft:false``, so "of N including drafts" repeated N."""
     captured: dict = {}
-    monkeypatch.setattr(app.theme_html, "tiles", lambda cards: captured.setdefault("cards", cards))
+    monkeypatch.setattr(app.theme_html, "tiles", lambda cards, **_: captured.setdefault("cards", cards))
     open_prs = pd.DataFrame(
         {
             "is_draft": [False, False],
@@ -174,7 +174,7 @@ def test_no_exclusion_configured_is_a_silent_page(monkeypatch):
 def test_the_open_pr_tile_says_the_real_total_when_it_is_known(monkeypatch):
     """The counterpart to the existing "does not promise a draft count" test."""
     captured: dict = {}
-    monkeypatch.setattr(app.theme_html, "tiles", lambda cards: captured.setdefault("cards", cards))
+    monkeypatch.setattr(app.theme_html, "tiles", lambda cards, **_: captured.setdefault("cards", cards))
     open_prs = pd.DataFrame(
         {
             "is_draft": [False, False],
