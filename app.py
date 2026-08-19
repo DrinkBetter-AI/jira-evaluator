@@ -37,6 +37,7 @@ import read_log
 import snapshot as board
 import theme_html
 import integrity
+import access_gate
 from access_gate import render_sign_out, require_password
 from jira_client import JiraClient
 from theme import inject_styles
@@ -308,6 +309,42 @@ def _render_engineering_page() -> None:
     return engineering._render_engineering_page()
 
 
+# Literal, not imported: pulling it from ``pages.integrity`` would be a
+# top-level import of a page module, which the lazy-import rule (see the
+# module docstring above and docs/assumptions/1C.md) reserves for inside a
+# page's own render dispatch. Six characters duplicated once here is cheaper
+# than the alternative of eagerly loading integrity.py's page module - and
+# its heavy analytics imports - for every reader who never opens this page.
+INTEGRITY_PAGE_TITLE = "Integrity"
+
+
+def _render_integrity_page() -> None:
+    """Render the Integrity page (lazy wrapper)."""
+    from pages import integrity as integrity_page
+    return integrity_page._render_integrity_page()
+
+
+def _integrity_readable() -> bool:
+    """Whether this deployment has an admin credential configured at all.
+
+    Structurally this mirrors ``_business_readable()`` above: a cheap
+    configuration check that decides whether ``_page_specs()`` advertises
+    the page's ``_PageSpec`` at all. It deliberately checks *configuration*
+    (``DASHBOARD_ADMIN_PASSWORD`` set), not *this session's identity* -
+    gating registration on "has this session already authenticated" would
+    mean nobody could ever reach the page to type the password on in the
+    first place, since Streamlit only routes a URL to a page that was
+    already part of that session's very first ``st.navigation()`` call. Per-
+    session identity is enforced separately, unconditionally, inside the
+    page's own render function (``access_gate.require_admin_password()``,
+    called before a single other line of ``pages/integrity.py`` runs) -
+    that is what actually decides whether a non-admin visitor sees anything
+    beyond a password prompt, and whether ``integrity.py``/``pr_quality.py``
+    get imported and called at all. See ``docs/assumptions/4.md``.
+    """
+    return access_gate.admin_password_configured()
+
+
 # --- Backward-compatible re-exports for page-private test helpers -----------
 #
 # _ownerless, _cycle_by_status and friends below are private to one page
@@ -384,6 +421,23 @@ def _page_specs() -> list[_PageSpec]:
     if _business_readable():
         specs.append(
             _PageSpec(_render_business, BUSINESS_PAGE_TITLE, ":material/storefront:", "business")
+        )
+    if _integrity_readable():
+        # hidden=True: the mechanism _pages() below has always translated
+        # into st.Page(..., visibility="hidden") but that no spec had ever
+        # set (see docs/assumptions/4.md). A page that names people and
+        # shows padding evidence does not belong in the persistent top nav
+        # that every hourly contractor also sees - it is reachable at
+        # /integrity for whoever is told the URL and holds the admin
+        # credential, and invisible to everyone else's navigation menu.
+        specs.append(
+            _PageSpec(
+                _render_integrity_page,
+                INTEGRITY_PAGE_TITLE,
+                ":material/verified_user:",
+                "integrity",
+                hidden=True,
+            )
         )
     return specs
 
