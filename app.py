@@ -246,6 +246,90 @@ def _render_business() -> None:
     return business._render_business()
 
 
+# Re-export business page functions for backward compatibility with tests
+def _offers_together(frames):
+    """Re-export from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business._offers_together(frames)
+
+
+def _one_account_products(client, config, customer_id, days, today):
+    """Re-export from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business._one_account_products(client, config, customer_id, days, today)
+
+
+def _distinct_labels(titles):
+    """Re-export from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business._distinct_labels(titles)
+
+
+def _least_squares(x, y):
+    """Re-export from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business._least_squares(x, y)
+
+
+def _rate_delta(now, before, decimals, mode):
+    """Re-export from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business._rate_delta(now, before, decimals, mode)
+
+
+def _delta_arrow(change):
+    """Re-export from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business._delta_arrow(change)
+
+
+def _money_delta(change, currency):
+    """Re-export from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business._money_delta(change, currency)
+
+
+def _no_ad_products(read=True):
+    """Re-export from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business._no_ad_products(read)
+
+
+def _offer_sales_cached(source, days, today):
+    """Re-export from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business._offer_sales_cached(source, days, today)
+
+
+def _per_hundred(rate):
+    """Re-export from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business._per_hundred(rate)
+
+
+def _visible(offers, wines, sales):
+    """Re-export from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business._visible(offers, wines, sales)
+
+
+# Re-export business page constants for backward compatibility with tests
+_ASK_COLUMNS = (
+    "title",
+    "merchant",
+    "clicks",
+    "bottles",
+    "price",
+    "benchmark",
+    "gap",
+    "cut_price",
+    "cut_gap",
+    "cut",
+    "overpay",
+    "google_cut",
+)
+
+
 logger = logging.getLogger(__name__)
 
 # GitHub logins that are not people. They open and merge real pull requests, so
