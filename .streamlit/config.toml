@@ -18,17 +18,20 @@ baseFontSize = 17
 # so it is separated from the data by a tint instead.
 dataframeHeaderBackgroundColor = "#f1f5f9"
 dataframeBorderColor = "#e5e7eb"
-# The same eight hues as theme.CATEGORICAL, in the same order. Streamlit applies
-# these to Plotly, Altair and Vega-Lite alike, which is what makes an
-# `st.bar_chart` and a `theme.plot` figure on the same page agree; keep the two
-# lists in step, since nothing checks one against the other at runtime.
+# The same eight hues as theme_tokens.SERIES (and theme.CATEGORICAL, which is
+# that same list), in the same order. Streamlit applies these to Plotly,
+# Altair and Vega-Lite alike, which is what makes an `st.bar_chart` and a
+# `theme.plot` figure on the same page agree. TOML cannot import Python, so
+# this list is hand-kept in step with theme_tokens.SERIES; a mismatch is not a
+# runtime error, it is two charts on the same page in different colours - that
+# is exactly what tests/test_theme_tokens.py checks on every run.
 chartCategoricalColors = [
     "#2563eb",
-    "#e69f00",
-    "#009e73",
-    "#5b21b6",
-    "#56b4e9",
-    "#d55e00",
-    "#cc79a7",
-    "#6b7280",
+    "#eb6834",
+    "#1baf7a",
+    "#eda100",
+    "#e87ba4",
+    "#008300",
+    "#4a3aa7",
+    "#e34948",
 ]

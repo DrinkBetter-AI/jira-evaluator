@@ -16,6 +16,8 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
+import theme_tokens
+
 
 # Chart and caption text. Plotly draws at 12px and Streamlit captions at about
 # 0.8rem, both of which sit beside metric numbers three times their size: the
@@ -38,18 +40,26 @@ _TEMPLATE = "vinovoss"
 # drawn on a canvas and cannot be reached by any stylesheet - lands at 15px
 # instead of 14px. Sizes written in rem would have been scaled by that same
 # 17/16 and quietly drifted off the ladder; these do not move.
-TYPE_META = "13px"  # chips, notes, the small print under a number
-TYPE_LABEL = "14px"  # what a number is called
-TYPE_BODY = "15px"  # tables, captions, widget labels - most of this dashboard
-TYPE_LEAD = "17px"  # the prose that explains the numbers
-TYPE_SECTION = "20px"  # a card's headline
-TYPE_DISPLAY = "32px"  # the KPI number itself
+#
+# The numbers themselves live in theme_tokens.TYPE - this is that same ladder
+# with "px" back on, since every caller here interpolates these straight into
+# a CSS string or an f-string style attribute.
+TYPE_META = f"{theme_tokens.TYPE['meta']}px"  # chips, notes, the small print under a number
+TYPE_LABEL = f"{theme_tokens.TYPE['label']}px"  # what a number is called
+TYPE_BODY = f"{theme_tokens.TYPE['body']}px"  # tables, captions, widget labels - most of this dashboard
+TYPE_LEAD = f"{theme_tokens.TYPE['lead']}px"  # the prose that explains the numbers
+TYPE_SECTION = f"{theme_tokens.TYPE['section']}px"  # a card's headline
+TYPE_DISPLAY = f"{theme_tokens.TYPE['display']}px"  # the KPI number itself
 
 # The widest the main column is allowed to get. `layout="wide"` with no ceiling
 # turns a six-card KPI strip into a thin ribbon on a 34-inch monitor and drags
 # the eye across two feet of table, so the content is centred in a column about
 # as wide as a reader can track a row across.
-CONTENT_MAX_WIDTH = "1560px"
+#
+# This used to be a separate, larger number (1560px) than the mockup's own
+# `.shell{max-width:1280px}`. The mockup is the design spec; 1280px wins. See
+# docs/assumptions/1A.md.
+CONTENT_MAX_WIDTH = theme_tokens.MAX_WIDTH
 
 
 # --- Colour ------------------------------------------------------------------
@@ -57,12 +67,17 @@ CONTENT_MAX_WIDTH = "1560px"
 # Semantic, not categorical: these five say whether a number is good or bad and
 # are used by `kpi_strip` alone. A chart must not reach for them, or "green"
 # stops meaning "healthy" the moment a series happens to be third in a legend.
+#
+# Four of the five are theme_tokens.STATUS's text colours; "neutral" has no
+# status tone of its own (there is no such thing as a neutral status pill) and
+# is set to the mockup's own primary ink instead - a neutral accent is just
+# text with no meaning attached. See docs/assumptions/1A.md.
 ACCENTS = {
-    "neutral": "#1f2937",
-    "danger": "#b91c1c",
-    "warning": "#b45309",
-    "good": "#15803d",
-    "info": "#1d4ed8",
+    "neutral": theme_tokens.INK["1"],
+    "danger": theme_tokens.STATUS["crit"][0],
+    "warning": theme_tokens.STATUS["warn"][0],
+    "good": theme_tokens.STATUS["good"][0],
+    "info": theme_tokens.STATUS["info"][0],
 }
 
 # The one categorical sequence. Charts that need to tell series apart take these
@@ -70,26 +85,18 @@ ACCENTS = {
 # palettes, so the same status was three colours depending on which chart a
 # reader was looking at.
 #
-# Chosen from the Okabe-Ito colourblind-safe set, with its blue replaced by the
-# app's own primary (#2563eb, the `primaryColor` in .streamlit/config.toml) and
-# its illegible-on-white yellow replaced by a deep violet. Ordered so that
-# neighbours differ in lightness as well as hue, which is what survives a
-# greyscale print or a projector with the colour turned down: the weakest
-# adjacent pair is still 1.26:1 apart in luminance and most are over 1.5:1.
+# This is theme_tokens.SERIES - the mockup's own "series (validated: dataviz
+# six-checks, light surface)" sequence - rather than a palette invented for
+# charts alone, so a plotly bar and an HTML bar drawn from the same data are
+# the same hex. It replaces an earlier Okabe-Ito-derived set that predated the
+# mockup and did not match it. A list, not a tuple, so it compares equal to
+# theme_tokens.SERIES; copied rather than aliased so mutating one does not
+# mutate the other.
 #
 # Eight is the ceiling and it is already generous. No eight-colour set is fully
 # separable in greyscale, which is the second reason `rank_bar` collapses a long
 # tail rather than drawing it.
-CATEGORICAL = (
-    "#2563eb",  # blue - the app's primary
-    "#e69f00",  # orange
-    "#009e73",  # bluish green
-    "#5b21b6",  # violet
-    "#56b4e9",  # sky
-    "#d55e00",  # vermillion
-    "#cc79a7",  # reddish purple
-    "#6b7280",  # slate, and the colour of an "Other" bar
-)
+CATEGORICAL = list(theme_tokens.SERIES)
 
 
 def categorical(count: int) -> list[str]:
@@ -129,39 +136,39 @@ _STYLE = f"""
 
 .kpi-strip {{ display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 0.25rem 0 1rem; }}
 .kpi-card {{
-  flex: 1 1 170px; padding: 0.9rem 1.1rem; border: 1px solid #e5e7eb;
-  border-radius: 12px; background: #ffffff;
+  flex: 1 1 170px; padding: 0.9rem 1.1rem; border: 1px solid {theme_tokens.PLANE['line']};
+  border-radius: 12px; background: {theme_tokens.PLANE['card']};
 }}
 .kpi-card .kpi-label {{
-  font-size: {TYPE_LABEL}; color: #6b7280; text-transform: none; letter-spacing: 0.01em;
+  font-size: {TYPE_LABEL}; color: {theme_tokens.INK['3']}; text-transform: none; letter-spacing: 0.01em;
 }}
 .kpi-card .kpi-value {{ font-size: {TYPE_DISPLAY}; font-weight: 700; line-height: 1.2; }}
-.kpi-card .kpi-note {{ font-size: {TYPE_META}; color: #9ca3af; }}
+.kpi-card .kpi-note {{ font-size: {TYPE_META}; color: {theme_tokens.INK['4']}; }}
 
 /* Triage card: one ticket, sized to be judged at a glance. */
 .triage-card {{
-  border: 1px solid #e5e7eb; border-radius: 14px; background: #ffffff;
+  border: 1px solid {theme_tokens.PLANE['line']}; border-radius: 14px; background: {theme_tokens.PLANE['card']};
   padding: 1.1rem 1.3rem; margin: 0.4rem 0 0.9rem;
 }}
-.triage-card .triage-key {{ font-size: {TYPE_LABEL}; font-weight: 700; color: #1d4ed8; }}
+.triage-card .triage-key {{ font-size: {TYPE_LABEL}; font-weight: 700; color: {theme_tokens.STATUS['info'][0]}; }}
 .triage-card .triage-summary {{
-  font-size: {TYPE_SECTION}; font-weight: 600; color: #111827; line-height: 1.35;
+  font-size: {TYPE_SECTION}; font-weight: 600; color: {theme_tokens.INK['1']}; line-height: 1.35;
   margin: 0.15rem 0 0.7rem;
 }}
 .triage-meta {{ display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.6rem; }}
 .triage-meta span {{
-  background: #f3f4f6; color: #4b5563; border-radius: 6px;
+  background: {theme_tokens.MUTED_BG}; color: {theme_tokens.INK['2']}; border-radius: 6px;
   padding: 3px 9px; font-size: {TYPE_META}; white-space: nowrap;
 }}
 /* The signals that argue for closing, so the eye finds them first. */
-.triage-meta span.hot {{ background: #fdecec; color: #b91c1c; font-weight: 600; }}
-.triage-why {{ font-size: {TYPE_BODY}; color: #6b7280; font-style: italic; }}
+.triage-meta span.hot {{ background: {theme_tokens.STATUS['crit'][1]}; color: {theme_tokens.STATUS['crit'][0]}; font-weight: 600; }}
+.triage-why {{ font-size: {TYPE_BODY}; color: {theme_tokens.INK['3']}; font-style: italic; }}
 
 /* The prose the numbers are explained in. Streamlit sizes captions, help text
    and widget labels for a dense form; beside a 32px metric they read as a
    footnote, and every honest qualification on this dashboard lives in one. */
 [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {{
-  font-size: {TYPE_BODY}; line-height: 1.5; color: #4b5563;
+  font-size: {TYPE_BODY}; line-height: 1.5; color: {theme_tokens.INK['2']};
 }}
 [data-testid="stWidgetLabel"] p, [data-testid="stMetricLabel"] p {{ font-size: {TYPE_BODY}; }}
 [data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li {{
@@ -371,8 +378,13 @@ def rank_bar(
 
     # One colour for the named rows, because they are one dimension and colouring
     # them individually would imply a distinction that is not there. The
-    # collapsed tail is drawn in the palette's grey so it reads as the leftovers
-    # rather than as somebody called "Other".
+    # collapsed tail is drawn in the palette's last colour so it is visually
+    # set apart from the named rows rather than reading as somebody called
+    # "Other". Under the old Okabe-Ito-derived CATEGORICAL that last colour was
+    # a neutral slate; under theme_tokens.SERIES it is s8, a red - which now
+    # reads as a warning rather than as leftovers. Flagged, not fixed here: the
+    # test pinning this to CATEGORICAL[-1] (tests/test_theme_visual.py) is not
+    # a file this task owns. See docs/assumptions/1A.md.
     colors = [
         CATEGORICAL[-1] if _other_size(name) is not None else CATEGORICAL[0]
         for name in frame["category"]
