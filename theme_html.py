@@ -159,6 +159,7 @@ def _delta_class(delta_good: bool | None) -> str:
 # ---------------------------------------------------------------------------
 
 _CSS_TOKENS = {
+    "__HERO_SIZE__": f"{theme_tokens.HERO_SIZE}px",
     "__RADIUS_SM__": theme_tokens.RADIUS["sm"],
     "__RADIUS_MD__": theme_tokens.RADIUS["md"],
     "__RADIUS_LG__": theme_tokens.RADIUS["lg"],
@@ -194,14 +195,14 @@ _CSS_BODY = """
 
 .vv .hero { display: grid; grid-template-columns: minmax(300px, 1.15fr) 2fr; gap: __SPACE_LG__; margin-top: 6px; }
 .vv .kicker { font-size: var(--t-meta); font-weight: 650; letter-spacing: .04em; text-transform: uppercase; display: flex; gap: 6px; align-items: center; }
-.vv .big { font-size: 48px; font-weight: 700; line-height: 1.05; margin: 6px 0 2px; }
+.vv .big { font-size: __HERO_SIZE__; font-weight: 700; line-height: 1.05; margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
 .vv .big small { font-size: var(--t-lead); font-weight: 500; color: var(--ink-3); }
 .vv .meter { height: 8px; border-radius: 4px; margin: 12px 0 8px; overflow: hidden; }
 .vv .meter i { display: block; height: 100%; border-radius: 4px 0 0 4px; }
 .vv .sub { font-size: var(--t-label); color: var(--ink-2); }
 .vv .decide { display: grid; grid-template-columns: repeat(3, 1fr); gap: __SPACE_LG__; }
 .vv .decide .card { display: flex; flex-direction: column; gap: 6px; padding: 16px 18px; }
-.vv .decide .n { font-size: 26px; font-weight: 700; }
+.vv .decide .n { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .vv .decide .what { font-size: var(--t-label); font-weight: 600; }
 .vv .decide .why { font-size: var(--t-meta); color: var(--ink-3); flex: 1; }
 .vv .decide .act { font-size: var(--t-meta); font-weight: 600; }
@@ -220,9 +221,9 @@ _CSS_BODY = """
 .vv .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: __SPACE_LG__; margin: 0 0 14px; }
 .vv .tile { background: var(--card); border: 1px solid var(--line); border-radius: __RADIUS_LG__; padding: 14px 16px 12px; }
 .vv .tile .lbl { font-size: var(--t-label); color: var(--ink-3); }
-.vv .tile .val { font-size: var(--t-display); font-weight: 700; line-height: 1.15; margin: 2px 0 0; }
+.vv .tile .val { font-size: var(--t-display); font-weight: 700; line-height: 1.15; margin: 2px 0 0; font-variant-numeric: tabular-nums; }
 .vv .tile .row { display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
-.vv .tile .delta { font-size: var(--t-meta); font-weight: 600; }
+.vv .tile .delta { font-size: var(--t-meta); font-weight: 600; font-variant-numeric: tabular-nums; }
 .vv .tile .note { font-size: var(--t-meta); color: var(--ink-4); margin-top: 2px; }
 .vv .spark { width: 96px; height: 30px; flex: none; }
 
@@ -593,16 +594,29 @@ def tiles(
     """
     cards = list(cards)
     _record(tab, section, [_tile_entry(c) for c in cards])
-    is_legacy = write if write is not None else (not cards or not isinstance(cards[0], Tile))
-    if is_legacy:
-        body = f'<div class="kpis">{"".join(_legacy_tile_html(c) for c in cards)}</div>'
-        st.markdown(f'<div class="vv">{body}</div>', unsafe_allow_html=True)
-        return None
-    html_out = f'<div class="kpis">{"".join(_tile_html(t) for t in cards)}</div>'
-    if write:
-        st.markdown(f'<div class="vv">{html_out}</div>', unsafe_allow_html=True)
-        return None
-    return html_out
+    # ``write`` decides only whether the result is drawn now or returned for
+    # the caller to fold into a later ``render()`` call; it must never decide
+    # *which shape* is rendered, or ``write=True`` on a list of ``Tile``
+    # forces the legacy tuple-unpacking branch below and crashes trying to
+    # unpack a ``Tile`` NamedTuple as a 4-tuple - the bug agent 3C found and
+    # documented (docs/assumptions/3C.md, docs/assumptions/5A.md). The shape
+    # is read from ``cards`` alone, both here and in ``hbars`` below.
+    is_new_form = bool(cards) and isinstance(cards[0], Tile)
+    if not is_new_form:
+        html_out = f'<div class="kpis">{"".join(_legacy_tile_html(c) for c in cards)}</div>'
+    else:
+        html_out = f'<div class="kpis">{"".join(_tile_html(t) for t in cards)}</div>'
+    # The legacy shape wrote unconditionally before this fix (no ``write=``
+    # keyword existed for it); ``write=False`` now lets a legacy caller opt
+    # into the same "return, don't draw" contract the new shape already had,
+    # without changing what every existing legacy call site (no ``write=``
+    # passed) still does.
+    if write is False:
+        return html_out
+    if is_new_form and not write:
+        return html_out
+    st.markdown(f'<div class="vv">{html_out}</div>', unsafe_allow_html=True)
+    return None
 
 
 def spark(series: Sequence[float], hue: str, fill: bool = False, w: int = 96, h: int = 30) -> str:
@@ -691,7 +705,12 @@ def linechart(
     grid_vals = [domain_max * i / grid_steps for i in range(grid_steps + 1)] if domain_max > 0 else [0.0]
     for gv in grid_vals:
         gy = y(gv)
-        parts.append(f'<line x1="{left}" y1="{gy:.1f}" x2="{w - right}" y2="{gy:.1f}" stroke="#e5e7eb" stroke-width="1"/>')
+        # "var(--line)" rather than a literal hex: this is theme_tokens.PLANE
+        # ["line"], typed a second time as "#e5e7eb" before task 5A even
+        # though the SVG sits inside the ".vv" scope that already declares
+        # the variable - the one gridline colour in this file that was not
+        # reading from a token. See docs/assumptions/5A.md.
+        parts.append(f'<line x1="{left}" y1="{gy:.1f}" x2="{w - right}" y2="{gy:.1f}" stroke="var(--line)" stroke-width="1"/>')
         parts.append(f'<text x="{left - 8}" y="{gy + 4:.1f}" text-anchor="end">{gv:.0f}</text>')
 
     n_labels = len(x_labels)
@@ -744,17 +763,30 @@ def legend(keys: Sequence[tuple[str, str]]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def severity_hue(value: float) -> str:
+    """The token key (``"s3"``..``"s8"``) for the dashboard's one severity ramp.
+
+    ``value`` is a percentage (0-100). Shared so that an HTML bar
+    (``_bar_color`` below) and a plotly bar reading the identical ramp -
+    ``pages/code.py``'s ``_share_rank_bar``, the review-coverage chart - agree
+    on where amber turns to red instead of each module typing its own
+    thresholds and hexes. See docs/assumptions/5A.md for the duplicate hex
+    ramp this replaced.
+    """
+    if value >= 95:
+        return "s8"
+    if value >= 70:
+        return "s2"
+    if value >= 40:
+        return "s4"
+    return "s3"
+
+
 def _bar_color(value: float, severity: bool) -> str:
     """The legacy severity ramp, unchanged: only used by the old call shape."""
     if not severity:
         return "var(--s1)"
-    if value >= 95:
-        return "var(--s8)"
-    if value >= 70:
-        return "var(--s2)"
-    if value >= 40:
-        return "var(--s4)"
-    return "var(--s3)"
+    return f"var(--{severity_hue(value)})"
 
 
 def _bar_entry(bar: "Bar | tuple") -> tuple[str, str, str]:
@@ -829,18 +861,23 @@ def hbars(
     """
     bars = list(bars)
     _record(tab, section, [_bar_entry(b) for b in bars])
-    is_legacy = write if write is not None else (title is not None or not bars or not isinstance(bars[0], Bar))
-    if is_legacy:
+    # Same fix as ``tiles()`` above and for the same reason: ``write`` must
+    # never participate in shape detection, or ``write=True``/``write=False``
+    # can force the wrong renderer onto the shape actually passed and crash
+    # unpacking it. Shape comes from ``bars``/``title`` alone.
+    is_new_form = bool(bars) and isinstance(bars[0], Bar) and title is None
+    if not is_new_form:
         html_out = _legacy_hbars_html(
             bars, title=title or "", subtitle=subtitle, footer=footer, severity=severity, suffix=suffix
         )
-        st.markdown(f'<div class="vv">{html_out}</div>', unsafe_allow_html=True)
-        return None
-    html_out = _bars_html(bars)
-    if write:
-        st.markdown(f'<div class="vv">{html_out}</div>', unsafe_allow_html=True)
-        return None
-    return html_out
+    else:
+        html_out = _bars_html(bars)
+    if write is False:
+        return html_out
+    if is_new_form and not write:
+        return html_out
+    st.markdown(f'<div class="vv">{html_out}</div>', unsafe_allow_html=True)
+    return None
 
 
 # ---------------------------------------------------------------------------

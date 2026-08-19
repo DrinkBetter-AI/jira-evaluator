@@ -90,7 +90,7 @@ from teams import (
     team_summary,
 )
 import theme
-from theme import inject_styles, kpi_strip
+from theme import inject_styles
 import report as reporting
 import snapshot as board
 from hygiene import (

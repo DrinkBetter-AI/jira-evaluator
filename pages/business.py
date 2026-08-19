@@ -90,7 +90,7 @@ from teams import (
 )
 import theme
 import theme_tokens
-from theme import inject_styles, kpi_strip
+from theme import inject_styles
 import report as reporting
 import snapshot as board
 from hygiene import (
@@ -1567,7 +1567,9 @@ def _price_sales_scatter(points: pd.DataFrame, merchant: str, money: str) -> Non
                 y=fit[1],
                 mode="lines",
                 name="Trend",
-                line=dict(color=theme_tokens.INK["1"], width=3),
+                # 2px, the ceiling every line on the dashboard is held to
+                # (docs/assumptions/5A.md) - was 3px.
+                line=dict(color=theme_tokens.INK["1"], width=2),
                 hoverinfo="skip",
             )
         )
@@ -1683,7 +1685,9 @@ def _price_ladder(points: pd.DataFrame, merchant: str, money: str) -> None:
                     color=theme_tokens.STATUS["crit"][0]
                     if float(ladder["gap"].iloc[row]) > 0
                     else theme_tokens.STATUS["good"][0],
-                    width=3,
+                    # 2px, the ceiling every line on the dashboard is held to
+                    # (docs/assumptions/5A.md) - was 3px.
+                    width=2,
                 ),
                 showlegend=False,
                 hoverinfo="skip",
@@ -3076,7 +3080,8 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         f"Spend ({days}d)",
         _money(spend.cost, money),
         **_delta_arrow(
-            _money_delta(spend.cost_change, money) if spend.prev_cost else None
+            _money_delta(spend.cost_change, money) if spend.prev_cost else None,
+            higher_is_better=False,
         ),
     )
     _tile(
@@ -3605,7 +3610,8 @@ def _render_cloud(
         **_delta_arrow(
             _money_delta(burn.cost_change, money)
             if burn.prev_cost and burn.comparable
-            else None
+            else None,
+            higher_is_better=False,
         ),
     )
     # A day rather than a month, unlike the AI tile beside it: Cloud is billed
@@ -3753,7 +3759,8 @@ def _render_ai_costs(
         f"OpenAI ({days}d)",
         _money(burn.cost, money),
         **_delta_arrow(
-            _money_delta(burn.cost_change, money) if burn.prev_cost else None
+            _money_delta(burn.cost_change, money) if burn.prev_cost else None,
+            higher_is_better=False,
         ),
     )
     _tile(
@@ -4179,8 +4186,13 @@ def _render_product_funnel() -> None:
         funnel,
         "Biggest drop-off",
         worst["step"],
+        # A magnitude, not a period-over-period change - the sign is only
+        # here so st.metric draws a down arrow. "inverse" would colour that
+        # arrow green (inverse flips red/negative to green), which is a
+        # rising-stall-count-in-green bug for a tile whose whole point is
+        # "this many people were lost". "normal" keeps negative red.
         delta=f"-{int(worst['lost']):,} people",
-        delta_color="inverse",
+        delta_color="normal",
     )
 
     figure = px.bar(
@@ -4333,16 +4345,26 @@ def _per_hundred(rate: float) -> str:
     return f"{people} of every 100"
 
 
-def _delta_arrow(change: str | None) -> dict:
+def _delta_arrow(change: str | None, *, higher_is_better: bool = True) -> dict:
     """``st.metric`` arguments that do not call standing still an improvement.
 
     Streamlit colours a tile's delta by whether the string begins with a minus,
     so "flat" and "+0 people" would both be drawn as a green arrow upwards. In a
     table or a sentence those words are read; on a tile only the arrow is.
+
+    ``higher_is_better`` decides the mapping, not the sign alone: a rise in
+    people converted is good (green), a rise in cloud spend is not
+    (``st.metric``'s ``delta_color="inverse"`` flips red/green so a cost tile
+    does not draw the same green-for-up arrow a growth tile does). Callers
+    that only ever show growth metrics can leave this at its default; every
+    cost tile in this file passes ``higher_is_better=False`` explicitly - see
+    docs/assumptions/5A.md for the audit that found the ones that didn't.
     """
     if change is None:
         return {}
-    return {"delta": change, "delta_color": "off" if _unmoved(change) else "normal"}
+    if _unmoved(change):
+        return {"delta": change, "delta_color": "off"}
+    return {"delta": change, "delta_color": "normal" if higher_is_better else "inverse"}
 
 
 def _unmoved(change: str) -> bool:

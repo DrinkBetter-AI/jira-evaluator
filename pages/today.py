@@ -42,6 +42,7 @@ import data_layer
 import series
 import theme
 import theme_html
+import theme_tokens
 from data_layer import TRIAGE_STUCK_HOURS, _NO_OWNER_NAMES, _engineering_data
 from page_shared import _as_frame, _text_or
 from render_shared import (
@@ -108,7 +109,7 @@ def _decision_card(column, *, chip: str, accent: str, value: str, headline: str,
                 f'<div style="font-size:{theme.TYPE_DISPLAY};font-weight:700;line-height:1.1;'
                 f'margin:.15rem 0">{html.escape(value)}</div>'
                 f'<div style="font-size:{theme.TYPE_LABEL};font-weight:600">{html.escape(headline)}</div>'
-                f'<div style="font-size:{theme.TYPE_META};color:#64748b;margin-top:.35rem">'
+                f'<div style="font-size:{theme.TYPE_META};color:{theme_tokens.INK["3"]};margin-top:.35rem">'
                 f"{html.escape(note)}</div>",
                 unsafe_allow_html=True,
             )
@@ -166,9 +167,9 @@ def _render_attention_band(
                         f'<div style="font-size:{theme.TYPE_META};font-weight:600;'
                         f'color:{theme.ACCENTS["danger"]};text-transform:uppercase;'
                         f'letter-spacing:.04em">⚠ Needs a decision</div>'
-                        f'<div style="margin:.2rem 0"><span style="font-size:44px;font-weight:700;'
+                        f'<div style="margin:.2rem 0"><span style="font-size:{theme.TYPE_HERO};font-weight:700;'
                         f'line-height:1">{unapproved}</span>'
-                        f'<span style="font-size:{theme.TYPE_LEAD};color:#64748b"> of {total}</span></div>'
+                        f'<span style="font-size:{theme.TYPE_LEAD};color:{theme_tokens.INK["3"]}"> of {total}</span></div>'
                         f'<div style="font-size:{theme.TYPE_SECTION};font-weight:600">'
                         f"open PRs have no approving review</div>",
                         unsafe_allow_html=True,

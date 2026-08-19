@@ -149,7 +149,8 @@ from teams import (
     team_summary,
 )
 import theme
-from theme import inject_styles, kpi_strip
+from theme import inject_styles
+import theme_tokens
 import report as reporting
 import snapshot as board
 from hygiene import (
@@ -280,7 +281,6 @@ from page_shared import (
     _report,
     _reset_reports,
     _tile,
-    _kpis,
     _said,
     _download_report,
     _offer_board_snapshot,
@@ -526,12 +526,21 @@ _TIER_PURPLE = "Low priority"
 # Sort order used when ranking by tier: red first, purple last.
 _TIER_ORDER = {_TIER_RED: 0, _TIER_YELLOW: 1, _TIER_GREEN: 2, _TIER_PURPLE: 3}
 
-# Light backgrounds so the row text stays readable.
+# The semantic tone behind each tier - theme_tokens.STATUS's four-tone
+# vocabulary rather than a fifth invented hue. Feeds both the row-background
+# map below (light backgrounds so the row text stays readable) and the
+# legend (_tier_legend_html): a purple tier used to mean nothing outside
+# this dict, and now reads as the same "gray" every other muted chip on the
+# dashboard uses. See docs/assumptions/5A.md.
+_TIER_TONE = {
+    _TIER_RED: "crit",
+    _TIER_YELLOW: "warn",
+    _TIER_GREEN: "good",
+    _TIER_PURPLE: "gray",
+}
 _TIER_BG = {
-    _TIER_RED: "#f8d7da",
-    _TIER_YELLOW: "#fff3cd",
-    _TIER_GREEN: "#d4edda",
-    _TIER_PURPLE: "#e7d9f5",
+    tier: theme_tokens.STATUS_BG.get(tone, theme_tokens.MUTED_BG)
+    for tier, tone in _TIER_TONE.items()
 }
 
 # Jira priorities that park a ticket rather than escalate it.
@@ -612,21 +621,26 @@ def _attention_tier(row: pd.Series) -> str:
 
 
 def _tier_legend_html() -> str:
-    """A small colour legend so the tiers read without guessing."""
-    items = [
-        (_TIER_BG[_TIER_RED], "Needs attention — high score or idle 90d+"),
-        (_TIER_BG[_TIER_YELLOW], "Watch — moderate score or idle 30d+"),
-        (_TIER_BG[_TIER_GREEN], "Healthy — recent, low pressure"),
-        (_TIER_BG[_TIER_PURPLE], "Low priority — parked (Low / Lowest / Idea)"),
-    ]
-    spans = "".join(
-        '<span style="display:inline-block;margin:0 14px 4px 0;">'
-        f'<span style="display:inline-block;width:12px;height:12px;background:{color};'
-        'border:1px solid #999;vertical-align:middle;margin-right:5px;"></span>'
-        f"{html.escape(label)}</span>"
-        for color, label in items
+    """A small colour legend so the tiers read without guessing.
+
+    Built from theme_html.legend() - the one legend component the dashboard
+    draws everywhere else, four series or four tiers alike - rather than its
+    own row of ``<span style="background:...">`` swatches coloured from a
+    four-entry hex map that matched none of theme_tokens' own tones (a
+    Bootstrap alert palette, not this app's). Wrapped in the ``.vv`` scope
+    itself, same as ``theme_html``'s own CSS variables need, since the call
+    site hands this straight to ``st.markdown`` rather than through
+    ``theme_html.render()``. See docs/assumptions/5A.md.
+    """
+    fragment = theme_html.legend(
+        [
+            ("Needs attention — high score or idle 90d+", _TIER_TONE[_TIER_RED]),
+            ("Watch — moderate score or idle 30d+", _TIER_TONE[_TIER_YELLOW]),
+            ("Healthy — recent, low pressure", _TIER_TONE[_TIER_GREEN]),
+            ("Low priority — parked (Low / Lowest / Idea)", _TIER_TONE[_TIER_PURPLE]),
+        ]
     )
-    return f'<div style="font-size:0.85rem;margin:2px 0 10px;">{spans}</div>'
+    return f'<div class="vv">{fragment}</div>'
 
 
 def _sprint_label(row: pd.Series) -> str:
@@ -1205,31 +1219,34 @@ def _render_team_overview(df: pd.DataFrame) -> None:
     current = active[active["sprint_name"].fillna("").astype(str).eq(sprint_label)]
     owners = current["assignee"].fillna("").astype(str).str.strip().str.lower()
     unowned = owners.isin(_NO_OWNER_NAMES)
-    _kpis(
-        TAB_ENGINEERING,
-        "Sprint",
-        [
-            ("Sprint", sprint_label, chosen, "info"),
-            ("Tickets", f"{len(current)}", "in this sprint", "neutral"),
-            (
-                "People",
-                f"{current.loc[~unowned, 'assignee'].nunique()}",
-                "with sprint work",
-                "neutral",
-            ),
-            (
-                "Committed",
-                f"{current['estimate_hours'].sum():.0f}h",
-                "estimated hours",
-                "neutral",
-            ),
-            (
-                "Unassigned",
-                f"{int(unowned.sum())}",
-                "no owner in sprint",
-                "warning" if unowned.any() else "good",
-            ),
-        ]
+    # theme_html.Tile, not page_shared._kpis - see the identical migration
+    # note in pages/engineering.py::_render_ticket_health, docs/
+    # assumptions/5A.md: one KPI-tile implementation, not two, and the old
+    # accents here were snapshot counts coloured with no delta behind them.
+    theme_html.render(
+        theme_html.tiles(
+            [
+                theme_html.Tile("Sprint", sprint_label, note=chosen),
+                theme_html.Tile("Tickets", f"{len(current)}", note="in this sprint"),
+                theme_html.Tile(
+                    "People",
+                    f"{current.loc[~unowned, 'assignee'].nunique()}",
+                    note="with sprint work",
+                ),
+                theme_html.Tile(
+                    "Committed",
+                    f"{current['estimate_hours'].sum():.0f}h",
+                    note="estimated hours",
+                ),
+                theme_html.Tile(
+                    "Unassigned",
+                    f"{int(unowned.sum())}",
+                    note="no owner in sprint",
+                ),
+            ],
+            tab=TAB_ENGINEERING,
+            section="Sprint",
+        )
     )
     # Horizontal for the same reason as the assignee chart: this team's statuses
     # are things like "Ready for Production" and "DISCUSSION NEEDED", which as
@@ -1515,18 +1532,32 @@ def _render_triage_card(row: pd.Series) -> None:
         # Closing a container from an age-sorted queue is the one decision here
         # that can strand other people's open work, so it is called out in red.
         chips.append(("Holds other tickets - closing it orphans them", True))
+    # The component kit's own chip tones (crit/gray), spelled out by hand
+    # rather than called: tests/test_planning_page.py pins this whole flow as
+    # Streamlit-native with no import of that module, a MODE: HYBRID boundary
+    # from an earlier task this one does not own. What changed instead is the
+    # markup - the same ".chip"/".card" class names and design-token CSS
+    # variables that kit's stylesheet already defines and every page here
+    # already injects (its own css() call, made before _render_cleanup on
+    # every page that reaches it) - so this card stops being a fourth,
+    # hand-invented chip system (the old ".triage-meta"/".triage-card" rules,
+    # now deleted from theme.py) and starts drawing the one the rest of the
+    # dashboard uses, without this function importing the module that owns
+    # it. See docs/assumptions/5A.md.
     chip_html = "".join(
-        f'<span class="{"hot" if hot else ""}">{html.escape(str(text))}</span>'
+        f'<span class="chip {"crit" if hot else "gray"}">{html.escape(str(text))}</span>'
         for text, hot in chips
     )
     st.markdown(
-        f'<div class="triage-card">'
-        f'<div class="triage-key">{html.escape(str(row["key"]))}</div>'
-        f'<div class="triage-summary">{html.escape(str(row["summary"]))}</div>'
-        f'<div class="triage-meta">{chip_html}</div>'
-        f'<div class="triage-why">Suggested: {html.escape(str(row["suggested"]))} '
-        f'- {html.escape(str(row["why"]))}</div>'
-        f"</div>",
+        '<div class="vv"><div class="card">'
+        f'<div style="font-size:var(--t-label);font-weight:700;color:var(--info)">'
+        f'{html.escape(str(row["key"]))}</div>'
+        f'<div style="font-size:var(--t-section);font-weight:600;color:var(--ink);'
+        f'line-height:1.35;margin:2px 0 10px">{html.escape(str(row["summary"]))}</div>'
+        f'<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:9px">{chip_html}</div>'
+        f'<div style="font-size:var(--t-body);color:var(--ink-3);font-style:italic">'
+        f'Suggested: {html.escape(str(row["suggested"]))} - {html.escape(str(row["why"]))}</div>'
+        "</div></div>",
         unsafe_allow_html=True,
     )
     st.link_button(f"Open {row['key']} in Jira", _jira_ticket_url(str(row["key"])))
@@ -3344,10 +3375,17 @@ def _render_sprint_capacity(
     c1, c2, c3 = st.columns(3)
     c1.markdown(
         (
-            '<div style="font-size: 0.875rem; opacity: 0.85; margin-bottom: 0.2rem;">Tickets in sprint</div>'
-            f'<div style="font-size: 2.2rem; font-weight: 700; line-height: 1.05;">'
+            f'<div style="font-size:{theme.TYPE_LABEL};opacity:0.85;margin-bottom:0.2rem;">Tickets in sprint</div>'
+            # theme.TYPE_DISPLAY, not a bespoke "2.2rem": the same rung
+            # theme_html.py's own KPI tiles draw their number at, rather
+            # than a third size invented at the point of use (previously
+            # off-ladder in px terms and, worse, in rem - the exact drift
+            # theme.py's own comment on TYPE_* warns a rem literal invites,
+            # since .streamlit/config.toml's raised root font size scales
+            # it again). See docs/assumptions/5A.md.
+            f'<div style="font-size:{theme.TYPE_DISPLAY};font-weight:700;line-height:1.05;">'
             f'{len(preview_workload)} '
-            '<span style="font-size: 0.75rem; font-weight: 500; opacity: 0.75; vertical-align: middle;">out of</span> '
+            f'<span style="font-size:{theme.TYPE_META};font-weight:500;opacity:0.75;vertical-align:middle;">out of</span> '
             f'{len(preview_scoped)}</div>'
         ),
         unsafe_allow_html=True,
@@ -3577,39 +3615,17 @@ def _render_hourly_capacity(df: pd.DataFrame) -> None:
     theme_html.render(*fragments)
 
 
-# Tinted background with a saturated text colour of the same hue, so the pills
-# sit on the light theme the KPI cards are drawn for.
-#
-# These stay a map rather than becoming theme.CATEGORICAL: a status pill's
-# colour means something ("this one is nearly out of the door", "this one is
-# stuck"), and handing it the first free colour in a sequence would throw that
-# meaning away. What has changed is which colours the map reaches for - the
-# blues, greens and violet are now the exact hues in theme.CATEGORICAL, so a
-# pill and a bar for the same status no longer disagree by a shade.
-#
-# "Ready for Production" also used to be the identical green to "In Progress",
-# so in a row of pills the ticket about to ship and the ticket somebody started
-# this morning looked the same. Green now belongs to the far end of the workflow
-# alone, and the stages before it walk through the palette in the order the work
-# moves; red stays reserved for the one status that is a request for a decision.
-#
-# The palette hues are darkened where they had to be: a bar can be #009e73
-# because it is a large block of colour, but the same value as 13px text on a
-# tinted chip is not legible, so each entry is the palette hue taken down to
-# something that reads.
-_STAGE_COLORS: dict[str, tuple[str, str]] = {
-    # (background, text)
-    "Backlog":               ("#eef0f5", "#4b5563"),  # slate - parked on purpose
-    "DISCUSSION NEEDED":     ("#fdecec", "#b42318"),  # red - waiting on a person
-    "To Do":                 ("#eaf1fe", "#2563eb"),  # blue
-    "In Progress":           ("#e8f5fd", "#0b6fa4"),  # sky
-    "IN DEV ENV":            ("#f1ecfd", "#5b21b6"),  # violet
-    "Code Review":           ("#fbeef5", "#a03d78"),  # reddish purple
-    "Review in Staging":     ("#fdf3e0", "#8a6100"),  # orange
-    "Ready for Production":  ("#e4f6f0", "#007857"),  # bluish green - nearly out
-    "Review":                ("#fdefe5", "#a34600"),  # vermillion
-}
-_DEFAULT_PILL: tuple[str, str] = ("#f1f2f4", "#4b5563")
+# This used to be a nine-entry map of hand-picked (background, text) hex
+# pairs, one invented colour per workflow stage, matching neither
+# theme.CATEGORICAL nor the four semantic tones every other status pill on
+# the dashboard draws from - the exact duplicate chip system
+# docs/assumptions/1A.md flagged when it built theme_tokens.STAGE_TONES as
+# the four-tone reduction meant to replace it. This is that replacement:
+# each stage maps to one of theme_tokens.STATUS's tones (good/warn/crit/info)
+# instead of owning its own hue, and the pill itself is drawn by
+# theme_html.chip() - the app's one chip component - rather than a
+# fourth hand-rolled span. See docs/assumptions/5A.md.
+_DEFAULT_STAGE_TONE = "gray"
 
 
 def _render_status_pills(status_series: pd.Series) -> None:
@@ -3626,24 +3642,16 @@ def _render_status_pills(status_series: pd.Series) -> None:
     counts = status_series.fillna("Unknown").value_counts().sort_index()
     if counts.empty:
         return
-    pills_html = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 4px 0;">'
-    for status, count in counts.items():
-        bg, fg = _STAGE_COLORS.get(str(status), _DEFAULT_PILL)
-        pills_html += (
-            f'<span style="'
-            f'background:{bg};color:{fg};'
-            f'border-radius:6px;padding:4px 10px;'
-            # The same rung of the type scale as every other chip on the page,
-            # rather than a size invented at the point of use.
-            f'font-size:{theme.TYPE_META};font-weight:600;white-space:nowrap;'
-            f'border:1px solid {fg}22;'
-            f'">'
-            f'{html.escape(str(status))} '
-            f'<span style="opacity:0.75;font-weight:400;">({int(count)})</span>'
-            f'</span>'
+    chips = "".join(
+        theme_html.chip(
+            f"{status} ({int(count)})",
+            theme_tokens.STAGE_TONES.get(str(status), _DEFAULT_STAGE_TONE),
         )
-    pills_html += "</div>"
-    st.markdown(pills_html, unsafe_allow_html=True)
+        for status, count in counts.items()
+    )
+    theme_html.render(
+        f'<div style="display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 4px 0">{chips}</div>'
+    )
 
 
 

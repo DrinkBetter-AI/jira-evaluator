@@ -126,6 +126,20 @@ def test_every_chart_states_its_own_text_size():
 def test_bigger_text_keeps_the_colours_the_app_already_drew_with():
     """The font is the change; a repainted dashboard would be a side effect."""
     original = pio.templates.default
+    # theme._TEMPLATE ("vinovoss") is process-global and other tests in this
+    # suite call theme.chart_fonts()/inject_styles() too (any page render
+    # test that draws a chart), so by the time this test runs it may already
+    # be registered - and if it is, ``original`` above is that very name.
+    # The old cleanup unconditionally deleted theme._TEMPLATE in `finally`
+    # while restoring `pio.templates.default = original`, which - when
+    # ``original`` was "vinovoss" - left the default pointing at a template
+    # that had just been deleted, and every chart built by a test that ran
+    # afterwards failed with "invalid value ... 'vinovoss'". Snapshotting
+    # whether it existed before, and only deleting it here if this test is
+    # the one that created it, is what makes this test order-independent
+    # rather than merely order-independent-so-far. See docs/assumptions/5A.md.
+    had_template_before = theme._TEMPLATE in pio.templates
+    saved_template = pio.templates[theme._TEMPLATE] if had_template_before else None
     try:
         pio.templates["a-host-app"] = {
             "layout": {"paper_bgcolor": "#123456", "font": {"size": 11}}
@@ -147,10 +161,12 @@ def test_bigger_text_keeps_the_colours_the_app_already_drew_with():
         theme.chart_fonts()
         assert pio.templates[theme._TEMPLATE].layout.paper_bgcolor == "#123456"
     finally:
-        pio.templates.default = original
-        for name in ("a-host-app", theme._TEMPLATE):
-            if name in pio.templates:
-                del pio.templates[name]
+        if "a-host-app" in pio.templates:
+            del pio.templates["a-host-app"]
+        if theme._TEMPLATE in pio.templates:
+            del pio.templates[theme._TEMPLATE]
+        if had_template_before:
+            pio.templates[theme._TEMPLATE] = saved_template
         pio.templates.default = original
 
 

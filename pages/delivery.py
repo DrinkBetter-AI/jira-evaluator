@@ -425,11 +425,11 @@ def _render_delivery_page() -> None:
             note="no changelog — credited to nobody",
         )
 
-    # No ``write=True`` here: for the new Tile shape, tiles()'s ``write``
-    # forces the *legacy* tuple path regardless of what was passed (1B.md -
-    # "write... overrides the auto-detection outright"), so passing it with
-    # Tile objects raises trying to unpack a NamedTuple as a 4-tuple. The new
-    # form returns the fragment; render() draws it.
+    # No ``write=True`` here, though task 5A fixed the crash that used to
+    # follow it (docs/assumptions/3C.md, docs/assumptions/5A.md): the pattern
+    # 1B.md recommends still holds regardless - build the fragment, hand it
+    # to render() explicitly, so this section's tiles land in the same
+    # render() call as anything else the page draws around them.
     tiles_html = theme_html.tiles(
         [
             theme_html.Tile(

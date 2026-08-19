@@ -25,7 +25,7 @@ from data_layer import (
     _engineering_filters,
 )
 from jira_client import JiraClient
-from page_shared import TAB_ENGINEERING, _download_report, _kpis, _tile
+from page_shared import TAB_ENGINEERING, _download_report, _tile
 from render_shared import (
     BACKLOG_STATUSES,
     BULK_ACTION_DEFAULT_LIMIT,
@@ -201,37 +201,53 @@ def _render_metrics(
         owners = owner_df["assignee"].fillna("").astype(str).str.strip().str.lower()
         unassigned = int(owners.isin({"", "unassigned", "none"}).sum())
 
-    _kpis(
-        TAB_ENGINEERING,
-        "Ticket health",
-        [
-            ("Open tickets", f"{total_open}", "current scope", "neutral"),
-            (
-                "Stalled 30d+",
-                f"{idle_30}",
-                f"{idle_30 / total_open * 100:.0f}% of open" if total_open else "—",
-                "danger" if idle_30 else "good",
-            ),
-            (
-                "Unassigned",
-                f"{unassigned}",
-                "no owner set, so outside this scope" if out_of_scope else "no owner set",
-                "warning" if unassigned else "good",
-            ),
-            (
-                "Estimate coverage",
-                f"{estimate_coverage_pct:.0f}%",
-                f"of {estimate_scope} past Backlog; epics exempt",
-                "good" if estimate_coverage_pct >= 80 else "warning",
-            ),
-            (
-                "Stale late stage",
-                f"{stale_late_stage}",
-                "in dev/staging/prod, idle >6d",
-                "danger" if stale_late_stage else "good",
-            ),
-            ("Oldest ticket", f"{oldest:.0f}d", f"avg idle {avg_idle:.0f}d · max {max_idle:.0f}d", "info"),
-        ]
+    # theme_html.Tile, not the old (label, value, note, accent) tuple through
+    # page_shared._kpis / theme.kpi_strip: that was a second, near-identical
+    # KPI-tile implementation next to this one - same card, same grid, its
+    # own CSS - and the two were told apart only by which helper a page
+    # happened to call. See docs/assumptions/5A.md.
+    #
+    # The accent each of these tuples carried coloured the number itself
+    # (red/amber/green) with no delta behind it - a snapshot count judged
+    # against no stated baseline, exactly the unearned-colour shape the
+    # "delta coloured by goodness, not direction alone" rule exists to catch
+    # on a moving number. theme_html.Tile has no such field on purpose: the
+    # verdict lives in the note text, which every one of these already
+    # carried, and the number stays neutral ink until there is a real prior
+    # value to colour a delta against.
+    theme_html.render(
+        theme_html.tiles(
+            [
+                theme_html.Tile("Open tickets", f"{total_open}", note="current scope"),
+                theme_html.Tile(
+                    "Stalled 30d+",
+                    f"{idle_30}",
+                    note=f"{idle_30 / total_open * 100:.0f}% of open" if total_open else "—",
+                ),
+                theme_html.Tile(
+                    "Unassigned",
+                    f"{unassigned}",
+                    note="no owner set, so outside this scope" if out_of_scope else "no owner set",
+                ),
+                theme_html.Tile(
+                    "Estimate coverage",
+                    f"{estimate_coverage_pct:.0f}%",
+                    note=f"of {estimate_scope} past Backlog; epics exempt",
+                ),
+                theme_html.Tile(
+                    "Stale late stage",
+                    f"{stale_late_stage}",
+                    note="in dev/staging/prod, idle >6d",
+                ),
+                theme_html.Tile(
+                    "Oldest ticket",
+                    f"{oldest:.0f}d",
+                    note=f"avg idle {avg_idle:.0f}d · max {max_idle:.0f}d",
+                ),
+            ],
+            tab=TAB_ENGINEERING,
+            section="Ticket health",
+        )
     )
 
     if "status" in metrics_df.columns and total_open:

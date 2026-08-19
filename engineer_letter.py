@@ -22,11 +22,21 @@ from dataclasses import dataclass, field
 # the whole point of sending the page is that the red rows are visible before a
 # word is read. Checked against the dashboard's own map by the tests, so a tier
 # recoloured there cannot quietly go grey here.
+#
+# These are theme_tokens.STATUS_BG's crit/warn/good backgrounds and
+# theme_tokens.MUTED_BG, copied as literals rather than imported: this module
+# is deliberately dependency-free (see the module docstring - it has to
+# survive being pasted into Slack with nothing installed), so the values
+# travel by hand and the test named above is what keeps them from drifting
+# apart, the same trade render_shared.py already makes for its own
+# duplicated bot-login list. Before task 5A these four hexes were a fifth,
+# unrelated palette (Bootstrap's default alert colours) that matched none of
+# theme_tokens' own tones; see docs/assumptions/5A.md.
 TIER_COLOURS = {
-    "Needs attention": "#f8d7da",
-    "Watch": "#fff3cd",
-    "Healthy": "#d4edda",
-    "Low priority": "#e7d9f5",
+    "Needs attention": "#fdecec",  # theme_tokens.STATUS_BG["crit"]
+    "Watch": "#fef7ec",  # theme_tokens.STATUS_BG["warn"]
+    "Healthy": "#ecfdf3",  # theme_tokens.STATUS_BG["good"]
+    "Low priority": "#f1f5f9",  # theme_tokens.MUTED_BG
 }
 
 # A ticket untouched for longer than this is asked about by name at the top of

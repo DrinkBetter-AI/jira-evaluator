@@ -28,7 +28,9 @@ import html
 import pandas as pd
 import streamlit as st
 
+import theme
 import theme_html
+import theme_tokens
 from data_layer import _engineering_context
 from page_shared import TAB_ENGINEERING, _download_report
 from render_shared import (
@@ -225,29 +227,46 @@ def _render_repo_coverage(open_prs: pd.DataFrame) -> None:
 
 
 def _share_rank_bar(shares: pd.Series):
-    """A rank bar over precomputed percentages, colored by severity."""
+    """A rank bar over precomputed percentages, colored by severity.
+
+    The colour ramp and the bar geometry both read from shared tokens rather
+    than typing their own: ``theme_html.severity_hue`` is the same threshold
+    logic the HTML review-coverage bars use (``_render_repo_coverage`` above,
+    ``severity=True``), resolved to a real hex through
+    ``theme_tokens.SERIES_BY_KEY`` since a plotly marker cannot take a CSS
+    ``var(...)`` reference; ``theme.BAR_MAX_HEIGHT``/``BAR_CORNER_RADIUS`` are
+    the same 24px/4px ceiling ``theme.rank_bar`` draws every other ranked bar
+    on the dashboard to. See docs/assumptions/5A.md.
+    """
     import plotly.graph_objects as go
 
     values = shares.sort_values()
     colors = [
-        "#e34948" if v >= 95 else "#eb6834" if v >= 70 else "#eda100" if v >= 40 else "#1baf7a"
-        for v in values
+        theme_tokens.SERIES_BY_KEY[theme_html.severity_hue(v)] for v in values
     ]
+    margin = dict(t=16, b=40, l=8, r=56)
     figure = go.Figure(
         go.Bar(
             x=values.values,
             y=[str(i) for i in values.index],
             orientation="h",
-            marker_color=colors,
+            marker=dict(color=colors, cornerradius=theme.BAR_CORNER_RADIUS),
             text=[f"{v:.0f}%" for v in values.values],
             textposition="outside",
         )
     )
+    margin_v = margin["t"] + margin["b"]
+    height = max(240, theme.BAR_ROW_HEIGHT * len(values) + margin_v)
     figure.update_layout(
-        height=max(240, 34 * len(values) + 90),
-        margin=dict(t=16, b=40, l=8, r=56),
+        height=height,
+        margin=margin,
         showlegend=False,
-        bargap=0.28,
+        # theme.bar_gap_for(), not the fixed theme.BAR_GAP: the 240px floor
+        # above inflates each row's slot past the ceiling for a short list
+        # (few repos), and only a bargap solved for that actual slot keeps
+        # the bar itself at or under theme.BAR_MAX_HEIGHT regardless. See
+        # that function's own docstring and docs/assumptions/5A.md.
+        bargap=theme.bar_gap_for(len(values), height - margin_v),
     )
     figure.update_xaxes(title_text="% of open PRs with no approving review", range=[0, 112])
     figure.update_yaxes(title_text="", tickangle=0, automargin=True, type="category")

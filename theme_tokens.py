@@ -55,6 +55,14 @@ SERIES = [
     "#e34948",  # s8 - red
 ]
 
+# SERIES, addressable by the same "s1".."s8" keys css_root() writes as
+# CSS variables - for a caller that needs the real hex (a plotly marker
+# colour, say) rather than a `var(--sN)` reference. Exists so a Plotly bar
+# and an HTML bar reading the same severity ramp (theme_html.severity_hue)
+# resolve to one dict instead of each module parsing the other's "s8" key by
+# hand. See docs/assumptions/5A.md.
+SERIES_BY_KEY = {f"s{index}": hex_value for index, hex_value in enumerate(SERIES, start=1)}
+
 # --- Status: (text colour, background) per tone -------------------------------
 # "icon + label always, never color alone" per the mockup's own comment - these
 # are read alongside a word or an icon, never as the only signal.
@@ -79,6 +87,14 @@ TYPE = {
     "section": 20,  # a card's headline
     "display": 32,  # the KPI number itself
 }
+
+# One rung above the ladder, on purpose: the mockup's ``.big`` hero number
+# (``vinovoss-dashboard-design.html``) is deliberately larger than any KPI
+# tile so a page has exactly one number a reader's eye lands on first. Per
+# the conformance sweep (docs/assumptions/5A.md), every page draws at most
+# one number at this size or larger - a second one competing for the same
+# glance is no hero at all.
+HERO_SIZE = 48
 
 # The mockup's ``.shell{max-width:1280px}``. The app's own code said 1560px;
 # the mockup wins (docs/assumptions/1A.md).
