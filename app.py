@@ -225,131 +225,25 @@ from page_shared import (
     _as_frame,
 )
 
-from pages.business import (
-    ORDER_BOOK_DAYS,
-    ORDER_BOOK_TTL_SECONDS,
-    _order_book,
-    fetch_store_prefixes_cached,
-    _money,
-    _business_readable,
-    _render_business,
-    _render_business_sections,
-    _render_orders,
-    _render_wines_and_merchants,
-    BENCHMARK_TTL_SECONDS,
-    _WORST_OFFERS,
-    _NO_SALES,
-    BenchmarkRead,
-    _price_benchmark_cached,
-    _OFFER_MERCHANTS_TTL_SECONDS,
-    _OFFER_SALES_TTL_SECONDS,
-    _offer_sales_cached,
-    _AD_PRODUCTS_TTL_SECONDS,
-    AdProducts,
-    _no_ad_products,
-    _ad_products_cached,
-    _one_account_products,
-    _offers_together,
-    _ad_products,
-    _ads_configured,
-    _offer_sales,
-    _MAX_CUT_PERCENT,
-    _DEFAULT_CUT_PERCENT,
-    _offer_merchants_cached,
-    _EVERY_MERCHANT,
-    _MERCHANT_SEPARATOR,
-    _ACTIVE_MERCHANTS_ENV,
-    _active_merchant_names,
-    _trading_only,
-    _offer_merchants,
-    _one_merchant,
-    _VIVINO_TTL_SECONDS,
-    _vivino_comparison_cached,
-    _render_vivino,
-    _with_merchants,
-    _demand_note,
-    _price_columns,
-    _visible,
-    _formatted,
-    _ASK_COLUMNS,
-    _render_ask_list,
-    _render_bargains,
-    _band_pictures,
-    _LADDER_WINES,
-    _price_sales_scatter,
-    _least_squares,
-    _distinct_labels,
-    _price_ladder,
-    _merchant_letter,
-    _ad_ledger_table,
-    _ad_claim,
-    _ad_ledger,
-    _ad_window_note,
-    _ad_money_notes,
-    _render_ad_money,
-    _ad_advice,
-    _no_ad_spend,
-    _AD_LEDGER_ROWS,
-    _ad_claim_wines,
-    _ad_pictures,
-    _render_most_clicked,
-    _MOST_CLICKED,
-    _SALE_FEED_STEP,
-    _SALE_FEED_MAX,
-    _render_sale_prices,
-    _render_evidence,
-    _render_price_benchmark,
-    ADS_TTL_SECONDS,
-    ADS_ACCOUNTS_TTL_SECONDS,
-    ADS_WINDOW_DAYS,
-    AdsAccount,
-    AdsRead,
-    _ads_config,
-    _ads_bigquery_client,
-    _ads_accounts,
-    _ads_cached,
-    _prefetch_ads,
-    _ads_sales,
-    _one,
-    _money_delta,
-    _charged_commission,
-    _render_ads,
-    BURN_TTL_SECONDS,
-    _openai_costs_cached,
-    STRIPE_LEDGER_DAYS,
-    _stripe_ledger_cached,
-    _stripe_disputes_cached,
-    _stripe_cached,
-    _burn_reads,
-    _render_burn,
-    CloudRead,
-    CLOUD_TTL_SECONDS,
-    CLOUD_WINDOW_DAYS,
-    _cloud_costs_cached,
-    _billing_bigquery_client,
-    _render_cloud,
-    _render_ai_costs,
-    _render_stripe,
-    FUNNEL_WINDOWS,
-    FUNNEL_TTL_SECONDS,
-    _funnel_cached,
-    _breakdown_cached,
-    _event_users_cached,
-    _points,
-    _NOISE_POINTS,
-    _percent,
-    _render_product_funnel,
-    _render_friction_tabs,
-    _active_people,
-    _per_hundred,
-    _delta_arrow,
-    _unmoved,
-    _people_delta,
-    _rate_delta,
-    _render_funnel_verdicts,
-    _render_error_breakdowns,
-    _render_event_counts,
-)
+# Lazy import for pages.business - only imported when Business page is accessed
+# This significantly improves page navigation performance by avoiding loading
+# the large business.py module (4300+ lines) on every page load
+def _lazy_import_business():
+    """Lazy import of pages.business module to improve performance."""
+    from pages import business
+    return business
+
+
+def _business_readable() -> bool:
+    """Check if business page is accessible (lazy wrapper)."""
+    business = _lazy_import_business()
+    return business._business_readable()
+
+
+def _render_business() -> None:
+    """Render the business page (lazy wrapper)."""
+    business = _lazy_import_business()
+    return business._render_business()
 
 
 logger = logging.getLogger(__name__)
@@ -4998,37 +4892,62 @@ def _open_pr_signals(open_prs: pd.DataFrame, open_count_exact: object) -> dict[s
     you yet", so counting it as unreviewed would blame reviewers for work the
     author has not handed over.
     """
-    total = _number_or(open_count_exact, float("nan"))
-    if open_prs.empty:
+    try:
+        total = _number_or(open_count_exact, float("nan"))
+        if open_prs is None or (isinstance(open_prs, pd.DataFrame) and open_prs.empty):
+            return {
+                "total": int(total) if total == total else 0,
+                "unapproved": 0,
+                "never_reviewed": 0,
+                "oldest_unreviewed_days": None,
+                "no_reviewer_asked": 0,
+            }
+
+        live = open_prs.copy()
+        if "is_draft" in live.columns:
+            live = live[~live["is_draft"].fillna(False).astype(bool)]
+        
+        # After filtering drafts, check if we have any PRs left
+        if live.empty:
+            return {
+                "total": int(total) if total == total else 0,
+                "unapproved": 0,
+                "never_reviewed": 0,
+                "oldest_unreviewed_days": None,
+                "no_reviewer_asked": 0,
+            }
+
+        approvals = live.get("approving_reviews", pd.Series(0, index=live.index))
+        reviews = live.get("total_reviews", pd.Series(0, index=live.index))
+        requests = live.get("review_requests", pd.Series(0, index=live.index))
+        age = live.get("age_days", pd.Series(0.0, index=live.index)).fillna(0.0)
+
+        unapproved = pd.Series(approvals, index=live.index).fillna(0).astype(int) == 0
+        never = pd.Series(reviews, index=live.index).fillna(0).astype(int) == 0
+        unasked = never & (pd.Series(requests, index=live.index).fillna(0).astype(int) == 0)
+
+        oldest = age[never].max() if bool(never.any()) else None
+        # Handle NaN values in oldest
+        if oldest is not None and pd.isna(oldest):
+            oldest = None
+            
         return {
-            "total": int(total) if total == total else 0,
+            "total": int(total) if total == total else int(len(live)),
+            "unapproved": int(unapproved.sum()),
+            "never_reviewed": int(never.sum()),
+            "oldest_unreviewed_days": None if oldest is None else float(oldest),
+            "no_reviewer_asked": int((unasked & (age > TODAY_NO_REVIEWER_DAYS)).sum()),
+        }
+    except Exception as e:
+        logger.exception("Error in _open_pr_signals: %s", str(e))
+        # Return safe defaults on any error
+        return {
+            "total": 0,
             "unapproved": 0,
             "never_reviewed": 0,
             "oldest_unreviewed_days": None,
             "no_reviewer_asked": 0,
         }
-
-    live = open_prs
-    if "is_draft" in live.columns:
-        live = live[~live["is_draft"].fillna(False).astype(bool)]
-
-    approvals = live.get("approving_reviews", pd.Series(0, index=live.index))
-    reviews = live.get("total_reviews", pd.Series(0, index=live.index))
-    requests = live.get("review_requests", pd.Series(0, index=live.index))
-    age = live.get("age_days", pd.Series(0.0, index=live.index)).fillna(0.0)
-
-    unapproved = pd.Series(approvals, index=live.index).fillna(0).astype(int) == 0
-    never = pd.Series(reviews, index=live.index).fillna(0).astype(int) == 0
-    unasked = never & (pd.Series(requests, index=live.index).fillna(0).astype(int) == 0)
-
-    oldest = age[never].max() if bool(never.any()) else None
-    return {
-        "total": int(total) if total == total else int(len(live)),
-        "unapproved": int(unapproved.sum()),
-        "never_reviewed": int(never.sum()),
-        "oldest_unreviewed_days": None if oldest is None else float(oldest),
-        "no_reviewer_asked": int((unasked & (age > TODAY_NO_REVIEWER_DAYS)).sum()),
-    }
 
 
 def _ownerless_rows(df: pd.DataFrame) -> pd.DataFrame:
@@ -5148,74 +5067,83 @@ def _render_attention_band(
     open PRs carry no approving review - sat below twenty tiles and two pies. It
     is the hero here, and nothing else on the page is drawn at its size.
     """
-    hero, a, b, c = st.columns([2.1, 1, 1, 1])
+    try:
+        hero, a, b, c = st.columns([2.1, 1, 1, 1])
 
-    with hero:
-        with st.container(border=True):
-            if not github_ready:
-                st.markdown(
-                    f'<div style="font-size:{theme.TYPE_META};font-weight:600;'
-                    f'color:{theme.ACCENTS["warning"]};text-transform:uppercase">GitHub unavailable</div>',
-                    unsafe_allow_html=True,
-                )
-                st.markdown("**PR review health cannot be read**")
-                st.caption(
-                    f"({github_error})" if github_error else "Set DASHBOARD_GITHUB_TOKEN."
-                )
-            else:
-                total = prs["total"] or 0
-                unapproved = prs["unapproved"]
-                share = (unapproved / total) if total else 0.0
-                oldest = prs["oldest_unreviewed_days"]
-                st.markdown(
-                    f'<div style="font-size:{theme.TYPE_META};font-weight:600;'
-                    f'color:{theme.ACCENTS["danger"]};text-transform:uppercase;'
-                    f'letter-spacing:.04em">⚠ Needs a decision</div>'
-                    f'<div style="margin:.2rem 0"><span style="font-size:44px;font-weight:700;'
-                    f'line-height:1">{unapproved}</span>'
-                    f'<span style="font-size:{theme.TYPE_LEAD};color:#64748b"> of {total}</span></div>'
-                    f'<div style="font-size:{theme.TYPE_SECTION};font-weight:600">'
-                    f"open PRs have no approving review</div>",
-                    unsafe_allow_html=True,
-                )
-                st.progress(min(max(share, 0.0), 1.0))
-                oldest_text = (
-                    f" Oldest unreviewed PR: **{oldest:.0f} days**." if oldest else ""
-                )
-                st.markdown(
-                    f"{prs['never_reviewed']} have never been reviewed at all."
-                    f"{oldest_text}"
-                )
+        with hero:
+            with st.container(border=True):
+                if not github_ready:
+                    st.markdown(
+                        f'<div style="font-size:{theme.TYPE_META};font-weight:600;'
+                        f'color:{theme.ACCENTS["warning"]};text-transform:uppercase">GitHub unavailable</div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown("**PR review health cannot be read**")
+                    st.caption(
+                        f"({github_error})" if github_error else "Set DASHBOARD_GITHUB_TOKEN."
+                    )
+                else:
+                    total = prs.get("total", 0) or 0
+                    unapproved = prs.get("unapproved", 0) or 0
+                    share = (unapproved / total) if total else 0.0
+                    oldest = prs.get("oldest_unreviewed_days")
+                    never_reviewed = prs.get("never_reviewed", 0) or 0
+                    
+                    st.markdown(
+                        f'<div style="font-size:{theme.TYPE_META};font-weight:600;'
+                        f'color:{theme.ACCENTS["danger"]};text-transform:uppercase;'
+                        f'letter-spacing:.04em">⚠ Needs a decision</div>'
+                        f'<div style="margin:.2rem 0"><span style="font-size:44px;font-weight:700;'
+                        f'line-height:1">{unapproved}</span>'
+                        f'<span style="font-size:{theme.TYPE_LEAD};color:#64748b"> of {total}</span></div>'
+                        f'<div style="font-size:{theme.TYPE_SECTION};font-weight:600">'
+                        f"open PRs have no approving review</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.progress(min(max(share, 0.0), 1.0))
+                    oldest_text = (
+                        f" Oldest unreviewed PR: **{oldest:.0f} days**." if oldest and not pd.isna(oldest) else ""
+                    )
+                    st.markdown(
+                        f"{never_reviewed} have never been reviewed at all."
+                        f"{oldest_text}"
+                    )
+    except Exception as e:
+        logger.exception("Error rendering attention band PR section: %s", str(e))
+        st.error(f"Error displaying PR metrics: {str(e)}")
 
-    _decision_card(
-        a,
-        chip="Triage",
-        accent="warning",
-        value=_text_or(triage_stuck, "—"),
-        headline=f"tickets stuck in triage > {TRIAGE_STUCK_HOURS:.0f}h",
-        note="Untriaged bugs age silently — nobody has decided they matter.",
-    )
-    _decision_card(
-        b,
-        chip="Review",
-        accent="danger",
-        value=str(prs["no_reviewer_asked"]) if github_ready else "—",
-        headline=f"PRs > {TODAY_NO_REVIEWER_DAYS:.0f} days with no reviewer asked",
-        note="Nobody was requested and nobody has looked. These stall by default.",
-    )
-    share_note = (
-        f"{ownerless / open_total:.0%} of open work belongs to nobody, so nobody's score carries it."
-        if open_total
-        else "No open tickets in scope."
-    )
-    _decision_card(
-        c,
-        chip="Ownership",
-        accent="info",
-        value=str(ownerless),
-        headline="open tickets with no owner",
-        note=share_note,
-    )
+        _decision_card(
+            a,
+            chip="Triage",
+            accent="warning",
+            value=_text_or(triage_stuck, "—"),
+            headline=f"tickets stuck in triage > {TRIAGE_STUCK_HOURS:.0f}h",
+            note="Untriaged bugs age silently — nobody has decided they matter.",
+        )
+        _decision_card(
+            b,
+            chip="Review",
+            accent="danger",
+            value=str(prs.get("no_reviewer_asked", 0)) if github_ready else "—",
+            headline=f"PRs > {TODAY_NO_REVIEWER_DAYS:.0f} days with no reviewer asked",
+            note="Nobody was requested and nobody has looked. These stall by default.",
+        )
+        share_note = (
+            f"{ownerless / open_total:.0%} of open work belongs to nobody, so nobody's score carries it."
+            if open_total
+            else "No open tickets in scope."
+        )
+        _decision_card(
+            c,
+            chip="Ownership",
+            accent="info",
+            value=str(ownerless),
+            headline="open tickets with no owner",
+            note=share_note,
+        )
+    except Exception as e:
+        logger.exception("Error rendering decision cards: %s", str(e))
+        st.error(f"Error displaying decision metrics: {str(e)}")
 
 
 _ACTION_QUEUE_NAMES = {
@@ -6573,65 +6501,70 @@ def _clear_page_caches(page_title: str) -> None:
     list and the user directory - and the next visitor to those pages paid for
     it. Clearing per page keeps the button honest about what it refreshes.
     """
-    engineering = (
-        fetch_tickets,
-        fetch_resolved_count,
-        fetch_resolved_tickets,
-        fetch_person_resolved_count,
-        fetch_person_reopened_count,
-        fetch_created_count,
-        fetch_created_tickets,
-        fetch_triage_stuck_count,
-        fetch_triage_stuck_tickets,
-        fetch_open_prs_cached,
-        fetch_open_pr_count_cached,
-        fetch_merged_prs_cached,
-        fetch_merged_pr_count_cached,
-        fetch_available_transition_statuses,
-        # The sprint editor's dropdowns are drawn from these. They are held for
-        # longer than the counts because they move rarely, but "rarely" is not
-        # "never": somebody who has just been added to Jira and presses Refresh
-        # to find themselves should find themselves.
-        fetch_project_keys,
-        fetch_all_priorities,
-        fetch_all_users,
-    )
-    business = (
-        _order_book,
-        fetch_store_prefixes_cached,
-        _funnel_cached,
-        _breakdown_cached,
-        _event_users_cached,
-        # Both ads entries, or Refresh would drop the spend and go straight back
-        # to a day-old list of accounts to read it for.
-        _ads_cached,
-        _ads_accounts,
-        # Burn holds the three bills, and a quarter of an hour is long enough
-        # that a reader who presses Refresh expects them to move too.
-        _openai_costs_cached,
-        _cloud_costs_cached,
-        _stripe_ledger_cached,
-        _stripe_disputes_cached,
-        # Benchmarks move once a day, but a reader who has just changed a price
-        # and pressed Refresh is asking about that price.
-        _price_benchmark_cached,
-        # And whose listing each of those prices is: a merchant renamed or a
-        # product re-slugged would otherwise keep its old name for a day.
-        _offer_merchants_cached,
-        # And what those prices sold: the evidence beside them is only worth
-        # refreshing if the bottles move with it.
-        _offer_sales_cached,
-        # And what Vivino charges for the same wines: the whole point of a
-        # Refresh after a merchant says they have fixed a price there.
-        _vivino_comparison_cached,
-    )
-    for cached in business if page_title == BUSINESS_PAGE_TITLE else engineering:
-        cached.clear()
     if page_title == BUSINESS_PAGE_TITLE:
+        # Lazy import business module only when clearing business caches
+        business = _lazy_import_business()
+        business_caches = (
+            business._order_book,
+            business.fetch_store_prefixes_cached,
+            business._funnel_cached,
+            business._breakdown_cached,
+            business._event_users_cached,
+            # Both ads entries, or Refresh would drop the spend and go straight back
+            # to a day-old list of accounts to read it for.
+            business._ads_cached,
+            business._ads_accounts,
+            # Burn holds the three bills, and a quarter of an hour is long enough
+            # that a reader who presses Refresh expects them to move too.
+            business._openai_costs_cached,
+            business._cloud_costs_cached,
+            business._stripe_ledger_cached,
+            business._stripe_disputes_cached,
+            # Benchmarks move once a day, but a reader who has just changed a price
+            # and pressed Refresh is asking about that price.
+            business._price_benchmark_cached,
+            # And whose listing each of those prices is: a merchant renamed or a
+            # product re-slugged would otherwise keep its old name for a day.
+            business._offer_merchants_cached,
+            # And what those prices sold: the evidence beside them is only worth
+            # refreshing if the bottles move with it.
+            business._offer_sales_cached,
+            # And what Vivino charges for the same wines: the whole point of a
+            # Refresh after a merchant says they have fixed a price there.
+            business._vivino_comparison_cached,
+        )
+        for cached in business_caches:
+            cached.clear()
         # With the saved Vivino reads gone, the minutes-long pull must wait
         # for its button again rather than restart on the next screen draw.
         st.session_state.pop("vivino_reads", None)
     else:
+        # Engineering page caches
+        engineering = (
+            fetch_tickets,
+            fetch_resolved_count,
+            fetch_resolved_tickets,
+            fetch_person_resolved_count,
+            fetch_person_reopened_count,
+            fetch_created_count,
+            fetch_created_tickets,
+            fetch_triage_stuck_count,
+            fetch_triage_stuck_tickets,
+            fetch_open_prs_cached,
+            fetch_open_pr_count_cached,
+            fetch_merged_prs_cached,
+            fetch_merged_pr_count_cached,
+            fetch_available_transition_statuses,
+            # The sprint editor's dropdowns are drawn from these. They are held for
+            # longer than the counts because they move rarely, but "rarely" is not
+            # "never": somebody who has just been added to Jira and presses Refresh
+            # to find themselves should find themselves.
+            fetch_project_keys,
+            fetch_all_priorities,
+            fetch_all_users,
+        )
+        for cached in engineering:
+            cached.clear()
         # The session-held engineering bundle (Phase 2) would otherwise still
         # match its old fingerprint and hand back the reads just cleared.
         st.session_state.pop(_ENGINEERING_BUNDLE_KEY, None)

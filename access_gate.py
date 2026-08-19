@@ -216,14 +216,19 @@ def _remember_browser(expected: str) -> None:
     # avoid writing it repeatedly on every rerun.
     if st.session_state.get(_COOKIE_WRITTEN_KEY):
         return
-    # If the cookie is already present from a previous session, mark it as written
-    # so we don't try to overwrite it.
-    if st.context.cookies.get(_COOKIE_NAME):
-        logger.info("Access cookie already present in browser, skipping write")
+    # If a valid cookie is already present from a previous session, mark it as written
+    # so we don't try to overwrite it. We must check validity, not just presence,
+    # otherwise an expired cookie would prevent writing a fresh one.
+    existing_token = st.context.cookies.get(_COOKIE_NAME, "")
+    if existing_token and _token_is_valid(existing_token, expected):
+        logger.info("Valid access cookie already present in browser, skipping write")
         st.session_state[_COOKIE_WRITTEN_KEY] = True
         return
     # Write the cookie and immediately mark it as written to prevent duplicate writes
-    logger.info("Writing access cookie to browser")
+    if existing_token:
+        logger.info("Replacing expired or invalid access cookie with fresh one")
+    else:
+        logger.info("Writing new access cookie to browser")
     _write_cookie(_mint_token(expected), _COOKIE_MAX_AGE_SECONDS)
     st.session_state[_COOKIE_WRITTEN_KEY] = True
 
