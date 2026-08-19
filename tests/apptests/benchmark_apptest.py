@@ -26,6 +26,9 @@ import merchant_client  # noqa: E402
 # The harness runs in this process and replaces the sales read with a stub, so
 # the real one is held here while it is still the real one.
 _SALES_READ = dashboard._offer_sales_cached
+# Also save the real business function before it gets stubbed
+from pages import business
+_REAL_OFFER_SALES = business._offer_sales_cached
 
 HARNESS = str(Path(__file__).resolve().parent / "_benchmark_harness.py")
 
@@ -84,8 +87,8 @@ NO_CLICKS = merchant_client.Demand(pd.DataFrame())
 # sells on a third of its clicks, the dear one on a tenth.
 SOLD = pd.DataFrame(
     [
-        {"offer": "d", "bottles": 10, "revenue": 80.0},
-        {"offer": "b", "bottles": 9, "revenue": 152.91},
+        {"offer": "d", "handle": "wine-d", "bottles": 10, "revenue": 80.0},
+        {"offer": "b", "handle": "wine-b", "bottles": 9, "revenue": 152.91},
     ]
 )
 
@@ -635,7 +638,10 @@ print("a second currency is set aside rather than mixed: ok")
 # An ice pack ships with the wine and is not one, so it never reaches a band.
 _read = dashboard.orders_client.fetch_offer_sales
 _env = dashboard.orders_client.load_medusa_env
+_stub = business._offer_sales_cached
 try:
+    # Temporarily restore the real function so the ice-pack filtering logic is tested
+    business._offer_sales_cached = _REAL_OFFER_SALES
     dashboard.orders_client.load_medusa_env = (
         lambda: dashboard.orders_client.DbConfig("host", "db", "user", "secret", 5432)
     )
@@ -651,6 +657,7 @@ try:
 finally:
     dashboard.orders_client.fetch_offer_sales = _read
     dashboard.orders_client.load_medusa_env = _env
+    business._offer_sales_cached = _stub
 assert list(kept["handle"]) == ["yiannis-a-cheap-wine"], kept.to_string()
 print("an add-on shipped with the wine is not counted as bottles sold: ok")
 

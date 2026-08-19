@@ -184,13 +184,14 @@ def by_band(frame: pd.DataFrame) -> pd.DataFrame:
     # Kept to the cent rather than the unit: this column is also the test for
     # whether a band returned anything at all, and a band returning forty cents
     # a dollar rounded to the unit is a band reported as having sold nothing.
-    grouped["per_dollar"] = (
-        grouped["revenue"] / grouped["spend"].where(grouped["spend"] > 0)
-    ).round(2)
     if not sold_known(frame):
         # A band still has wines, spend and clicks in it without the order book.
         # What it gave back is the column that would be invented.
         grouped[["bottles", "revenue", "per_dollar"]] = pd.NA
+    else:
+        grouped["per_dollar"] = (
+            grouped["revenue"] / grouped["spend"].where(grouped["spend"] > 0)
+        ).round(2)
     return grouped[columns]
 
 

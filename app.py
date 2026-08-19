@@ -313,6 +313,31 @@ def _visible(offers, wines, sales):
     return business._visible(offers, wines, sales)
 
 
+# Re-export CloudRead, AdsRead, BenchmarkRead, and AdProducts classes for backward compatibility with tests
+def CloudRead(*args, **kwargs):
+    """Re-export CloudRead from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business.CloudRead(*args, **kwargs)
+
+
+def AdsRead(*args, **kwargs):
+    """Re-export AdsRead from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business.AdsRead(*args, **kwargs)
+
+
+def BenchmarkRead(*args, **kwargs):
+    """Re-export BenchmarkRead from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business.BenchmarkRead(*args, **kwargs)
+
+
+def AdProducts(*args, **kwargs):
+    """Re-export AdProducts from pages.business for backward compatibility."""
+    business = _lazy_import_business()
+    return business.AdProducts(*args, **kwargs)
+
+
 # Re-export business page constants for backward compatibility with tests
 _ASK_COLUMNS = (
     "title",
