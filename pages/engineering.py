@@ -15,6 +15,8 @@ import pandas as pd
 import streamlit as st
 
 import theme
+import theme_html
+import theme_tokens
 from data_layer import (
     CREDS_PATH,
     PROFILE_NAME,
@@ -27,10 +29,15 @@ from page_shared import TAB_ENGINEERING, _download_report, _kpis, _tile
 from render_shared import (
     BACKLOG_STATUSES,
     BULK_ACTION_DEFAULT_LIMIT,
+    CODE_PAGE_TITLE,
+    DELIVERY_PAGE_TITLE,
     ENGINEERING_PAGE_TITLE,
     MIX_SLICE_LIMIT,
+    PEOPLE_PAGE_TITLE,
+    PLANNING_PAGE_TITLE,
     TEAM_PEOPLE,
     TEAM_PROJECTS,
+    TODAY_PAGE_TITLE,
     _apply_action_with_audit,
     _clear_page_caches,
     _known_project_keys,
@@ -62,7 +69,62 @@ _PRIORITY_BUCKET_MAP = {
     "highest": "Urgent",
     "urgent": "Urgent",
 }
-_BUCKET_COLORS = {"Normal": "#2ECC71", "High": "#F5A623", "Urgent": "#E74C3C"}
+# Aggregated-priority marker colours for the bubble chart, drawn from
+# theme.ACCENTS - the same good/warning/danger tones the KPI tiles use for
+# "this is fine" / "this needs attention" / "this needs attention now" -
+# rather than a bespoke green/amber/red invented at the point of use.
+# theme.ACCENTS is keyed by KPI accent name, not by theme_tokens.STATUS's
+# tone name, so it is spelled out here rather than mapped through
+# theme_tokens.STAGE_TONES, which is a per-*status* lookup, not a
+# per-*priority-bucket* one.
+_BUCKET_COLORS = {
+    "Normal": theme.ACCENTS["good"],
+    "High": theme.ACCENTS["warning"],
+    "Urgent": theme.ACCENTS["danger"],
+}
+
+# Where each section below now lives on its own, focused page. (label, path)
+# pairs; path is root-relative because this page's own address is a flat
+# "/engineering" and every other page sits one level up from it, not below it.
+_NEW_PAGES: list[tuple[str, str]] = [
+    (TODAY_PAGE_TITLE, "/"),
+    (PEOPLE_PAGE_TITLE, "/people"),
+    (DELIVERY_PAGE_TITLE, "/delivery"),
+    (CODE_PAGE_TITLE, "/code"),
+    (PLANNING_PAGE_TITLE, "/planning"),
+]
+
+
+def _render_legacy_banner() -> None:
+    """Tell a reader who followed an old link where the detail moved to.
+
+    ``theme_html.callout()`` HTML-escapes its title and body, so it can carry
+    the framing sentence but not the five links a reader actually needs; a
+    themed link row underneath, drawn in the same ``.vv`` scope and the same
+    ``--t-body`` type-scale token, carries those instead. ``theme_html.css()``
+    is called here because this page draws its own styling through
+    ``theme.py``, not ``theme_html.py`` - none of the CSS variables
+    ``callout()`` reaches for (``--info``, ``--t-meta``, ...) exist on this
+    page until this call injects them, scoped under ``.vv``.
+    """
+    theme_html.css()
+    banner = theme_html.callout(
+        "info",
+        "This is the old, combined Engineering page.",
+        "It stays live because links to /engineering are in Slack messages "
+        "and people's bookmarks, and breaking those isn't worth the point it "
+        "would make. Every section below still works, but each one now has "
+        "a page of its own with more behind it than this page ever showed:",
+    )
+    links = (
+        '<div style="margin:-4px 0 16px 2px;font-size:var(--t-body)">'
+        + " &nbsp;·&nbsp; ".join(
+            f'<a href="{path}">{label}</a>' for label, path in _NEW_PAGES
+        )
+        + "</div>"
+    )
+    theme_html.render(banner, links)
+
 
 @st.fragment
 def _render_metrics(
@@ -332,6 +394,7 @@ def _render_bubble_chart(
             y="y_jitter",
             size="bubble_size",
             color=color_by,
+            color_discrete_sequence=theme_tokens.colorway(),
             custom_data=["key", "summary", "assignee", "status_label", "priority", "ticket_age_days", "idle_days", "issue_type"],
             title="Staleness vs workflow status",
             labels={"idle_days": "Idle Days", "y_jitter": "Status"},
@@ -692,6 +755,7 @@ def _render_pr_section(
 def _render_engineering_page() -> None:
     import write_access
     from change_audit import load_operations, summarize_operations
+    _render_legacy_banner()
     st.caption("Visual monitoring for stale, idle, and high-risk tickets.")
     # Reserved before the sections run: the download button can only be built
     # once they have, but the slot has to sit at the top where a reader looks

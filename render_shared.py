@@ -120,7 +120,15 @@ import pr_hygiene
 import pr_quality
 import theme_html
 from capacity import (
+    AMBIGUOUS_AVAILABILITY,
+    AT_CAPACITY,
+    HAS_ROOM,
+    NO_AVAILABILITY,
+    OVER_COMMITTED,
+    UNALLOCATED,
+    UNKNOWN_AVAILABILITY,
     capacity_table,
+    capacity_table_by_sprint,
     same_person,
     match_weekly_hours,
     parse_weekly_hours,
@@ -131,6 +139,7 @@ from cleanup import is_unowned
 import engineer_letter
 import epic_organization
 from epics import epic_health_flags, epic_rollup
+import planning_metrics
 from teams import (
     NO_OWNER_TEAM,
     DEFAULT_TEAM_PEOPLE,
@@ -2338,8 +2347,29 @@ def _render_sprint_capacity(
     df: pd.DataFrame,
     status_source_df: pd.DataFrame | None = None,
     selected_ticket_key: str | None = None,
+    triage_stuck_count: int | None = None,
 ) -> None:
-    """Show sprint capacity breakdown for a selected future/active sprint, grouped by assignee."""
+    """Three board cards, cross-board capacity, board hygiene, then the ML sprint editor.
+
+    Task 3E replaced the single-sprint ``st.selectbox`` this function used to
+    gate everything behind with three ``theme_html.sprint_card()``s, one per
+    board, all visible at once - a person working two boards' sprints at the
+    same time is a real, common shape here (App, Marketplace and ML each run
+    their own), and a dropdown forcing "pick one" hid that by construction.
+    Everything through the hygiene bars renders via ``theme_html``; the
+    ticket-membership editor below it is left exactly as it was (a Streamlit
+    ``st.data_editor`` that writes to Jira) - it is a genuinely different
+    tool from a summary card (editing sprint tickets, not describing them),
+    and Jira only ever allowed it on the ML board's sprint (``is_ml_sprint``
+    below, unchanged), so the removed dropdown was never actually choosing
+    which sprint to edit; every other choice just produced the same "can't
+    edit this one" message. ``triage_stuck_count`` is optional and
+    page-supplied - ``pages/planning.py`` already has it from the board
+    bundle; the legacy ``/engineering`` page's call site does not pass it, so
+    the "Stuck in triage" hygiene bar falls back to an offline idle-days
+    estimate there rather than going blank.
+    """
+    theme_html.css()
     required_cols = {"sprint_id", "sprint_name", "sprint_state", "sprint_board_id"}
     missing_cols = sorted(required_cols - set(df.columns))
     if missing_cols:
@@ -2356,19 +2386,184 @@ def _render_sprint_capacity(
     target_df = non_closed if not non_closed.empty else sprint_df
 
     state_rank = {"future": 0, "active": 1, "closed": 2, "": 3}
-    sprint_options_df = (
-        target_df[["sprint_id", "sprint_name", "sprint_state", "sprint_board_id"]]
+
+    # One target sprint per board, ranked the same way the old dropdown's
+    # default (index 0) picked one sprint from the whole list - future before
+    # active before closed, earliest name breaks a tie - applied within each
+    # board separately so three boards produce three cards, not one winner.
+    boarded = target_df[target_df["sprint_board_id"].notna()].copy()
+    board_targets = (
+        boarded[["sprint_id", "sprint_name", "sprint_state", "sprint_board_id"]]
         .drop_duplicates()
-        .assign(
-            state_rank=lambda frame: frame["sprint_state"].str.lower().map(state_rank).fillna(9),
-            sprint_label=lambda frame: frame["sprint_name"] + " (" + frame["sprint_state"].str.title().replace("", "Unknown") + ")",
-        )
-        .sort_values(["state_rank", "sprint_name"])
+        .assign(state_rank=lambda f: f["sprint_state"].str.lower().map(state_rank).fillna(9))
+        .sort_values(["sprint_board_id", "state_rank", "sprint_name"])
+        .groupby("sprint_board_id", as_index=False)
+        .first()
+        .sort_values("sprint_board_id")
+        .reset_index(drop=True)
+        if not boarded.empty
+        else pd.DataFrame(columns=["sprint_id", "sprint_name", "sprint_state", "sprint_board_id"])
     )
-    sprint_labels = sprint_options_df["sprint_label"].tolist()
-    default_idx = 0
-    selected_label = st.selectbox("Sprint", options=sprint_labels, index=default_idx)
-    selected_row = sprint_options_df.loc[sprint_options_df["sprint_label"] == selected_label].iloc[0]
+    if board_targets.empty:
+        st.info("No sprint carries a board ID; cannot group sprints by board.")
+        return
+
+    team_labeled = add_team(boarded, TEAM_PROJECTS, TEAM_PEOPLE)
+    carry_table, _carry_total, _carry_tickets, _carry_excluded = planning_metrics.carry_over_per_sprint(target_df)
+    _CARD_ACCENTS = ["s1", "s2", "s3", "s5", "s6", "s7"]
+
+    cards: list[str] = []
+    dateless_names: list[str] = []
+    ml_row = None
+    for position, brow in board_targets.iterrows():
+        board_id = brow["sprint_board_id"]
+        this_sprint_name = str(brow["sprint_name"])
+        board_rows = boarded[
+            (boarded["sprint_board_id"] == board_id) & (boarded["sprint_name"] == this_sprint_name)
+        ]
+        team_series = (
+            team_labeled.loc[board_rows.index, "team"] if not board_rows.empty else pd.Series(dtype=object)
+        )
+        mode = team_series.mode()
+        board_label = str(mode.iat[0]) if not mode.empty else f"Board {board_id}"
+        if this_sprint_name.startswith("ML Sprint") or board_label == "ML":
+            ml_row = brow
+
+        start, end = _sprint_window(board_rows)
+        dated = working_days(start, end) > 0
+        if not dated:
+            dateless_names.append(this_sprint_name)
+
+        tickets = int(len(board_rows))
+        est_hours = pd.to_numeric(board_rows.get("original_estimate_sec"), errors="coerce").fillna(0.0) / 3600.0
+        committed = float(est_hours.sum())
+        unestimated = int((est_hours <= 0).sum())
+        owners = (
+            board_rows.get("assignee", pd.Series(dtype=object)).fillna("").astype(str).str.strip().str.lower()
+        )
+        people = int(board_rows.loc[~owners.isin(_NO_OWNER_NAMES), "assignee"].nunique()) if len(board_rows) else 0
+
+        carry_row = carry_table[carry_table["Sprint"] == this_sprint_name]
+        if not dated:
+            carried_display, carried_note = "needs dates", ""
+        elif carry_row.empty:
+            carried_display, carried_note = "0", ""
+        else:
+            share_v = carry_row["Share %"].iat[0]
+            carried_display = str(int(carry_row["Carried over"].iat[0]))
+            carried_note = f"{share_v:.0f}%" if share_v is not None and not pd.isna(share_v) else ""
+
+        window_text = f"{pd.Timestamp(start):%d %b} → {pd.Timestamp(end):%d %b}" if dated else "No dates set"
+        accent = "warn" if not dated else _CARD_ACCENTS[position % len(_CARD_ACCENTS)]
+        card_rows: list[tuple[str, str, str]] = [
+            ("Tickets", str(tickets), ""),
+            ("Committed", f"{committed:.0f}h" if dated else "—", ""),
+            ("Unestimated", str(unestimated), ""),
+            ("Carried over", carried_display, carried_note),
+            ("People", str(people), ""),
+        ]
+        cards.append(theme_html.sprint_card(board_label, accent, this_sprint_name, window_text, card_rows))
+
+    fragments = [
+        '<div class="grid" style="grid-template-columns:repeat('
+        f'{len(cards)},1fr);margin-top:6px">' + "".join(cards) + "</div>"
+    ]
+    if dateless_names:
+        title = (
+            f"The {dateless_names[0]} sprint has no start or end date."
+            if len(dateless_names) == 1
+            else f"{len(dateless_names)} sprints have no start or end date: {', '.join(dateless_names)}."
+        )
+        fragments.append(
+            theme_html.callout(
+                "warn",
+                title,
+                "Availability, utilisation and carry-over cannot be computed for it, and "
+                "it is excluded from the totals below rather than counted as zero. A Jira "
+                "board setting, not a code change.",
+            )
+        )
+
+    # ---- Board hygiene: eight counts, org-wide (all boards, not just the
+    # sprints above) - "the PM function made legible, not an engineer's
+    # failing" per the mockup this reproduces.
+    no_priority = planning_metrics.no_priority_count(df)
+    ghosts = planning_metrics.ghost_assigned(df)
+    outside_sprint = planning_metrics.outside_any_sprint_count(df)
+    if "assignee" in df.columns:
+        owners_all = df["assignee"].fillna("").astype(str).str.strip().str.lower()
+        unassigned_count = int(owners_all.isin(_NO_OWNER_NAMES).sum())
+    else:
+        unassigned_count = 0
+
+    scored_epics = estimate_policy(df, BACKLOG_STATUSES)
+    rollup = epic_health_flags(epic_rollup(scored_epics))
+    if rollup.empty:
+        epics_needing_attention = 0
+    else:
+        orphans_in_rollup = int(rollup.loc[rollup["epic"] == "No epic", "open_children"].sum())
+        epics_needing_attention = max(
+            int((rollup["issue_count"] > 0).sum()) - (1 if orphans_in_rollup else 0), 0
+        )
+    orphan_tickets = len(epic_organization.suggest_parents(df))
+    empty_epics_count = len(epic_organization.empty_epics(df))
+
+    stuck_known = True
+    if triage_stuck_count is not None:
+        stuck_count = int(triage_stuck_count)
+    elif {"status", "idle_days"}.issubset(df.columns):
+        triage_status_set = {s.strip().lower() for s in TRIAGE_STATUSES}
+        stuck_mask = df["status"].fillna("").astype(str).str.strip().str.lower().isin(
+            triage_status_set
+        ) & (pd.to_numeric(df["idle_days"], errors="coerce").fillna(0.0) * 24.0 >= TRIAGE_STUCK_HOURS)
+        stuck_count = int(stuck_mask.sum())
+    else:
+        stuck_count, stuck_known = 0, False
+
+    hygiene_values = [
+        ("No priority", no_priority.count, "s4"),
+        ("Ghost-assigned", ghosts.count, "s8"),
+        ("Unassigned", unassigned_count, "s4"),
+        ("Epics needing attention", epics_needing_attention, "s4"),
+        ("Orphan tickets (no epic)", orphan_tickets, "s1"),
+        ("Outside any sprint", outside_sprint.count, "s4"),
+        ("Empty epics", empty_epics_count, "s1"),
+        ("Stuck in triage", stuck_count, "s1"),
+    ]
+    max_value = max((v for _, v, _ in hygiene_values), default=0)
+    hygiene_bars = [
+        theme_html.Bar(
+            name,
+            "n/a" if (name == "Stuck in triage" and not stuck_known) else str(value),
+            (value / max_value * 100.0) if max_value else 0.0,
+            tone=tone,
+            dim=(name == "Stuck in triage" and not stuck_known),
+        )
+        for name, value, tone in hygiene_values
+    ]
+    if ghosts.count:
+        sample = ", ".join(ghosts.keys[:5]) + (", ..." if len(ghosts.keys) > 5 else "")
+        ghost_evidence = (
+            f"Ghost-assigned is worse than unassigned: {ghosts.count} open ticket(s) belong "
+            f"to people who have left ({sample})."
+        )
+    else:
+        ghost_evidence = (
+            "Ghost-assigned: a genuine zero today - no open ticket's assignee matches the "
+            "departed-staff list."
+        )
+    fragments.append(
+        '<div class="card" style="margin-top:14px"><h3 class="chart-title">Board hygiene '
+        '<span class="chip gray">all three boards</span></h3>'
+        "<p class=\"chart-sub\">Every count here is the PM function made legible, not an "
+        f"engineer's failing</p>{theme_html.hbars(hygiene_bars)}"
+        f'<p class="chart-sub" style="margin:12px 0 0">{html.escape(ghost_evidence)}</p></div>'
+    )
+    theme_html.render(*fragments)
+
+    _render_hourly_capacity(target_df)
+
+    selected_row = ml_row if ml_row is not None else board_targets.iloc[0]
     selected_sprint_id = _normalize_sprint_id(selected_row["sprint_id"])
     if not selected_sprint_id:
         st.error("Selected sprint has no valid sprint ID; cannot apply sprint membership changes.")
@@ -2380,7 +2575,13 @@ def _render_sprint_capacity(
         & (target_df["sprint_state"] == selected_row["sprint_state"])
     ].copy()
 
-    st.markdown(f"**Selected sprint:** {selected_row['sprint_name']} ({str(selected_row['sprint_state']).title()})")
+    st.divider()
+    st.markdown("##### Sprint ticket editor")
+    st.caption(
+        f"Editing **{selected_row['sprint_name']}** ({str(selected_row['sprint_state']).title()}) "
+        "- Jira only allows sprint-membership and field edits on the ML board's sprint from "
+        "here; the other boards are summarised in the cards above, read-only."
+    )
 
     is_ml_sprint = str(selected_row["sprint_name"]).startswith("ML Sprint")
 
@@ -3207,8 +3408,6 @@ def _render_sprint_capacity(
         hide_index=True,
     )
 
-    _render_hourly_capacity(scoped, preview_scoped)
-
 
 def _sprint_window(sprint_df: pd.DataFrame) -> tuple[object, object]:
     """Start and end of a sprint, taken from a single row so they cannot mismatch."""
@@ -3225,87 +3424,157 @@ def _sprint_window(sprint_df: pd.DataFrame) -> tuple[object, object]:
     return start, end
 
 
-def _render_hourly_capacity(sprint_df: pd.DataFrame, in_sprint_df: pd.DataFrame) -> None:
-    """Committed hours against each person's declared availability.
+_CAPACITY_STATUS_TONE = {
+    OVER_COMMITTED: "crit",
+    AT_CAPACITY: "warn",
+    HAS_ROOM: "good",
+    NO_AVAILABILITY: "gray",
+    UNKNOWN_AVAILABILITY: "gray",
+    UNALLOCATED: "gray",
+    AMBIGUOUS_AVAILABILITY: "warn",
+}
 
-    Part-time and hourly engineers make raw committed totals unreadable, so the
-    hours per week come from JIRA_WEEKLY_HOURS and are spread across the
-    sprint's own working days.
+_CAPACITY_TABLE_MAX_ROWS = 300
+
+
+def _render_hourly_capacity(df: pd.DataFrame) -> None:
+    """Cross-board capacity, plus per-sprint estimate coverage. Rendered through theme_html.
+
+    Replaces the old single-sprint ``capacity.capacity_table`` call with
+    ``capacity.capacity_table_by_sprint``: someone on two boards' sprints at
+    once now gets one row per sprint *and* one total row, and the total is
+    the row that matters (docs/assumptions/2E.md) - the person's actual load
+    is never split across two rows nobody adds up. A sprint with no Jira
+    dates cannot produce available hours; it is left out of the totals
+    rather than folded in as a silent zero, and named in the caption instead
+    of just disappearing.
+
+    Blind spot inherited from ``capacity_table_by_sprint``: ``JIRA_WEEKLY_HOURS``
+    is one global declaration, not a per-board one, so a person declared
+    there who only works one board still gets an idle "Has room" row counted
+    toward every other dated sprint too - the per-row ``Sprint`` column (not
+    just the total row's) is what lets a reader check which sprint actually
+    produced the hours.
     """
-    st.markdown("##### Availability vs Commitment")
     if not WEEKLY_HOURS:
-        st.caption(
-            "Set JIRA_WEEKLY_HOURS (e.g. \"Tam=10,Jal=20\") to compare committed "
-            "hours against what each person is actually available for."
-        )
-        return
-
-    start, end = _sprint_window(sprint_df)
-    days = working_days(start, end)
-    if not days:
-        st.caption(
-            "This sprint has no start/end dates in Jira, so available hours cannot "
-            "be derived. Set the sprint dates on the board."
-        )
-        return
-
-    if in_sprint_df.empty:
-        committed = pd.Series(dtype="float64")
-    else:
-        owners = in_sprint_df["assignee_live"].fillna("Unassigned").astype(str).str.strip()
-        committed = (
-            pd.to_numeric(in_sprint_df["estimate_seconds_live"], errors="coerce")
-            .fillna(0.0)
-            .div(3600.0)
-            .groupby(owners.mask(owners.eq(""), "Unassigned"))
-            .sum()
-        )
-    # The roster has to follow the scope: outside it a person's tickets are not
-    # loaded, so they would read as idle when they are merely filtered out.
-    in_scope = st.session_state.get(_SCOPE_ASSIGNEES_KEY)
-    roster = (
-        WEEKLY_HOURS
-        if in_scope is None
-        else {
-            name: hours
-            for name, hours in WEEKLY_HOURS.items()
-            # Roster names are short ("Farid"), scope names are Jira display
-            # names ("Farid Shahidi"), so compare them the same loose way.
-            if any(
-                match_weekly_hours(person, {name: hours}) is not None
-                for person in in_scope
+        theme_html.render(
+            theme_html.callout(
+                "info",
+                "No contracted hours declared.",
+                'Set JIRA_WEEKLY_HOURS (e.g. "Tam=10,Jal=20") to compare committed hours '
+                "against what each person is actually available for.",
             )
-        }
-    )
-    table = capacity_table(committed, roster, start, end)
-    if table.empty:
-        st.caption("No assignees to report on for this sprint.")
+        )
+        return
+    if not {"sprint_start", "sprint_end"}.issubset(df.columns):
+        theme_html.render(
+            theme_html.callout(
+                "info",
+                "No sprint dates loaded.",
+                "This board's tickets carry no sprint_start/sprint_end field, so no "
+                "capacity table can be built.",
+            )
+        )
         return
 
-    st.caption(
-        f"{days:.0f} working day(s) in this sprint "
-        f"({pd.Timestamp(start).date()} to {pd.Timestamp(end).date()}). "
-        "Committed covers every ticket in the sprint that the current scope and "
-        "filters keep, not just the statuses counted in hours above. Utilization is "
-        'committed / available; "Unknown" means no weekly hours are declared for '
-        'that person, and "Ambiguous roster name" means a declaration like '
-        '"Dan=40" matches more than one person in Jira, so it is withheld rather '
-        "than handed to both - spell that entry as the full Jira name to fix it."
-    )
-    st.dataframe(
-        table,
-        width="stretch",
-        hide_index=True,
-        column_config={
-            "Committed (h)": st.column_config.NumberColumn(format="%.1f"),
-            "Available (h)": st.column_config.NumberColumn(format="%.1f"),
-            "Utilization %": st.column_config.NumberColumn(format="%.0f%%"),
-            "Delta (h)": st.column_config.NumberColumn(
-                format="%.1f",
-                help="Available minus committed; negative means over-committed.",
-            ),
-        },
-    )
+    rows, totals, excluded = capacity_table_by_sprint(df, WEEKLY_HOURS)
+    fragments: list[str] = []
+
+    if rows.empty and totals.empty:
+        fragments.append(
+            theme_html.callout(
+                "info", "No sprint capacity to show.", "No assignee has hours in a sprint in scope."
+            )
+        )
+    else:
+        columns = [
+            theme_html.Column("Person"),
+            theme_html.Column("Sprint"),
+            theme_html.Column("Contracted (h)", "num"),
+            theme_html.Column("Committed (h)", "num"),
+            theme_html.Column("Utilization %", "num"),
+            theme_html.Column("Status", "chip"),
+        ]
+        table_rows: list[list] = []
+        for _, r in rows.sort_values(["Assignee", "Sprint"]).iterrows():
+            table_rows.append(
+                [
+                    theme_html.Cell(r["Assignee"]),
+                    theme_html.Cell(r["Sprint"]),
+                    theme_html.Cell(r["Available (h)"]),
+                    theme_html.Cell(r["Committed (h)"]),
+                    theme_html.Cell(r["Utilization %"]),
+                    theme_html.Cell(str(r["Status"]), tone=_CAPACITY_STATUS_TONE.get(str(r["Status"]), "gray")),
+                ]
+            )
+        for _, r in totals.sort_values("Assignee").iterrows():
+            sprints = str(r["Sprints"] or "")
+            table_rows.append(
+                [
+                    theme_html.Cell(r["Assignee"]),
+                    theme_html.Cell(f"Total ({sprints})" if sprints else "Total"),
+                    theme_html.Cell(r["Available (h)"]),
+                    theme_html.Cell(r["Committed (h)"]),
+                    theme_html.Cell(r["Utilization %"]),
+                    theme_html.Cell(str(r["Status"]), tone=_CAPACITY_STATUS_TONE.get(str(r["Status"]), "gray")),
+                ]
+            )
+        shown_rows = table_rows[:_CAPACITY_TABLE_MAX_ROWS]
+        capacity_html = theme_html.table(columns, shown_rows)
+        excluded_note = (
+            f"Excluded from these totals (no Jira dates): {', '.join(excluded)}." if excluded else ""
+        )
+        truncation_note = (
+            f"Showing the first {_CAPACITY_TABLE_MAX_ROWS} of {len(table_rows)} rows."
+            if len(table_rows) > _CAPACITY_TABLE_MAX_ROWS
+            else ""
+        )
+        footer_bits = " ".join(part for part in (excluded_note, truncation_note) if part)
+        fragments.append(
+            '<div class="card"><h3 class="chart-title">Capacity — contracted vs committed, per sprint</h3>'
+            '<p class="chart-sub">Contracted hours come from <code>JIRA_WEEKLY_HOURS</code>. Someone on '
+            "two boards is listed twice, and their load is the <b>sum</b> — the row that matters is the "
+            f"total, not either sprint alone.</p>{capacity_html}"
+            + (f'<p class="chart-sub" style="margin:12px 0 0">{html.escape(footer_bits)}</p>' if footer_bits else "")
+            + "</div>"
+        )
+
+    # Per-sprint estimate coverage - "unknown is not low" (docs/assumptions/2E.md):
+    # a person with zero estimated tickets this sprint reads the literal word
+    # "unknown", never a bare 0%, because the two read identically on a percentage
+    # axis unless kept structurally distinct.
+    coverage, _dateless = planning_metrics.unestimated_per_sprint(df)
+    if not coverage.empty:
+        cov_columns = [
+            theme_html.Column("Sprint"),
+            theme_html.Column("Assignee"),
+            theme_html.Column("Tickets", "num"),
+            theme_html.Column("Unestimated", "strong-num"),
+            theme_html.Column("Coverage"),
+        ]
+        cov_rows = []
+        for _, r in coverage.sort_values(["Sprint", "Assignee"]).iterrows():
+            value = r["Coverage"]
+            coverage_text = "unknown" if value == planning_metrics.UNKNOWN else f"{float(value):.0f}%"
+            cov_rows.append(
+                [
+                    theme_html.Cell(r["Sprint"]),
+                    theme_html.Cell(r["Assignee"]),
+                    theme_html.Cell(int(r["Tickets"])),
+                    theme_html.Cell(int(r["Unestimated"])),
+                    theme_html.Cell(coverage_text),
+                ]
+            )
+        cov_html = theme_html.table(cov_columns, cov_rows[:_CAPACITY_TABLE_MAX_ROWS])
+        fragments.append(
+            '<div class="card" style="margin-top:14px"><h3 class="chart-title">'
+            "Per-sprint estimate coverage</h3>"
+            '<p class="chart-sub"><b>Unknown is not low.</b> A person with zero estimated tickets '
+            "this sprint reads <code>unknown</code>, never 0% — those read the same on a percentage "
+            f"axis unless kept separate.</p>{cov_html}</div>"
+        )
+
+    theme_html.render(*fragments)
 
 
 # Tinted background with a saturated text colour of the same hue, so the pills

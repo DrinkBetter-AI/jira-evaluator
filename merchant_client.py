@@ -21,12 +21,17 @@ Two reports are read, both a snapshot of now rather than a series:
 
 The credential is a service account added to Merchant Center as a reader. There
 is no write scope on it and this module has no write verb.
+
+One exception to "no SQL": ``resolve_store_status`` (Task 3F) interprets a row
+already read from ``medusa.store`` by a caller elsewhere - it does not open a
+database connection itself, and this module still runs no query of its own.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -871,6 +876,81 @@ def as_of(now: _dt.date | None = None) -> _dt.date:
     return now or _dt.date.today()
 
 
+# --- Store active/inactive metadata (Task 3F) --------------------------------
+#
+# A separate question from the trading roster ``ACTIVE_MERCHANTS`` names in
+# pages/business.py, which is a settled business decision (the vendor panel
+# screenshot). This is a database question that is still open: which key in
+# ``medusa.store``'s ``metadata`` JSON carries a store's own active/inactive
+# toggle. No DB access from this environment has ever confirmed it - see
+# docs/assumptions/3F.md for the exact verification query
+# (``select name, metadata from medusa.store limit 12``). Kept as a fallback
+# chain rather than a single guessed key: deleting three of the four on a
+# guess risks silently reading every store as "status unknown" the day the
+# real key turns out to be one that was dropped.
+STORE_STATUS_KEYS: tuple[str, ...] = ("status", "store_status", "is_active", "active")
+
+_ACTIVE_STATUS_TEXT = frozenset(
+    {"active", "enabled", "true", "1", "yes", "on", "trading"}
+)
+_INACTIVE_STATUS_TEXT = frozenset({"inactive", "disabled", "false", "0", "no", "off"})
+
+_logger = logging.getLogger(__name__)
+
+
+def resolve_store_status(
+    metadata: dict | None, store_name: str = ""
+) -> tuple[bool | None, str | None]:
+    """A store's active flag from its metadata, and which key decided it.
+
+    Tries ``STORE_STATUS_KEYS`` in order and stops at the first key *present*
+    in ``metadata`` - not the first key whose value this function recognises.
+    A present-but-unrecognised value (a numeric code, a typo) is reported as
+    ``(None, that_key)`` rather than falling through to the next candidate:
+    falling through would silently prefer whichever key happens to parse over
+    the key the store is actually using, which defeats the point of an
+    explicit, ordered chain.
+
+    Never raises. Empty or missing metadata, and metadata carrying none of
+    the four keys, both return ``(None, None)`` - a store this function could
+    not place, not a store assumed inactive. Every call is logged at info
+    level with the key that matched (or that none did), so the next person
+    with DB access can read the logs across a real sample of stores and trim
+    ``STORE_STATUS_KEYS`` to whichever key actually won.
+    """
+    if not metadata:
+        return None, None
+    for key in STORE_STATUS_KEYS:
+        if key not in metadata:
+            continue
+        raw = metadata[key]
+        active: bool | None
+        if isinstance(raw, bool):
+            active = raw
+        else:
+            text = str(raw).strip().lower()
+            if text in _ACTIVE_STATUS_TEXT:
+                active = True
+            elif text in _INACTIVE_STATUS_TEXT:
+                active = False
+            else:
+                active = None
+        _logger.info(
+            "store status: %r resolved from metadata key %r (raw=%r) -> %s",
+            store_name or "(unnamed)",
+            key,
+            raw,
+            active,
+        )
+        return active, key
+    _logger.info(
+        "store status: %r has none of %s in metadata; status unknown",
+        store_name or "(unnamed)",
+        STORE_STATUS_KEYS,
+    )
+    return None, None
+
+
 __all__ = [
     "ASK_LIST",
     "DEAR_GAP",
@@ -882,6 +962,7 @@ __all__ = [
     "MerchantConfigError",
     "Prices",
     "SALES_DAYS",
+    "STORE_STATUS_KEYS",
     "Sales",
     "access_token",
     "after_cut",
@@ -895,6 +976,7 @@ __all__ = [
     "price_gaps",
     "price_insights",
     "product_demand",
+    "resolve_store_status",
     "sales_verdicts",
     "verdicts",
 ]
