@@ -210,15 +210,22 @@ def _write_cookie(value: str, max_age: int) -> None:
 
 
 def _remember_browser(expected: str) -> None:
-    # Only set the flag if the cookie is actually present in the browser.
-    # If we set it before the iframe reaches the browser (e.g., a rerun discards
-    # the render), we suppress every subsequent attempt for the session.
-    if st.context.cookies.get(_COOKIE_NAME):
-        st.session_state[_COOKIE_WRITTEN_KEY] = True
-        return
+    # Only write the cookie once per session. st.context.cookies reflects the
+    # initial WebSocket request, so it won't show a cookie we just wrote until
+    # the next full page load. We track the write attempt in session state to
+    # avoid writing it repeatedly on every rerun.
     if st.session_state.get(_COOKIE_WRITTEN_KEY):
         return
+    # If the cookie is already present from a previous session, mark it as written
+    # so we don't try to overwrite it.
+    if st.context.cookies.get(_COOKIE_NAME):
+        logger.info("Access cookie already present in browser, skipping write")
+        st.session_state[_COOKIE_WRITTEN_KEY] = True
+        return
+    # Write the cookie and immediately mark it as written to prevent duplicate writes
+    logger.info("Writing access cookie to browser")
     _write_cookie(_mint_token(expected), _COOKIE_MAX_AGE_SECONDS)
+    st.session_state[_COOKIE_WRITTEN_KEY] = True
 
 
 def sign_out() -> None:

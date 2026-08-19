@@ -934,6 +934,10 @@ def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | No
     """
     if scope == SCOPE_ORG:
         st.caption(f"Organization-wide view across {len(assignees)} assignee(s).")
+        # Clear person parameter when viewing organization-wide
+        if _PERSON_PARAM in st.query_params:
+            logger.debug("Clearing person parameter from URL (Organization scope)")
+            del st.query_params[_PERSON_PARAM]
         return None
 
     if scope == SCOPE_TEAM:
@@ -946,6 +950,16 @@ def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | No
         _carry("team_members", selected)
         if not selected:
             st.warning("No team members selected - showing no tickets.")
+        # Update URL to reflect single person selection in Team scope
+        if len(selected) == 1:
+            if selected[0] != requested_person(assignees):
+                logger.debug(f"Setting person parameter in URL to '{selected[0]}' (Team scope, single selection)")
+                st.query_params[_PERSON_PARAM] = selected[0]
+        else:
+            # Clear person parameter when multiple or no people selected
+            if _PERSON_PARAM in st.query_params:
+                logger.debug(f"Clearing person parameter from URL (Team scope, {len(selected)} selected)")
+                del st.query_params[_PERSON_PARAM]
         return selected
 
     if not assignees:
@@ -966,6 +980,13 @@ def _resolve_scope_assignees(scope: str, assignees: list[str]) -> list[str] | No
         index=assignees.index(carried),
     )
     _carry("individual", selected)
+    
+    # Sync the selected person to the URL so the page can be shared
+    # and the URL reflects who is being viewed
+    if selected != requested_person(assignees):
+        logger.debug(f"Setting person parameter in URL to '{selected}' (Individual scope)")
+        st.query_params[_PERSON_PARAM] = selected
+    
     return [selected]
 
 

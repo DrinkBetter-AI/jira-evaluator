@@ -12,6 +12,10 @@ work at both the organization and the individual level.
 - Ranks tickets with a composite priority score (`prioritization.py`).
 - Renders it all, and writes changes back to Jira, in a Streamlit app (`app.py`),
   with every mutation recorded in an audit log (`change_audit.py`).
+- **URL routing for People page**: Select an employee and the URL updates automatically,
+  making it easy to share direct links to specific employee views (e.g., 
+  `https://.../people?person=shivanand`). See [URL_ROUTING_FEATURE.md](URL_ROUTING_FEATURE.md) 
+  for details.
 
 ## Running the dashboard
 
