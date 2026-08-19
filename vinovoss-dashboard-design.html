@@ -277,11 +277,13 @@
      <span class="chip gray">roles illustrative until the roster is confirmed</span></p>
 
   <div class="filters">
-    <button class="fchip on">All roles</button><button class="fchip">Backend</button>
-    <button class="fchip">Frontend</button><button class="fchip">Mobile</button>
-    <button class="fchip">ML / AI</button><button class="fchip">Recommendation</button>
+    <button class="fchip on">All roles</button><button class="fchip">Platform</button>
+    <button class="fchip">Backend</button><button class="fchip">Frontend</button>
+    <button class="fchip">Mobile</button><button class="fchip">CRM / Medusa</button>
+    <button class="fchip">AI recommendation</button><button class="fchip">Infrastructure</button>
     <button class="fchip">QA — automated</button><button class="fchip">QA — manual</button>
-    <button class="fchip">PM</button>
+    <button class="fchip">Designer</button><button class="fchip">PM</button>
+    <button class="fchip">Exec</button>
   </div>
 
   <div class="card" style="padding:6px 8px">
@@ -292,45 +294,90 @@
         <th class="num">Estimate accuracy</th><th>Flags 🔒</th>
       </tr></thead>
       <tbody>
-        <tr><td><div class="who"><span class="av" style="background:var(--s1)">TA</span><b>Tam</b> <span class="rolechip">backend</span></div></td>
+        <tr><td><div class="who"><span class="av" style="background:var(--s1)">TA</span><b>Tam</b> <span class="rolechip">platform</span></div></td>
           <td><span class="scorebar"><span class="tr"><i style="width:81%;background:var(--good)"></i></span><b>81</b></span> <span class="nnote">n=31</span></td>
           <td class="num">42 pts <span class="nnote">8% trivial</span></td><td class="num">6.2d</td>
           <td class="num">14 · 11h</td><td class="num">×1.1 <span class="nnote">IQR 0.5</span></td>
           <td><span class="chip gray">0</span></td></tr>
-        <tr><td><div class="who"><span class="av" style="background:var(--s7)">SS</span><b>Sai Shankar</b> <span class="rolechip">ML-ops</span></div></td>
+        <tr><td><div class="who"><span class="av" style="background:var(--s2)">SH</span><b>Shawn</b> <span class="rolechip">backend</span></div></td>
           <td><span class="scorebar"><span class="tr"><i style="width:74%;background:var(--good)"></i></span><b>74</b></span> <span class="nnote">n=24</span></td>
           <td class="num">38 pts <span class="nnote">12% trivial</span></td><td class="num">7.8d</td>
           <td class="num">9 · 18h</td><td class="num">×1.3 <span class="nnote">IQR 0.8</span></td>
           <td><span class="chip gray">0</span></td></tr>
-        <tr><td><div class="who"><span class="av" style="background:var(--s3)">SC</span><b>Santi Caamaño</b> <span class="rolechip">frontend</span></div></td>
+        <tr><td><div class="who"><span class="av" style="background:var(--s3)">MD</span><b>Mohsen Davoudi</b> <span class="rolechip">frontend</span></div></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:69%;background:var(--s4)"></i></span><b>69</b></span> <span class="nnote">n=21</span></td>
+          <td class="num">31 pts <span class="nnote">15% trivial</span></td><td class="num">8.9d</td>
+          <td class="num">7 · 14h</td><td class="num">×1.4 <span class="nnote">IQR 0.9</span></td>
+          <td><span class="chip gray">0</span></td></tr>
+        <tr><td><div class="who"><span class="av" style="background:var(--s4)">DA</span><b>David</b> <span class="rolechip">frontend</span></div></td>
           <td><span class="scorebar"><span class="tr"><i style="width:66%;background:var(--s4)"></i></span><b>66</b></span> <span class="nnote">n=19</span></td>
           <td class="num">29 pts <span class="nnote">21% trivial</span></td><td class="num">10.4d</td>
           <td class="num">11 · 9h</td><td class="num">×1.6 <span class="nnote">IQR 1.1</span></td>
           <td><span class="chip warn">⚑ 1</span></td></tr>
-        <tr><td><div class="who"><span class="av" style="background:var(--s2)">AL</span><b>Ali</b> <span class="rolechip">recommendation</span></div></td>
+        <tr><td><div class="who"><span class="av" style="background:var(--s5)">FS</span><b>Farid Shahidi</b> <span class="rolechip">frontend + mobile</span></div></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:72%;background:var(--good)"></i></span><b>72</b></span> <span class="nnote">n=26</span></td>
+          <td class="num">35 pts <span class="nnote">11% trivial</span></td><td class="num">7.1d</td>
+          <td class="num">8 · 12h</td><td class="num">×1.2 <span class="nnote">IQR 0.6</span></td>
+          <td><span class="chip gray">0</span></td></tr>
+        <tr><td><div class="who"><span class="av" style="background:var(--s2)">AL</span><b>Ali</b> <span class="rolechip">mobile</span></div></td>
           <td><span class="scorebar"><span class="tr"><i style="width:58%;background:var(--s4)"></i></span><b>58</b></span> <span class="nnote">n=27</span></td>
           <td class="num">24 pts <span class="nnote">40% trivial ⚑</span></td><td class="num">13.1d</td>
           <td class="num">2 · 41h</td><td class="num">×2.4 <span class="nnote">IQR 1.9 ⚑</span></td>
           <td><span class="chip warn">⚑ 2</span></td></tr>
-        <tr><td><div class="who"><span class="av" style="background:var(--s8)">AR</span><b>Arsalan</b> <span class="rolechip">backend</span></div></td>
-          <td><span class="scorebar"><span class="tr"><i style="width:52%;background:var(--s4)"></i></span><b>52</b></span> <span class="nnote">n=22</span></td>
-          <td class="num">21 pts <span class="nnote">18% trivial</span></td><td class="num">15.9d</td>
+        <tr><td><div class="who"><span class="av" style="background:var(--s6)">JH</span><b>Jal Haidar</b> <span class="rolechip">CRM / Medusa</span></div></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:63%;background:var(--s4)"></i></span><b>63</b></span> <span class="nnote">n=17</span></td>
+          <td class="num">26 pts <span class="nnote">19% trivial</span></td><td class="num">11.2d</td>
+          <td class="num">4 · 22h</td><td class="num">×1.7 <span class="nnote">IQR 1.2</span></td>
+          <td><span class="chip warn">⚑ 1</span></td></tr>
+        <tr><td><div class="who"><span class="av" style="background:var(--s7)">AK</span><b>Anouar Kacem</b> <span class="rolechip">CRM / Medusa</span></div></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:61%;background:var(--s4)"></i></span><b>61</b></span> <span class="nnote">n=15</span></td>
+          <td class="num">22 pts <span class="nnote">23% trivial</span></td><td class="num">12.0d</td>
+          <td class="num">3 · 26h</td><td class="num">×1.8 <span class="nnote">IQR 1.3</span></td>
+          <td><span class="chip warn">⚑ 1</span></td></tr>
+        <tr><td><div class="who"><span class="av" style="background:var(--s8)">SC</span><b>Santi Caamaño</b> <span class="rolechip">QA — automated</span></div></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:54%;background:var(--s4)"></i></span><b>54</b></span> <span class="nnote">n=22</span></td>
+          <td class="num">19 pts <span class="nnote">31% trivial</span></td><td class="num">15.9d</td>
           <td class="num">5 · 27h</td><td class="num">×1.9 <span class="nnote">IQR 1.4</span></td>
           <td><span class="chip crit">⚑ 3</span></td></tr>
-        <tr><td><div class="who"><span class="av" style="background:var(--s6)">DQ</span><b>Dina</b> <span class="rolechip">QA — manual</span></div></td>
-          <td><span class="scorebar"><span class="tr"><i style="width:77%;background:var(--good)"></i></span><b>77</b></span> <span class="nnote">n=48 · QA rubric</span></td>
-          <td class="num">64 verified</td><td class="num">1.9d <span class="nnote">to verify</span></td>
-          <td class="num">— <span class="nnote">n/a for role</span></td><td class="num">92% <span class="nnote">bug validity</span></td>
+        <tr><td><div class="who"><span class="av" style="background:var(--s6)">DQ</span><b>Dina QA</b> <span class="rolechip">QA — manual</span></div></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:77%;background:var(--good)"></i></span><b>77</b></span> <span class="nnote">n=48</span></td>
+          <td class="num">64 verified <span class="nnote">bug validity 92%</span></td><td class="num">1.9d <span class="nnote">to verify</span></td>
+          <td class="num">— · n/a</td><td class="num">— <span class="nnote">n/a for role</span></td>
           <td><span class="chip gray">0</span></td></tr>
-        <tr style="opacity:.75"><td><div class="who"><span class="av" style="background:var(--ink-4)">JW</span><b>Jon Wang</b> <span class="rolechip">mobile</span></div></td>
-          <td><span class="chip gray">no score — 40% measurable</span> <span class="nnote">needs: 5+ finished tickets</span></td>
-          <td class="num">3 pts</td><td class="num">—</td><td class="num">0 · —</td><td class="num">—</td>
+        <tr><td><div class="who"><span class="av" style="background:var(--s1)">MM</span><b>Mihai Manea</b> <span class="rolechip">PM</span></div></td>
+          <td><span class="scorebar"><span class="tr"><i style="width:70%;background:var(--good)"></i></span><b>70</b></span> <span class="nnote">n=33</span></td>
+          <td class="num">— <span class="nnote">grooming 88%</span></td><td class="num">—</td>
+          <td class="num">— · —</td><td class="num">×1.3 <span class="nnote">IQR 0.7</span></td>
+          <td><span class="chip gray">0</span></td></tr>
+        <tr style="opacity:.75"><td><div class="who"><span class="av" style="background:var(--s3)">MO</span><b>Mehdi Ordikhani</b> <span class="rolechip">AI recommendation</span></div></td>
+          <td><span class="chip gray">no score — 38% measurable</span> <span class="nnote">needs: 5+ finished tickets</span></td>
+          <td class="num">7 pts</td><td class="num">—</td><td class="num">— · —</td><td class="num">—</td>
+          <td><span class="chip gray">0</span></td></tr>
+        <tr style="opacity:.75"><td><div class="who"><span class="av" style="background:var(--s5)">GA</span><b>Gaston</b> <span class="rolechip">infrastructure</span></div></td>
+          <td><span class="chip gray">no score — 22% measurable</span> <span class="nnote">needs: estimates on infra tickets</span></td>
+          <td class="num">0 pts</td><td class="num">—</td><td class="num">— · —</td><td class="num">—</td>
+          <td><span class="chip gray">0</span></td></tr>
+        <tr style="opacity:.75"><td><div class="who"><span class="av" style="background:var(--s7)">RS</span><b>Robert Surpateanu</b> <span class="rolechip">designer</span></div></td>
+          <td><span class="chip gray">no score — 41% measurable</span> <span class="nnote">needs: 5+ finished tickets</span></td>
+          <td class="num">4 pts</td><td class="num">—</td><td class="num">— · —</td><td class="num">—</td>
+          <td><span class="chip gray">0</span></td></tr>
+        <tr style="opacity:.75"><td><div class="who"><span class="av" style="background:var(--ink-4)">IT</span><b>Igor Taborsak</b> <span class="rolechip">SEO</span></div></td>
+          <td><span class="chip gray">no rubric defined</span> <span class="nnote">SEO work is not board-shaped</span></td>
+          <td class="num">—</td><td class="num">—</td><td class="num">— · —</td><td class="num">—</td>
+          <td><span class="chip gray">0</span></td></tr>
+        <tr style="opacity:.75"><td><div class="who"><span class="av" style="background:var(--ink-4)">AV</span><b>Angel Vossough</b> <span class="rolechip">exec</span></div></td>
+          <td><span class="chip gray">exec — not scored</span> <span class="nnote">output shown, never ranked</span></td>
+          <td class="num">—</td><td class="num">—</td><td class="num">— · —</td><td class="num">—</td>
+          <td><span class="chip gray">0</span></td></tr>
+        <tr style="opacity:.75"><td><div class="who"><span class="av" style="background:var(--ink-4)">AR</span><b>Arsalan</b> <span class="rolechip">exec</span></div></td>
+          <td><span class="chip gray">exec — not scored</span> <span class="nnote">output shown, never ranked</span></td>
+          <td class="num">—</td><td class="num">—</td><td class="num">— · —</td><td class="num">—</td>
           <td><span class="chip gray">0</span></td></tr>
       </tbody>
     </table>
   </div>
 
-  <h2 class="sec">Scorecard — Tam <span class="rolechip" style="font-size:12px;vertical-align:3px">backend rubric</span></h2>
+  <h2 class="sec">Scorecard — Tam <span class="rolechip" style="font-size:12px;vertical-align:3px">platform rubric</span></h2>
   <div class="score2">
     <div class="card">
       <div class="comp"><div><div class="cn">Delivery, size-weighted</div><div class="cw">weight 20</div></div>

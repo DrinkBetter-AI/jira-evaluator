@@ -48,11 +48,22 @@ still appearing in standup invites and giving updates as recently as 13 Aug per
 Fireflies, so confirm his access and invites are actually revoked).
 
 **This is the headline:** 21 former people vs 12 active engineers in the same
-assignee data. The "23 assignees" scope, the unassigned counts, the stale queues
-and the resolved rankings all mix ghosts with staff. Sai Shankar's 194 "resolved
-in 30d" — second highest in the company — is a departed person collecting credit
-whenever anyone moves a ticket still assigned to him: the current-assignee
-attribution flaw, demonstrated by the data itself.
+assignee data. Verified 19 Aug 2026: the former names hold **zero open
+tickets** — the earlier "21 ghosts holding tickets" line was wrong and is
+retired. What they do hold is historical *resolutions*, which is how
+Sai Shankar collects 194 "resolved in 30d" — second highest in the company —
+whenever anyone moves a ticket still assigned to him. That is the
+current-assignee attribution flaw, demonstrated by the data itself, and it is
+fixed by crediting the changelog author of the resolving transition.
+
+The real board residue, measured rather than assumed:
+
+| Residue | Count |
+|---|---|
+| Open tickets with no assignee | 88 |
+| Open tickets with no priority | 168 |
+| Open tickets idle > 90 days | 94 |
+| Open tickets assigned to former staff (ghost-assigned) | 0 |
 
 ## Unmapped GitHub logins (confirm or retire)
 
