@@ -27,6 +27,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # The theme lives here; without it the hosted app falls back to Streamlit's default.
 COPY .streamlit ./.streamlit
 COPY *.py ./
+COPY pages ./pages
 
 # Cloud Run injects PORT; Streamlit needs it on the command line.
 ENV PORT=8080
