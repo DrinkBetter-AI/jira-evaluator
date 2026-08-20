@@ -705,3 +705,118 @@ def test_the_resolved_evidence_link_stays_an_honest_query_when_nothing_is_credit
     label, value, url = next(r for r in rows if "resolved" in r[0].lower())
     assert value == "0"
     assert "IN ()" not in unquote(url)
+
+
+# ---------------------------------------------------------------------------
+# The per-person KPI detail and the admin-only integrity section
+# ---------------------------------------------------------------------------
+
+
+def test_kpi_detail_renders_for_the_selected_person(monkeypatch):
+    now = pd.Timestamp("2026-08-19T00:00:00Z")
+    raw_df = pd.DataFrame(
+        [
+            _ticket(
+                "ENG-1",
+                "Tam",
+                _hist(_ago(now, 3), "Tam", "status", "In Progress", "Done"),
+            )
+        ]
+    )
+    html_out = _render_page(monkeypatch, raw_df, data={"resolved_30": pd.DataFrame()})
+    assert "KPI detail — Tam" in html_out
+    assert "Output &amp; flow" in html_out
+    assert "Estimate integrity" in html_out
+    assert "Code quality &amp; review citizenship" in html_out
+    # NA states carry a named need, never a substituted zero.
+    assert "GitHub data unavailable" in html_out
+
+
+def test_integrity_section_renders_only_for_a_proven_admin_session(monkeypatch):
+    import access_gate
+
+    now = pd.Timestamp("2026-08-19T00:00:00Z")
+    raw_df = pd.DataFrame(
+        [
+            _ticket(
+                "ENG-1",
+                "Tam",
+                _hist(_ago(now, 3), "Tam", "status", "In Progress", "Done"),
+            )
+        ]
+    )
+
+    # Not an admin, credential configured: the section is neither computed
+    # nor rendered — only the pointer to the Integrity page appears.
+    monkeypatch.setattr(access_gate, "admin_access_granted", lambda: False)
+    monkeypatch.setattr(access_gate, "admin_password_configured", lambda: True)
+    locked = _render_page(monkeypatch, raw_df, data={"resolved_30": pd.DataFrame()})
+    assert "Integrity signals — Tam" not in locked
+    assert "admin-only" in locked
+
+    # Proven admin: the person-scoped integrity card renders, with the
+    # mandatory innocent-reading footer.
+    monkeypatch.setattr(access_gate, "admin_access_granted", lambda: True)
+    unlocked = _render_page(monkeypatch, raw_df, data={"resolved_30": pd.DataFrame()})
+    assert "Integrity signals — Tam" in unlocked
+    assert "never verdicts" in unlocked
+
+
+def test_no_admin_credential_configured_means_no_integrity_note_at_all(monkeypatch):
+    import access_gate
+
+    now = pd.Timestamp("2026-08-19T00:00:00Z")
+    raw_df = pd.DataFrame(
+        [
+            _ticket(
+                "ENG-1",
+                "Tam",
+                _hist(_ago(now, 3), "Tam", "status", "In Progress", "Done"),
+            )
+        ]
+    )
+    monkeypatch.setattr(access_gate, "admin_access_granted", lambda: False)
+    monkeypatch.setattr(access_gate, "admin_password_configured", lambda: False)
+    html_out = _render_page(monkeypatch, raw_df, data={"resolved_30": pd.DataFrame()})
+    assert "Integrity signals — Tam" not in html_out
+    assert "unlock them once on the" not in html_out
+
+
+def test_qa_person_gets_the_qa_rubric_breakdown_not_the_unwired_callout(monkeypatch):
+    """A scored non-code role now renders its own rubric's components."""
+    import role_kpis
+
+    now = pd.Timestamp("2026-08-19T00:00:00Z")
+
+    def hist_issue(key, *histories):
+        return {"key": key, "changelog": {"histories": list(histories)}}
+
+    events = integrity.changelog_events(
+        [
+            hist_issue(
+                f"QA-{i}",
+                _hist(_ago(now, 10.0 + i), "Shawn", "status", "To Do", "In Review"),
+                _hist(_ago(now, 9.0 + i), "Dina QA", "status", "In Review", "Done"),
+            )
+            for i in range(4)
+        ]
+    )
+    inputs = role_kpis.build_inputs(
+        pd.DataFrame(), pd.DataFrame(), events, pd.DataFrame(), pd.DataFrame(), now=now
+    )
+    roster = roles.load_roster()
+    parts, lookup, cohort = people_page._components_for_person(
+        "Dina QA",
+        roster,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
+        events,
+        pd.DataFrame(),
+        role_inputs=inputs,
+    )
+    assert lookup.status == "scored"
+    assert parts is not None
+    assert [p.name for p in parts] == [c.name for c in roles.QA_MANUAL_RUBRIC.components]
+    escape = next(p for p in parts if p.name == "Defect escape rate")
+    assert escape.sufficient and escape.n == 4
