@@ -27,9 +27,13 @@ from urllib.parse import quote
 import pandas as pd
 import streamlit as st
 
+import access_gate
+import estimate_accuracy
 import integrity
 import kpi
 import people_table as people_table_mod
+import pr_quality
+import role_kpis
 import roles
 import series
 import theme_html
@@ -432,15 +436,34 @@ def _components_for_person(
     combined_events: pd.DataFrame,
     resolved_tickets: pd.DataFrame,
     now=None,
+    role_inputs: role_kpis.RoleKpiInputs | None = None,
 ) -> tuple[list[kpi.Component] | None, roles.RubricLookup, roles.CohortResult | None]:
-    """The component breakdown for one person, or ``None`` when their rubric
-    has no component-computation wired (see ``docs/assumptions/2C.md``:
-    QA/PM/design/infra rubrics exist but nothing feeds them yet - future
-    work, not this page's).
+    """The component breakdown for one person, or ``None`` when their role
+    has no rubric (exec, seo/wine/advisor, off-roster).
+
+    Code roles go through :func:`kpi.components` exactly as before. Scored
+    non-code roles (QA, PM, designer, infrastructure) go through
+    :func:`role_kpis.components_for` - the wiring
+    ``docs/assumptions/2C.md`` used to name as future work.
     """
     lookup = roles.rubric_for_person(roster, person)
-    if lookup.status != "scored" or lookup.role not in roles.CODE_ROLES:
+    if lookup.status != "scored":
         return None, lookup, None
+    if lookup.role not in roles.CODE_ROLES:
+        if role_inputs is None:
+            return None, lookup, None
+        gradable = (
+            gradable_tickets[gradable_tickets.get("assignee", pd.Series(dtype=object)) == person]
+            if not gradable_tickets.empty
+            else pd.DataFrame()
+        )
+        owned = (
+            open_tickets[open_tickets.get("assignee", pd.Series(dtype=object)) == person]
+            if not open_tickets.empty
+            else pd.DataFrame()
+        )
+        parts = role_kpis.components_for(role_inputs, person, lookup.role, owned, gradable)
+        return parts, lookup, None
 
     events_present = combined_events is not None and not combined_events.empty
     resolved_7_map = _credited_map(combined_events, resolved_tickets, 7.0, now) if events_present else {}
@@ -622,12 +645,20 @@ def _scorecard_fragment(
     resolved_tickets: pd.DataFrame,
     browse_base: str,
     github_org: str | None,
+    role_inputs: role_kpis.RoleKpiInputs | None = None,
 ) -> str:
     role = row["role"]
     role_label = roles.ROLE_LABELS.get(role, role or "unmapped")
 
     parts, lookup, cohort = _components_for_person(
-        person, roster, open_tickets, gradable_tickets, prs, combined_events, resolved_tickets
+        person,
+        roster,
+        open_tickets,
+        gradable_tickets,
+        prs,
+        combined_events,
+        resolved_tickets,
+        role_inputs=role_inputs,
     )
 
     header = theme_html.section(
@@ -636,26 +667,31 @@ def _scorecard_fragment(
     )
 
     if parts is None:
-        # Exec, no-rubric, unknown role, or a rubric with no component-
-        # computation wired yet (QA/PM/design/infra - docs/assumptions/2C.md
-        # names this future work, not this task's). Never a fabricated
-        # component table for these - the honest state is the sentence
-        # itself.
+        # Exec, no-rubric, or unknown role. Never a fabricated component
+        # table for these - the honest state is the sentence itself.
         body = theme_html.callout(
             "info",
             f"{person} — {lookup.reason}",
-            "This role has no per-component breakdown wired into the scorecard yet."
+            "This role's component breakdown had no data to compute from."
             if lookup.status == "scored"
             else "Shown for board attribution only; never ranked.",
         )
         return header + _card(body)
 
-    overall_score = kpi.overall(parts)
-    cov = kpi.coverage(parts)
+    if lookup.role in roles.CODE_ROLES:
+        overall_score = kpi.overall(parts)
+        cov = kpi.coverage(parts)
+        weights: dict[str, float] = dict(kpi.WEIGHTS)
+        covered_weight, note = cov.covered_weight, cov.note
+    else:
+        rubric = lookup.rubric
+        assert rubric is not None  # "scored" status guarantees it
+        overall_score, covered_weight, note = role_kpis.score_from_parts(parts, rubric)
+        weights = rubric.weights()
     components = [
         theme_html.Component(
             name=p.name,
-            weight=kpi.WEIGHTS.get(p.name, 0.0),
+            weight=weights.get(p.name, 0.0),
             score=(p.score if p.sufficient else None),
             note=p.detail,
             sufficient=p.sufficient,
@@ -665,8 +701,8 @@ def _scorecard_fragment(
     scorecard_html = theme_html.scorecard(
         components,
         "n/a" if overall_score is None else f"{overall_score:.0f}",
-        f"{cov.covered_weight:.0f}",
-        cov.note,
+        f"{covered_weight:.0f}",
+        note,
     )
 
     login = roster.login_for(person)
@@ -697,6 +733,368 @@ def _scorecard_fragment(
         f'<div style="margin-top:12px">{evidence_html}</div>'
     )
     return header + f'<div class="score2">{scorecard_html}{right_card}</div>'
+
+
+# ---------------------------------------------------------------------------
+# The per-person KPI detail: every KPI_SPEC.md family that is safe to show to
+# the whole team, for the selected person, with sample sizes and honest NA
+# states. The integrity families (padding, grooming, reciprocity) are NOT
+# here - they render only for a proven admin session, below.
+# ---------------------------------------------------------------------------
+
+
+def _kv_table(rows: list[tuple[str, str]]) -> str:
+    """A two-column metric/value table through the kit."""
+    columns = [theme_html.Column("Metric", "text"), theme_html.Column("Value", "html")]
+    cells = [[theme_html.Cell(label), theme_html.Cell(value)] for label, value in rows]
+    return theme_html.table(columns, cells, tab=TAB_ENGINEERING, section="People")
+
+
+def _na(need: str) -> str:
+    return f'— <span class="nnote">{html.escape(need)}</span>'
+
+
+def _person_row(frame: pd.DataFrame, key_col: str, who: str) -> pd.Series | None:
+    if frame is None or frame.empty or key_col not in frame.columns:
+        return None
+    mine = frame[frame[key_col] == who]
+    return None if mine.empty else mine.iloc[0]
+
+
+def _credited_in(detail: pd.DataFrame, person: str, days: float, now: pd.Timestamp) -> int | None:
+    """Distinct tickets whose resolving transition ``person`` authored within ``days``."""
+    if detail is None or detail.empty:
+        return None
+    mine = detail[detail["credited"].fillna(False).astype(bool) & (detail["author"] == person)]
+    if mine.empty:
+        return 0
+    ts = pd.to_datetime(mine["ts"], utc=True, errors="coerce")
+    recent = mine[ts >= now - pd.Timedelta(days=days)]
+    return int(recent["key"].nunique())
+
+
+def _kpi_detail_fragment(
+    person: str,
+    login: str | None,
+    role_inputs: role_kpis.RoleKpiInputs,
+    prs: pd.DataFrame,
+    github_ready: bool,
+) -> str:
+    """Three cards: output & flow, estimates, code quality & reviews.
+
+    Everything here is a KPI_SPEC.md §3 metric already computed by
+    ``integrity``/``pr_quality``/``estimate_accuracy``; this fragment only
+    selects one person's row and renders it with its ``n``. Counts are shown
+    next to size and cycle context, never alone - a raw count on its own is
+    exploit #3 (ticket splitting) waiting to be farmed.
+    """
+    now = role_inputs.now if role_inputs.now is not None else pd.Timestamp.now(tz="UTC")
+
+    # --- Output & flow ---------------------------------------------------
+    flow_rows: list[tuple[str, str]] = []
+    r7 = _credited_in(role_inputs.credited_detail, person, 7.0, now)
+    r90 = _credited_in(role_inputs.credited_detail, person, 90.0, now)
+    if r90 is None:
+        flow_rows.append(("Tickets resolved (changelog-credited)", _na("needs changelog history")))
+    else:
+        flow_rows.append(
+            (
+                "Tickets resolved (changelog-credited)",
+                f"<b>{r7}</b> in 7d · <b>{r90}</b> in 90d "
+                '<span class="nnote">credited to whoever moved the ticket, not who holds it</span>',
+            )
+        )
+    cycle = _person_row(role_inputs.cycle_by_person, "person", person)
+    if cycle is not None and pd.notna(cycle.get("median_lead_time_days")):
+        n_cycle = int(cycle.get("lead_time_tickets", 0) or 0)
+        extras = []
+        for label, col in (("in progress", "median_in_progress_days"), ("in review", "median_review_days")):
+            value = cycle.get(col)
+            if pd.notna(value):
+                extras.append(f"{label} {float(value):.1f}d")
+        extra_text = f' <span class="nnote">{" · ".join(extras)}</span>' if extras else ""
+        flow_rows.append(
+            (
+                "Cycle time (median, start → resolve)",
+                f"<b>{float(cycle['median_lead_time_days']):.1f}d</b> over n={n_cycle}{extra_text}",
+            )
+        )
+    else:
+        flow_rows.append(("Cycle time (median, start → resolve)", _na("needs ≥1 completed, timed ticket")))
+
+    if github_ready and login:
+        bands = _person_row(pr_quality.size_bands(prs), "author", login)
+        if bands is not None and int(bands.get("prs", 0) or 0) > 0:
+            mix = " / ".join(
+                f"{int(bands[b])} {b}" for b in ("trivial", "small", "medium", "large", "oversized")
+            )
+            median_lines = bands.get("median_changed_lines")
+            median_text = (
+                f' <span class="nnote">median {float(median_lines):.0f} changed lines</span>'
+                if pd.notna(median_lines)
+                else ""
+            )
+            flow_rows.append(("PRs by size band", f"{mix}{median_text}"))
+            share = bands.get("trivial_share")
+            if pd.notna(share):
+                flag = " ⚑" if float(share) >= 0.35 else ""
+                flow_rows.append(
+                    (
+                        "Trivial share",
+                        f"{100.0 * float(share):.0f}%{flag} "
+                        '<span class="nnote">a spike of trivial PRs against an unchanged median is ticket-splitting</span>',
+                    )
+                )
+        else:
+            flow_rows.append(("PRs by size band", _na("no PRs in the fetched window")))
+    else:
+        flow_rows.append(("PRs by size band", _na("GitHub data unavailable" if not github_ready else "no GitHub login mapped")))
+
+    flow_card = _card(
+        _kv_table(flow_rows),
+        title="Output & flow",
+        subtitle="Size-weighted and cycle-anchored — never a bare ticket count.",
+    )
+
+    # --- Estimates -------------------------------------------------------
+    est_rows: list[tuple[str, str]] = []
+    acc = _person_row(role_inputs.accuracy, "assignee", person)
+    if acc is not None and pd.notna(acc.get("median_ratio")):
+        n_acc = int(acc.get("tickets", 0) or 0)
+        spread = ""
+        if pd.notna(acc.get("p25_ratio")) and pd.notna(acc.get("p75_ratio")):
+            spread = (
+                f' <span class="nnote">p25–p75 ×{float(acc["p25_ratio"]):.1f}–×{float(acc["p75_ratio"]):.1f}</span>'
+            )
+        est_rows.append(
+            (
+                "Logged / estimated (median)",
+                f"<b>×{float(acc['median_ratio']):.2f}</b> over n={n_acc}{spread}",
+            )
+        )
+        iqr = acc.get("iqr")
+        if pd.notna(iqr):
+            flag = " ⚑ wide spread — not really estimating" if float(iqr) >= 1.5 else ""
+            est_rows.append(("Ratio IQR", f"{float(iqr):.2f}{flag}"))
+        est_rows.append(
+            (
+                "Hours, estimated vs logged",
+                f"{float(acc.get('estimated_hours', 0) or 0):.0f}h estimated · "
+                f"{float(acc.get('logged_hours', 0) or 0):.0f}h logged",
+            )
+        )
+        if not bool(acc.get("enough_data", False)):
+            est_rows.append(
+                ("Verdict", _na(f"withheld below {role_kpis.MIN_N} tickets — this is noise, not signal"))
+            )
+    else:
+        est_rows.append(
+            ("Logged / estimated (median)", _na("needs finished tickets with both an estimate and logged time"))
+        )
+    est_card = _card(
+        _kv_table(est_rows),
+        title="Estimate integrity",
+        subtitle="Both numbers are self-reported; this shows inconsistency, not ground truth.",
+    )
+
+    # --- Code quality & reviews -----------------------------------------
+    quality_rows: list[tuple[str, str]] = []
+    if github_ready and login and isinstance(prs, pd.DataFrame) and not prs.empty:
+        devin = _person_row(pr_quality.devin_findings_by_author(prs), "author", login)
+        if devin is not None and int(devin.get("prs_judged", 0) or 0) > 0:
+            judged = int(devin["prs_judged"])
+            cr = int(devin.get("prs_changes_requested", 0) or 0)
+            share = devin.get("changes_requested_share")
+            share_text = f"{100.0 * float(share):.0f}%" if pd.notna(share) else "—"
+            quality_rows.append(
+                (
+                    "AI review: changes requested",
+                    f"<b>{share_text}</b> ({cr} of {judged} judged PRs) "
+                    '<span class="nnote">share of judged PRs — shipping more is not scored worse</span>',
+                )
+            )
+            reviewed = devin.get("prs_ai_reviewed")
+            if pd.notna(reviewed):
+                quality_rows.append(
+                    (
+                        "AI review coverage",
+                        f"{int(reviewed)} of their PRs carried an AI review "
+                        '<span class="nnote">zero findings on an unreviewed PR means unreviewed, not clean</span>',
+                    )
+                )
+        else:
+            quality_rows.append(("AI review: changes requested", _na("no AI-judged PRs in the window")))
+        abandoned = _person_row(pr_quality.abandoned_rate(prs), "author", login)
+        if abandoned is not None and int(abandoned.get("closed_prs", 0) or 0) > 0:
+            quality_rows.append(
+                (
+                    "Abandoned PRs",
+                    f"{int(abandoned['abandoned'])} of {int(abandoned['closed_prs'])} decided PRs "
+                    f"({100.0 * float(abandoned['abandoned_rate']):.0f}%) closed without merging",
+                )
+            )
+        trace = _person_row(pr_quality.traceability(prs), "author", login)
+        if trace is not None and int(trace.get("judgeable", 0) or 0) > 0:
+            quality_rows.append(
+                (
+                    "Traceability (merged PRs naming a ticket)",
+                    f"{int(trace['with_key'])} of {int(trace['judgeable'])} "
+                    f"({100.0 * float(trace['traceability']):.0f}%)",
+                )
+            )
+        citizenship = _person_row(pr_quality.review_citizenship(prs), "reviewer", login)
+        if citizenship is not None and int(citizenship.get("reviews_given", 0) or 0) > 0:
+            ttfr = citizenship.get("median_hours_to_first_review")
+            ttfr_text = f" · median {float(ttfr):.0f}h to first review" if pd.notna(ttfr) else ""
+            quality_rows.append(
+                (
+                    "Reviews given",
+                    f"<b>{int(citizenship['reviews_given'])}</b> across "
+                    f"{int(citizenship.get('distinct_authors_reviewed', 0) or 0)} colleague(s)"
+                    f"{ttfr_text} · {int(citizenship.get('approvals_given', 0) or 0)} approvals, "
+                    f"{int(citizenship.get('changes_requested_given', 0) or 0)} change requests",
+                )
+            )
+        else:
+            quality_rows.append(
+                (
+                    "Reviews given",
+                    '<b>0</b> <span class="nnote">reviewing is scored work — never reviewing anyone is a real zero</span>',
+                )
+            )
+    else:
+        quality_rows.append(("PR quality", _na("GitHub data unavailable for this render")))
+    quality_card = _card(
+        _kv_table(quality_rows),
+        title="Code quality & review citizenship",
+        subtitle="From GitHub review records — written by the system, not by the person measured.",
+    )
+
+    return (
+        theme_html.section(
+            f"KPI detail — {person}",
+            "Every number carries its sample size; a dash with a note means not measured, never zero.",
+        )
+        + f'<div class="score2">{flow_card}{est_card}</div>'
+        + quality_card
+    )
+
+
+# ---------------------------------------------------------------------------
+# The admin-only integrity section. Two rules, inherited from
+# pages/integrity.py: computed ONLY for a proven admin session (a non-admin
+# render never calls into integrity's flag functions from here), and every
+# card states its innocent reading. Flags are prompts for a conversation,
+# never verdicts.
+# ---------------------------------------------------------------------------
+
+
+def _integrity_admin_fragment(
+    person: str,
+    login: str | None,
+    role_inputs: role_kpis.RoleKpiInputs,
+    all_tickets: pd.DataFrame,
+    combined_events: pd.DataFrame,
+    prs: pd.DataFrame,
+) -> str:
+    rows: list[tuple[str, str]] = []
+
+    flags_frame = integrity.integrity_flags(all_tickets, combined_events, window_days=30.0)
+    flag_row = _person_row(flags_frame, "person", person)
+    if flag_row is not None and int(flag_row.get("flag_count", 0) or 0) > 0:
+        tripped = [name for name in integrity.FLAG_NAMES if bool(flag_row.get(name, False))]
+        evidence_bits = []
+        for name in tripped:
+            evidence = str(flag_row.get(f"{name}_evidence", "") or "")[:160]
+            evidence_bits.append(f"<b>{html.escape(name.replace('_', ' '))}</b>: {html.escape(evidence)}")
+        rows.append(("Flags (30d)", "<br>".join(evidence_bits)))
+    else:
+        rows.append(("Flags (30d)", "none tripped — which is not a clean bill of health; doing nothing trips nothing"))
+
+    touches = _person_row(integrity.cosmetic_touches(combined_events), "person", person)
+    if touches is not None:
+        rows.append(
+            (
+                "Cosmetic touches (14d)",
+                f"{int(touches['cosmetic_touches'])} field-only edits across "
+                f"{int(touches['cosmetic_tickets'])} tickets vs {int(touches['status_transitions'])} real "
+                f"status moves · busiest day {html.escape(str(touches.get('busiest_day') or '—'))} "
+                f"({int(touches.get('busiest_day_touches', 0) or 0)} touches)",
+            )
+        )
+
+    churn = role_inputs.churn
+    if churn is not None and not churn.empty and "author" in churn.columns:
+        mine = churn[(churn["author"] == person) & churn["direction"].isin(["raised", "lowered"])]
+        if not mine.empty:
+            raised = mine[mine["direction"] == "raised"]
+            added = float(pd.to_numeric(raised.get("delta_hours"), errors="coerce").fillna(0).sum())
+            examples = ", ".join(
+                f"{html.escape(str(r['key']))} ({'+' if r['direction'] == 'raised' else '−'}"
+                f"{abs(float(r.get('delta_hours') or 0)):.0f}h, day {float(r.get('days_after_start') or 0):.0f})"
+                for _, r in mine.head(4).iterrows()
+            )
+            rows.append(
+                (
+                    "Estimate churn (90d, mid-flight)",
+                    f"{len(raised)} raise(s) adding {added:.0f}h, {len(mine) - len(raised)} lowering(s) — {examples}",
+                )
+            )
+        else:
+            rows.append(("Estimate churn (90d, mid-flight)", "no mid-flight estimate edits"))
+
+    padding = _person_row(estimate_accuracy.padding_index(all_tickets), "assignee", person)
+    if padding is not None:
+        if bool(padding.get("enough_data", False)):
+            rows.append(
+                (
+                    "Padding index",
+                    f"median ×{float(padding['median_ratio']):.2f}, "
+                    f"{100.0 * float(padding['under_run_share']):.0f}% of tickets finished under 60% of estimate "
+                    f"over {int(padding['tickets'])} tickets — {html.escape(str(padding.get('verdict') or ''))}",
+                )
+            )
+        else:
+            rows.append(
+                (
+                    "Padding index",
+                    f"no verdict — only {int(padding.get('tickets', 0) or 0)} tickets, "
+                    f"below the {estimate_accuracy.MIN_TICKETS_FOR_VERDICT}-ticket floor (reading noise otherwise)",
+                )
+            )
+
+    if login and isinstance(prs, pd.DataFrame) and not prs.empty:
+        recip = _person_row(pr_quality.reciprocity(prs).by_person, "reviewer", login)
+        if recip is not None and int(recip.get("reviews_given", 0) or 0) > 0:
+            partner = html.escape(str(recip.get("top_partner") or "—"))
+            share = recip.get("top_partner_share")
+            share_text = f"{100.0 * float(share):.0f}%" if pd.notna(share) else "—"
+            rows.append(
+                (
+                    "Review reciprocity",
+                    f"top partner {partner} ({share_text} of reviews given) · "
+                    f"{int(recip.get('rubber_stamp_approvals', 0) or 0)} empty-body, zero-thread approvals",
+                )
+            )
+        selfm = _person_row(pr_quality.self_merge(prs), "author", login)
+        if selfm is not None and int(selfm.get("merged_prs", 0) or 0) > 0:
+            rows.append(
+                (
+                    "Self-merges",
+                    f"{int(selfm.get('self_merged', 0) or 0)} of {int(selfm['merged_prs'])} own merges; "
+                    f"<b>{int(selfm.get('merged_without_outside_approval', 0) or 0)}</b> merged with no outside approval",
+                )
+            )
+
+    body = _kv_table(rows) + theme_html.innocent(
+        "Every row above has an innocent reading — grooming can be curation, an estimate raise can be "
+        "honest scope discovery, high reciprocity is arithmetic on a small team. These are prompts to "
+        "open the tickets and PRs named, never verdicts."
+    )
+    return theme_html.section(
+        f"Integrity signals — {person}",
+        "Admin-only. Not computed, not rendered, for non-admin sessions.",
+    ) + _card(body)
 
 
 def _render_people_page() -> None:
@@ -731,8 +1129,36 @@ def _render_people_page() -> None:
                 prs_frames.append(frame)
     prs = pd.concat(prs_frames, ignore_index=True) if prs_frames else pd.DataFrame()
 
+    all_tickets = (
+        pd.concat(
+            [f for f in (open_tickets, resolved_tickets) if isinstance(f, pd.DataFrame) and not f.empty],
+            ignore_index=True,
+            sort=False,
+        )
+        if (not open_tickets.empty or not resolved_tickets.empty)
+        else pd.DataFrame()
+    )
+
+    # The org-wide frames every non-code rubric and the KPI detail read -
+    # built once per render and shared with people_table so the table's
+    # scores and the scorecard's breakdown come from the same computation.
+    role_inputs = role_kpis.build_inputs(
+        open_tickets,
+        all_tickets,
+        combined_events,
+        prs,
+        resolved_tickets,
+        resolved_statuses=RESOLVED_STATUSES,
+    )
+
     table_df = people_table_mod.people_table(
-        open_tickets, resolved_tickets, gradable_tickets, prs, combined_events, roster=roster
+        open_tickets,
+        resolved_tickets,
+        gradable_tickets,
+        prs,
+        combined_events,
+        roster=roster,
+        role_kpi_inputs=role_inputs,
     )
 
     theme_html.render(
@@ -805,7 +1231,33 @@ def _render_people_page() -> None:
             resolved_tickets,
             JIRA_BROWSE_BASE,
             github_org,
+            role_inputs=role_inputs,
         )
     )
+
+    login = roster.login_for(selected_person)
+    theme_html.render(
+        _kpi_detail_fragment(
+            selected_person, login, role_inputs, prs, bool(bundle.github_ready)
+        )
+    )
+
+    # The integrity families are Angel-only, same two-gate rule as the
+    # Integrity page: admin_access_granted() is the cheap, never-prompting
+    # check, so a non-admin session neither renders NOR COMPUTES any of it -
+    # the fragment function is simply never called.
+    if access_gate.admin_access_granted():
+        theme_html.render(
+            _integrity_admin_fragment(
+                selected_person, login, role_inputs, all_tickets, combined_events, prs
+            )
+        )
+    elif access_gate.admin_password_configured():
+        theme_html.render(
+            theme_html.foot(
+                "Integrity signals for this person are admin-only — unlock them once on the "
+                "Integrity page and they will appear here too."
+            )
+        )
 
     _download_report(slot, TAB_ENGINEERING)

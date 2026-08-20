@@ -61,6 +61,7 @@ import estimate_accuracy
 import integrity
 import kpi
 import pr_quality
+import role_kpis
 import roles
 
 # Per-flag severity, used only for ``flag_severity`` - a single number that
@@ -429,20 +430,22 @@ def _score_for(
     resolved_90: int | None,
     reopened_90: int | None,
     peer_resolved_7: Mapping[str, int] | None,
+    role_kpi_inputs: "role_kpis.RoleKpiInputs | None" = None,
 ) -> tuple[float | None, int, float, str]:
     """``(score, n, measurable_pct, no_score_reason)`` for one person.
 
     Code-producing roles (``roles.CODE_ROLES``) are scored the way the
     single-person scorecard already does: :func:`kpi.components` ->
-    :func:`kpi.overall` / :func:`kpi.coverage`. Every other classification -
-    a rubric that exists but has no component-computation wired yet (QA,
-    PM, design, infra - see ``docs/assumptions/2C.md``), no rubric at all
+    :func:`kpi.overall` / :func:`kpi.coverage`. Scored non-code roles (QA,
+    PM, designer, infrastructure) go through
+    :func:`role_kpis.components_for` -> :func:`role_kpis.score_from_parts`
+    against their own rubric - the wiring ``docs/assumptions/2C.md`` used to
+    name as future work. Every other classification - no rubric at all
     (seo/wine/advisor), exec, or not on the roster - goes through
     :func:`roles.overall` with an empty component-score map, which is
     exactly what that function is for: it returns ``None`` and the correct
-    named reason (``"exec — not scored"``, the no-rubric sentinel, or "not
-    scored: only 0 of N points... had data") without this module having to
-    special-case any of those four cases itself.
+    named reason (``"exec — not scored"``, the no-rubric sentinel) without
+    this module having to special-case any of those cases itself.
     """
     if role_lookup.status == "scored" and role_lookup.role in roles.CODE_ROLES:
         parts = kpi.components(
@@ -463,6 +466,23 @@ def _score_for(
         reason = "" if score is not None else cov.note
         return score, n, measurable_pct, reason
 
+    if (
+        role_lookup.status == "scored"
+        and role_lookup.rubric is not None
+        and role_kpi_inputs is not None
+    ):
+        parts = role_kpis.components_for(
+            role_kpi_inputs, person, role_lookup.role, owned, gradable
+        )
+        if parts is not None:
+            score, covered, note = role_kpis.score_from_parts(parts, role_lookup.rubric)
+            measurable_pct = (
+                100.0 * covered / role_lookup.rubric.total if role_lookup.rubric.total else 0.0
+            )
+            n = sum(int(p.n or 0) for p in parts if p.sufficient)
+            reason = "" if score is not None else note
+            return score, n, measurable_pct, reason
+
     result = roles.overall(person, roster, component_scores={})
     return None, 0, 0.0, result.reason
 
@@ -477,6 +497,7 @@ def people_table(
     roster: roles.Roster | None = None,
     resolved_statuses: Iterable[str] | None = None,
     now: object | None = None,
+    role_kpi_inputs: "role_kpis.RoleKpiInputs | None" = None,
 ) -> pd.DataFrame:
     """One row per person: the People page's missing table.
 
@@ -552,6 +573,30 @@ def people_table(
     cycles = _cycle_lookup(events, all_tickets if not all_tickets.empty else None, ros, now)
     estimates = _estimate_lookup(all_tickets, ros)
 
+    # The shared org-wide frames the non-code rubrics (QA, PM, designer,
+    # infrastructure) score against - built once here, not once per person,
+    # and only when somebody on the roster actually needs them.
+    role_inputs = role_kpi_inputs
+    if role_inputs is None:
+        needs_role_kpis = any(
+            (lk := roles.rubric_for_person(ros, p)).status == "scored"
+            and lk.role not in roles.CODE_ROLES
+            for p in people
+        )
+        role_inputs = (
+            role_kpis.build_inputs(
+                open_tickets,
+                all_tickets,
+                events,
+                prs,
+                resolved_tickets,
+                resolved_statuses=resolved_statuses,
+                now=now,
+            )
+            if needs_role_kpis
+            else None
+        )
+
     # Peer pool for the code rubric's "Delivery vs team" component: every
     # active member of the same role cohort (``roles.peer_cohort``), scored
     # against the same machine-recorded ``resolved_7`` this table already
@@ -615,6 +660,7 @@ def people_table(
             r90,
             reopened_90,
             _peer_pool(person) if role_lookup.role in roles.CODE_ROLES else None,
+            role_kpi_inputs=role_inputs,
         )
 
         size_row = sizes.get(person, {})
