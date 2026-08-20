@@ -57,6 +57,9 @@ cover/
 *.pot
 *.csv
 *.json
+# ...but test fixtures are source, not data. changelog_snapshot.json is a
+# hand-built pin, not a dump of anything, and CI cannot run without it.
+!tests/fixtures/*.json
 
 # Django stuff:
 *.log

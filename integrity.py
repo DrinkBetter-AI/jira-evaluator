@@ -15,13 +15,18 @@ the floor. This module picks it back up.
 
 What this module is for, in one line each:
 
-- ``status_age_days``  - the staleness clock that a label edit cannot reset.
-- ``cosmetic_touches`` - grooming the board instead of working it.
-- ``estimate_churn``   - estimates raised after the work started.
-- ``reresolve_events`` - work that bounced, including the bounces that healed.
-- ``status_pingpong``  - resolution credit minted by moving a ticket in circles.
-- ``cycle_time``       - the one metric you can only improve by finishing work.
-- ``integrity_flags``  - the four above rolled into named flags, with evidence.
+- ``status_age_days``       - the staleness clock that a label edit cannot reset.
+- ``cosmetic_touches``      - grooming the board instead of working it.
+- ``estimate_churn``        - estimates raised after the work started.
+- ``reresolve_events``      - work that bounced, including the bounces that healed.
+- ``status_pingpong``       - resolution credit minted by moving a ticket in circles.
+- ``cycle_time``            - the one metric you can only improve by finishing work.
+- ``integrity_flags``       - the four above rolled into named flags, with evidence.
+- ``credited_resolutions``  - resolution credit to the changelog author, not the
+  current assignee, with former-staff credit flagged instead of counted.
+- ``unattributed_resolutions`` - resolutions the changelog names nobody for.
+- ``org_reopen_rate``       - organization-wide reopen count and share-of-resolved.
+- ``end_to_end_cycle``      - the one headline cycle-time number, current vs baseline.
 
 Three rules the whole module obeys:
 
@@ -49,6 +54,7 @@ function takes frames and returns frames so it can be tested with a dozen rows.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Iterable, Mapping, NamedTuple, Sequence
 
 import pandas as pd
@@ -1634,3 +1640,480 @@ def integrity_flags(
     return out.sort_values(
         ["flag_count", "cosmetic_touches"], ascending=[False, False]
     ).reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------
+# 8. Resolution credit: who actually did it, and who did not
+# --------------------------------------------------------------------------
+#
+# Every function below reads ``JIRA_FORMER_STAFF`` from the environment
+# (semicolon-separated names, matching ``roles_template.env``): people the
+# company no longer employs whose Jira account still sits on old tickets.
+# Resolutions the changelog attributes to one of them are real changelog
+# entries - somebody's account made the transition - but crediting a former
+# employee's headcount is never the right answer, so those rows are kept and
+# flagged rather than counted.
+
+# Fallback when ``JIRA_FORMER_STAFF`` is unset - the list ``ROSTER.md`` names
+# under "Former / inactive", copied here so a deployment or test environment
+# that has not yet set the variable still excludes them by default rather than
+# crediting them by accident. The env var is the source of truth when present.
+_DEFAULT_FORMER_STAFF: frozenset[str] = frozenset(
+    {
+        "Sai Shankar",
+        "Sarju",
+        "Yantao He",
+        "Dan O'Sullivan",
+        "Shivanand",
+        "Jon Wang",
+        "Kevin Cai",
+        "Ramin Shahid",
+        "Amir",
+        "Christina Lo",
+        "Aleksei Pinchuk",
+        "Saji",
+        "Mark",
+        "Courtney McNeil",
+        "Lotte Karolina",
+        "Jennifer",
+        "Eva van Wielink",
+        "Stanislav",
+        "Saeid Parsa",
+        "Armine Aproyan",
+        "Haichen Song",
+        "Dat",
+    }
+)
+
+
+def _former_staff_from_env(env: Mapping[str, str] | None = None) -> frozenset[str]:
+    """The former-staff roster: ``JIRA_FORMER_STAFF``, or ``ROSTER.md``'s list.
+
+    A small private parser rather than an import of the roster object another
+    agent is building in this same iteration window (``roles.py``): importing
+    it here would tie this module's tests to whether that module has landed
+    yet, and ``integrity.py`` is documented above as pure pandas and stdlib
+    with no imports from the rest of the app. Consolidate into ``roles.py``
+    once that module ships - tracked in ``docs/assumptions/2A.md``.
+
+    Names are matched normalised (``_norm``: lowercased, whitespace collapsed),
+    the same way every other name comparison in this module works, so
+    "Sai Shankar" in the env value matches "sai  shankar" in a changelog author
+    field without either side having to agree on capitalisation first.
+    """
+    source = env if env is not None else os.environ
+    raw = source.get("JIRA_FORMER_STAFF")
+    if not raw:
+        return frozenset(_norm(name) for name in _DEFAULT_FORMER_STAFF)
+    names = frozenset(_norm(part) for part in raw.split(";") if _norm(part))
+    return names or frozenset(_norm(name) for name in _DEFAULT_FORMER_STAFF)
+
+
+class CreditedResolutions(NamedTuple):
+    """``detail``: one row per resolving transition. ``by_person``: the ledger."""
+
+    detail: pd.DataFrame
+    by_person: pd.DataFrame
+
+
+_CREDIT_DETAIL_COLUMNS = [
+    "key",
+    "ts",
+    "author",
+    "from_string",
+    "to_string",
+    "is_former_staff",
+    "credited",
+    "reason",
+]
+_CREDIT_PERSON_COLUMNS = [
+    "person",
+    "credited_resolutions",
+    "flagged_resolutions",
+    "tickets",
+    "keys",
+    "evidence",
+]
+
+
+def credited_resolutions(
+    events: pd.DataFrame,
+    tickets: pd.DataFrame | None = None,
+    *,
+    window_days: float | None = 30.0,
+    now: object | None = None,
+    resolved_statuses: Iterable[str] | None = None,
+    former_staff: Iterable[str] | None = None,
+) -> CreditedResolutions:
+    """Who actually resolved each ticket, from the changelog - not who holds it now.
+
+    The board's resolved-ticket read has only ever asked Jira for a resolved
+    ticket's *current* assignee. Every resolution a ticket has ever earned is
+    therefore credited to whoever holds it today, which is how a departed
+    tester still assigned to old work collects a resolution every time somebody
+    else finishes a ticket nobody reassigned - 194 "resolved in 30d" for a
+    person who no longer works here, second highest in the company.
+
+    Credit instead goes to ``history["author"]`` on the specific changelog
+    entry that made the resolving transition - the same rule ``reresolve_events``
+    already applies when counting bounces, applied here per person rather than
+    aggregated per ticket. The tail-of-pipeline walk (Review in Staging -> Ready
+    for Production -> Released, all "resolved" by this team's list) still counts
+    as one resolution: the filter is the same one ``reresolve_events`` uses, so
+    only an entry from a status the board does not already consider resolved
+    counts as a resolving transition.
+
+    A resolution whose author is on the former-staff list (``JIRA_FORMER_STAFF``,
+    see ``_former_staff_from_env``) comes back with ``is_former_staff=True`` and
+    ``credited=False`` - visible in ``detail`` for the conversation ("this
+    account is still authoring transitions"), excluded from ``by_person``'s
+    ``credited_resolutions`` count so it cannot inflate anyone's total.
+    ``flagged_resolutions`` on the same person's row says how many were held
+    back, so the exclusion is never silent. A resolution with no author at all
+    (see ``unattributed_resolutions``) is likewise ``credited=False`` and never
+    appears in ``by_person``, because there is no person to credit it to.
+
+    Returns a ``CreditedResolutions(detail, by_person)``:
+
+    - ``detail``: one row per resolving transition (a ticket resolved twice has
+      two rows) - ``key``, ``ts``, ``author``, ``from_string``, ``to_string``,
+      ``is_former_staff``, ``credited``, ``reason`` (``""`` when credited,
+      otherwise ``"former_staff"`` or ``"unattributed"``).
+    - ``by_person``: one row per changelog author who resolved anything and is
+      not on the former-staff list - ``person``, ``credited_resolutions``,
+      ``flagged_resolutions`` (resolutions of theirs held back elsewhere in the
+      window, e.g. duplicate authorship under a different display name is not
+      tracked here), ``tickets`` (distinct keys credited), ``keys``, ``evidence``.
+
+    What it cannot catch: an account still logging in and moving tickets under a
+    former employee's old Jira identity looks identical to the exploit this
+    closes - the fix removes the *involuntary* version (crediting someone for
+    work they did not touch), not a deliberate one wearing someone else's
+    account. It also inherits every blind spot of ``changelog_events`` - the
+    ~100-entry truncation and a board migrated from another tracker - so a
+    resolution whose transition fell off the truncated end of a very long
+    history is invisible here, not wrongly credited.
+    """
+    empty = CreditedResolutions(
+        pd.DataFrame(columns=_CREDIT_DETAIL_COLUMNS),
+        pd.DataFrame(columns=_CREDIT_PERSON_COLUMNS),
+    )
+    if events is None or events.empty:
+        return empty
+
+    moment = _now(now)
+    resolved = _resolved_set(resolved_statuses)
+    former = (
+        frozenset(_norm(name) for name in former_staff)
+        if former_staff is not None
+        else _former_staff_from_env()
+    )
+
+    scoped = _window(events, window_days, moment)
+    status_events = scoped[scoped["is_status"].fillna(False).astype(bool)].copy()
+    if status_events.empty:
+        return empty
+
+    status_events["_from_resolved"] = _norm_series(status_events["from_string"]).isin(resolved)
+    status_events["_to_resolved"] = _norm_series(status_events["to_string"]).isin(resolved)
+    entries = status_events[
+        status_events["_to_resolved"] & ~status_events["_from_resolved"]
+    ].sort_values("ts")
+    if entries.empty:
+        return empty
+
+    detail = entries[["key", "ts", "author", "from_string", "to_string"]].copy()
+    detail["author"] = detail["author"].fillna("").astype(str).str.strip()
+    missing_author = detail["author"].eq("") | detail["author"].eq("Unknown")
+    is_former = (~missing_author) & detail["author"].map(_norm).isin(former)
+    detail["is_former_staff"] = is_former
+    detail["credited"] = ~missing_author & ~is_former
+    detail["reason"] = ""
+    detail.loc[missing_author, "reason"] = "unattributed"
+    detail.loc[is_former, "reason"] = "former_staff"
+    detail = detail.reset_index(drop=True)[_CREDIT_DETAIL_COLUMNS]
+
+    people = sorted(set(detail.loc[~missing_author.reset_index(drop=True), "author"]))
+    rows: list[dict[str, Any]] = []
+    for person in people:
+        mine = detail[detail["author"] == person]
+        credited = mine[mine["credited"]]
+        flagged = mine[~mine["credited"]]
+        rows.append(
+            {
+                "person": person,
+                "credited_resolutions": int(len(credited)),
+                "flagged_resolutions": int(len(flagged)),
+                "tickets": int(credited["key"].nunique()),
+                "keys": ", ".join(sorted(set(str(k) for k in credited["key"]))),
+                "evidence": _evidence(list(zip(mine["key"], mine["ts"]))),
+            }
+        )
+
+    by_person = pd.DataFrame(rows, columns=_CREDIT_PERSON_COLUMNS) if rows else empty.by_person
+    by_person = by_person.sort_values(
+        ["credited_resolutions", "flagged_resolutions"], ascending=False
+    ).reset_index(drop=True)
+
+    return CreditedResolutions(detail, by_person)
+
+
+def unattributed_resolutions(
+    events: pd.DataFrame,
+    *,
+    window_days: float | None = None,
+    now: object | None = None,
+    resolved_statuses: Iterable[str] | None = None,
+) -> pd.DataFrame:
+    """Resolutions whose changelog entry names no author at all.
+
+    ``changelog_events`` writes ``"Unknown"`` when a history entry's ``author``
+    object is missing or empty - Jira does this for some automation, and for
+    entries recorded before a user was deprovisioned. A resolution with no
+    author is invisible to ``credited_resolutions`` (there is nobody to credit
+    it to) and would otherwise vanish from every per-person view with no record
+    that it happened. This function is that record.
+
+    An empty ``author`` string is treated the same as the ``"Unknown"``
+    sentinel, so a caller building an events frame directly - a test, or a
+    changelog read from something other than ``changelog_events`` - does not
+    have to know the sentinel's exact spelling to be counted correctly.
+
+    Never raises on an empty, missing, or entirely history-less changelog; each
+    returns an empty frame with the right columns rather than a stack trace, the
+    same contract ``changelog_events`` itself gives an empty source.
+
+    Returns one row per unattributed resolving transition: ``key``, ``ts``,
+    ``from_string``, ``to_string``. Author is deliberately absent - the row
+    exists precisely because there is none.
+
+    What it cannot catch: a resolution attributed to a *wrong* but present name
+    (a shared service account, a name that collides with a real person's) looks
+    identical to a correctly attributed one here. This only catches entries with
+    nobody named at all.
+    """
+    columns = ["key", "ts", "from_string", "to_string"]
+    if events is None or events.empty:
+        return pd.DataFrame(columns=columns)
+
+    moment = _now(now)
+    resolved = _resolved_set(resolved_statuses)
+    scoped = _window(events, window_days, moment)
+    status_events = scoped[scoped["is_status"].fillna(False).astype(bool)].copy()
+    if status_events.empty:
+        return pd.DataFrame(columns=columns)
+
+    status_events["_from_resolved"] = _norm_series(status_events["from_string"]).isin(resolved)
+    status_events["_to_resolved"] = _norm_series(status_events["to_string"]).isin(resolved)
+    entries = status_events[status_events["_to_resolved"] & ~status_events["_from_resolved"]]
+    if entries.empty:
+        return pd.DataFrame(columns=columns)
+
+    author = entries["author"].fillna("").astype(str).str.strip()
+    missing = author.eq("") | author.eq("Unknown")
+    return entries[missing][columns].sort_values("ts").reset_index(drop=True)
+
+
+class OrgReopenRate(NamedTuple):
+    """Org-wide reopen count and share-of-resolved, with the evidence behind both."""
+
+    count: int
+    resolved_count: int
+    share: float | None
+    reopened_keys: list[str]
+    resolved_keys: list[str]
+    evidence: str
+    window_days: float
+
+
+def org_reopen_rate(
+    events: pd.DataFrame,
+    tickets: pd.DataFrame | None = None,
+    *,
+    window_days: float = 30.0,
+    now: object | None = None,
+    resolved_statuses: Iterable[str] | None = None,
+) -> OrgReopenRate:
+    """How much of what the org resolved in the window came back.
+
+    The only reopen number the board has ever had is per-person and 90 days
+    (one JQL query per engineer). There is no organization-wide figure, and a
+    raw count on its own answers the wrong question - six reopens out of eight
+    resolutions is a different sentence than six out of four hundred. This
+    pairs the count with the same window's resolved count, computed the same
+    way ``reresolve_events`` computes it, so the rate is never read without its
+    denominator.
+
+    ``share`` is ``None``, not ``0.0``, when nothing resolved in the window -
+    zero reopens over zero resolutions is "no data", and rendering it the same
+    way as "a perfect team" would be the more dangerous of the two lies.
+
+    Returns an ``OrgReopenRate``: ``count`` (distinct tickets that left a
+    resolved status and did not return to one within the window),
+    ``resolved_count`` (distinct tickets that entered a resolved status in the
+    window), ``share`` (``count / resolved_count``, or ``None``),
+    ``reopened_keys``, ``resolved_keys``, ``evidence`` and ``window_days``.
+
+    What it cannot catch: a ticket resolved just before the window opened and
+    reopened just after it is invisible to both counts - a window boundary
+    effect any fixed-window metric has. A ticket that bounced more than once
+    inside the window is one entry in ``reopened_keys``, not one per bounce;
+    see ``reresolve_events`` for the bounce-level detail this aggregates.
+    """
+    empty = OrgReopenRate(0, 0, None, [], [], "", float(window_days))
+    if events is None or events.empty:
+        return empty
+
+    moment = _now(now)
+    bounced = reresolve_events(
+        events,
+        tickets,
+        window_days=window_days,
+        now=moment,
+        resolved_statuses=resolved_statuses,
+    )
+    if bounced.empty:
+        return empty
+
+    resolved_keys = sorted(set(bounced["key"]))
+    reopened = bounced[bounced["reopens"] > 0]
+    reopened_keys = sorted(set(reopened["key"]))
+    resolved_count = len(resolved_keys)
+    count = len(reopened_keys)
+    share = (count / resolved_count) if resolved_count > 0 else None
+    evidence = _evidence(list(zip(reopened["key"], reopened["last_resolved"])))
+    return OrgReopenRate(
+        count, resolved_count, share, reopened_keys, resolved_keys, evidence, float(window_days)
+    )
+
+
+# Below this many completed tickets in a window, a median is one or two
+# tickets deciding the headline number - whichever one happened to be simple.
+# Reporting that as a trend is exactly the misleading precision this module
+# exists to prevent, so the function refuses instead.
+MIN_COMPLETED_FOR_CYCLE_MEDIAN = 3
+
+
+class EndToEndCycle(NamedTuple):
+    """End-to-end lead time (first in-progress -> first resolved), current vs baseline."""
+
+    median_days: float | None
+    n: int
+    baseline_median_days: float | None
+    baseline_n: int
+    reason: str | None
+    baseline_reason: str | None
+    detail: pd.DataFrame
+    window_days: float
+
+
+def end_to_end_cycle(
+    events: pd.DataFrame,
+    tickets: pd.DataFrame | None = None,
+    *,
+    baseline_days: float = 90.0,
+    now: object | None = None,
+    resolved_statuses: Iterable[str] | None = None,
+    min_completed: int = MIN_COMPLETED_FOR_CYCLE_MEDIAN,
+) -> EndToEndCycle:
+    """The one cycle-time number a scorecard headline actually needs.
+
+    ``cycle_time`` reports a median per status per person - the right tool for
+    finding where a ticket got stuck, and the wrong one for a headline: nobody
+    says "median Code Review 2.1 days" in a standup and means anything by it.
+    This collapses the same transitions into one number per period: the median
+    days from a ticket's first entry into an in-progress-or-later status to its
+    first entry into a resolved one, for tickets that finished in the last
+    ``baseline_days`` days (``median_days``), next to the same median for the
+    ``baseline_days`` before that (``baseline_median_days``) - so the headline
+    never ships without the number it is being compared against.
+
+    Returns ``None`` for either median, with a stated ``reason``, when fewer
+    than ``min_completed`` tickets finished in that period. A median of one or
+    two tickets is not a trend, it is whichever ticket happened to be simple.
+
+    Returns an ``EndToEndCycle``: ``median_days``, ``n`` (tickets counted in the
+    current period), ``baseline_median_days``, ``baseline_n``, ``reason`` (set
+    only when ``median_days`` is ``None``), ``baseline_reason`` (likewise for
+    the baseline), ``detail`` (one row per finished ticket that fell in either
+    period: ``key``, ``started``, ``resolved``, ``days``, ``period`` - "current"
+    or "baseline") and ``window_days`` (``baseline_days``, named on the return
+    so a caller does not have to remember what it passed in).
+
+    What it cannot catch: a ticket that never recorded an in-progress transition
+    - assigned and resolved with no changelog trail through the middle, or
+    imported pre-resolved from another tracker - contributes to neither median;
+    it is invisible, not counted as zero. Time spent blocked on someone else's
+    review still counts as cycle time, because the board records status, not
+    who was waiting on whom.
+    """
+    empty_detail = pd.DataFrame(columns=["key", "started", "resolved", "days", "period"])
+
+    def _empty(reason: str) -> EndToEndCycle:
+        return EndToEndCycle(None, 0, None, 0, reason, reason, empty_detail, float(baseline_days))
+
+    if events is None or events.empty:
+        return _empty("no changelog data")
+
+    moment = _now(now)
+    resolved = _resolved_set(resolved_statuses)
+    status_events = events[events["is_status"].fillna(False).astype(bool)]
+    if status_events.empty:
+        return _empty("no status transitions in the changelog")
+
+    starts = status_events[status_events["to_stage"] >= STARTED_RANK].groupby("key")["ts"].min()
+    finishes = status_events[_norm_series(status_events["to_string"]).isin(resolved)][["key", "ts"]]
+    if starts.empty or finishes.empty:
+        return _empty("no ticket has both a start and a resolution recorded")
+
+    paired = finishes.assign(
+        _start=pd.Series(
+            starts.reindex(finishes["key"].to_numpy()).to_numpy(), index=finishes.index
+        )
+    )
+    paired = paired[paired["_start"].notna() & (paired["ts"] >= paired["_start"])]
+    if paired.empty:
+        return _empty("no ticket finished after it started")
+
+    first_finish = paired.groupby("key", sort=False).agg(
+        resolved=("ts", "min"), started=("_start", "first")
+    )
+    first_finish["days"] = (
+        (first_finish["resolved"] - first_finish["started"])
+        .dt.total_seconds()
+        .div(86400.0)
+        .round(2)
+    )
+    detail_all = first_finish.reset_index()
+
+    current_cut = moment - pd.Timedelta(days=float(baseline_days))
+    baseline_cut = moment - pd.Timedelta(days=float(baseline_days) * 2)
+    current = detail_all[detail_all["resolved"] >= current_cut].copy()
+    current["period"] = "current"
+    baseline = detail_all[
+        (detail_all["resolved"] >= baseline_cut) & (detail_all["resolved"] < current_cut)
+    ].copy()
+    baseline["period"] = "baseline"
+    detail = pd.concat([current, baseline], ignore_index=True)[
+        ["key", "started", "resolved", "days", "period"]
+    ].reset_index(drop=True)
+
+    def _summarise(frame: pd.DataFrame) -> tuple[float | None, int, str | None]:
+        n = int(len(frame))
+        if n < min_completed:
+            return None, n, f"fewer than {min_completed} completed tickets in the window ({n} found)"
+        return float(frame["days"].median()), n, None
+
+    median_days, n, reason = _summarise(current)
+    baseline_median_days, baseline_n, baseline_reason = _summarise(baseline)
+
+    return EndToEndCycle(
+        median_days,
+        n,
+        baseline_median_days,
+        baseline_n,
+        reason,
+        baseline_reason,
+        detail,
+        float(baseline_days),
+    )

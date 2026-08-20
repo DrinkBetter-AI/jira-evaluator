@@ -780,3 +780,49 @@ def test_expensive_wines_selling_less_is_a_negative_correlation():
     # rather than a coefficient computed from one repeated value.
     flat = frame.assign(gap=0.1)
     assert mc.price_sales_correlation(flat) == (None, rows)
+
+
+# --- resolve_store_status (Task 3F) ------------------------------------------
+
+
+def test_store_status_tries_the_keys_in_order():
+    """The first key present wins, whether or not the earlier ones exist."""
+    assert mc.resolve_store_status({"status": "active"}) == (True, "status")
+    assert mc.resolve_store_status({"store_status": "inactive"}) == (
+        False,
+        "store_status",
+    )
+    assert mc.resolve_store_status({"is_active": True}) == (True, "is_active")
+    assert mc.resolve_store_status({"active": "0"}) == (False, "active")
+    # "status" is present and used, even though "active" also carries a value:
+    # the first key present decides, not the last, not the most confident.
+    assert mc.resolve_store_status({"active": "true", "status": "disabled"}) == (
+        False,
+        "status",
+    )
+
+
+def test_store_status_stops_at_the_first_present_key_even_if_unreadable():
+    """A present-but-unrecognised value does not fall through to the next key.
+
+    Falling through would silently prefer whichever key happens to parse over
+    the key the store is actually using - the opposite of "explicit and
+    ordered".
+    """
+    active, key = mc.resolve_store_status({"status": "pending-review", "active": "1"})
+    assert (active, key) == (None, "status")
+
+
+def test_store_status_never_raises_on_missing_or_empty_metadata():
+    assert mc.resolve_store_status(None) == (None, None)
+    assert mc.resolve_store_status({}) == (None, None)
+    assert mc.resolve_store_status({"unrelated": "x"}) == (None, None)
+
+
+def test_store_status_keys_are_the_four_candidates_kept_in_order():
+    """The fallback chain named in docs/assumptions/3F.md, unchanged.
+
+    Deleting any of these on a guess is exactly the failure mode this task
+    was told to avoid, so this pins the whole tuple rather than a subset.
+    """
+    assert mc.STORE_STATUS_KEYS == ("status", "store_status", "is_active", "active")

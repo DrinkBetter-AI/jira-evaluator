@@ -28,6 +28,7 @@ from typing import Mapping, Sequence
 import pandas as pd
 
 from hygiene import CONTAINER_ISSUE_TYPES
+import roles
 
 # Component weights, summing to 100. Rework matches delivery on purpose, and
 # delivery's twenty points are split between the self-relative reading and the
@@ -547,3 +548,27 @@ def badges(
             earned.append(("🔍 Clean PRs", "every PR names its ticket and nobody left one unowned"))
 
     return earned
+
+
+def rubric_for(person: str, roster: roles.Roster | None = None) -> roles.RubricLookup:
+    """Which rubric applies to ``person`` - the WP5 fix, in one call.
+
+    Rubric selection used to have nowhere to look role up at all: this module
+    scored every person on the same nine components regardless of what they
+    actually do. It now goes entirely through ``roles.py`` (the roster
+    parsed from env, falling back to the baked ``roles_template.env``
+    defaults when the env vars aren't set) rather than any local table here,
+    so a role added to ``JIRA_ROLES`` without a rubric decision surfaces as
+    ``"unclassified"`` - never a silent pass-through onto this module's own
+    components. Anyone not on the roster at all comes back ``"role_unknown"``:
+    not scored, and never scored wrongly by default.
+
+    For code-producing roles (``roles.CODE_ROLES``) the returned rubric is
+    ``roles.CODE_RUBRIC``, which is this module's own nine ``WEIGHTS`` - use
+    ``components()``/``overall()`` above to actually score those people.
+    Every other scored role's rubric is defined in ``roles.py``; the
+    component-computation for those still needs building, which is future
+    work, not this function's job.
+    """
+    ros = roster if roster is not None else roles.load_roster()
+    return roles.rubric_for_person(ros, person)

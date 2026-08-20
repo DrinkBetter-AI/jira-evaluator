@@ -47,6 +47,17 @@ import merchant_client
 
 MODE = os.getenv("BENCHMARK_MODE", "live")
 
+# Task 3F's ACTIVE_MERCHANTS now falls back to a fixed five-name roster
+# rather than "no filter" when unset, so "every merchant" views below would
+# otherwise silently drop the invented shop names these fixtures use to test
+# unrelated things (a comma in a name, two shops sharing a wine). Set
+# explicitly so this harness keeps exercising what it always exercised; the
+# default's own behaviour (Little International excluded, env overrides it)
+# is covered separately in tests/test_price_charts.py.
+os.environ["ACTIVE_MERCHANTS"] = (
+    "Yiannis;Rivermont;Two Rivers Wine, Inc;Yiannis Wine Shop"
+)
+
 dashboard.github_client.load_github_env = lambda: None
 dashboard.amplitude_client.load_amplitude_env = lambda: None
 dashboard.ads_client.load_ads_env = lambda: None
@@ -94,12 +105,15 @@ SOLD = pd.DataFrame(
 
 # Whose wine each offer is, as the catalogue would answer it. One of the shops
 # has a comma in its name, which is a name and not two shops, and one bottle is
-# stocked by two of them.
+# stocked by two of them. Named "Two Rivers", not "Little International": the
+# latter is a real merchant Task 3F's ACTIVE_MERCHANTS default excludes, and a
+# fixture testing comma-handling should not also, by accident, be a fixture
+# for "an inactive shop is dropped" - that has its own scenario below.
 LISTED = {
-    "a": ("Little International Wine, Inc",),
+    "a": ("Two Rivers Wine, Inc",),
     "b": ("Yiannis",),
     "c": ("Yiannis",),
-    "d": ("Blackbear", "Yiannis"),
+    "d": ("Rivermont", "Yiannis"),
 }
 
 # What Google charged for each of those offers over the same window. The dear
@@ -171,10 +185,32 @@ if MODE == "vivino":
         )
     )
 
+if MODE == "vivinoblocked":
+    # Task 3F: Vivino's 403 is a known, permanent block on this deployment's
+    # egress, not a bug - the read fails the same way every real request
+    # does, and the tab is meant to say so plainly rather than dump the
+    # exception.
+    LISTED = {
+        "a": ("Yiannis Wine Shop",),
+        "b": ("Yiannis Wine Shop",),
+        "c": ("Yiannis Wine Shop",),
+        "d": ("Yiannis Wine Shop",),
+    }
+    import vivino_client
+
+    def _blocked(source, merchant, slug):
+        raise vivino_client.VivinoError(
+            f"Vivino refused the {slug} listings: 403 Client Error: "
+            "Forbidden for url: https://www.vivino.com/api/explore/explore"
+        )
+
+    business._vivino_comparison_cached = _blocked
+
 if MODE in (
     "sold",
     "merchant",
     "vivino",
+    "vivinoblocked",
     "nomatch",
     "noads",
     "adsquiet",
@@ -296,6 +332,7 @@ def texts(test: AppTest) -> str:
         [c.value for c in test.caption]
         + [m.value for m in test.markdown]
         + [w.value for w in test.warning]
+        + [i.value for i in test.info]
     )
     return "\n".join(str(part) for part in parts)
 
@@ -535,7 +572,7 @@ chooser = picked.selectbox[0]
 assert chooser.value == "Every merchant", chooser.value
 assert "Yiannis" in chooser.options, chooser.options
 # A comma in a shop's name is a name, not two shops nobody stocks anything for.
-assert "Little International Wine, Inc" in chooser.options, chooser.options
+assert "Two Rivers Wine, Inc" in chooser.options, chooser.options
 assert "Inc" not in chooser.options, chooser.options
 mine = chooser.select("Yiannis").run()
 assert not mine.exception, [e.value for e in mine.exception]
@@ -570,7 +607,7 @@ for frame in only_mine:
 # The wine two of them stock names both, and is still Yiannis' to answer for.
 shared = [f for f in only_mine if "A cheap wine" in set(f["Wine"])]
 assert shared, [f.to_string() for f in only_mine]
-assert "Blackbear, Yiannis" in set(shared[0]["Merchant"]), shared[0].to_string()
+assert "Rivermont, Yiannis" in set(shared[0]["Merchant"]), shared[0].to_string()
 print("the panel can be cut to one merchant, figures and files alike: ok")
 
 # And the page to send carries whoever was picked, not the whole shop.
@@ -617,6 +654,23 @@ assert downloads == ["Download Yiannis Wine Shop's Vivino comparison (CSV)"], (
     [b.label for b in read_now.download_button]
 )
 print("the Vivino comparison reads on request and shows both prices: ok")
+
+# Vivino's 403 is a known, permanent block on this deployment's egress, and
+# the tab has to say so plainly rather than show a raw exception, which reads
+# as the page being broken.
+blocked_run = run("vivinoblocked")
+blocked_mine = blocked_run.selectbox[0].select("Yiannis Wine Shop").run()
+assert not blocked_mine.exception, [e.value for e in blocked_mine.exception]
+blocked_gate = [b for b in blocked_mine.button if b.key == "vivino_read"]
+assert blocked_gate, [b.key for b in blocked_mine.button]
+read_blocked = blocked_gate[0].click().run()
+assert not read_blocked.exception, [e.value for e in read_blocked.exception]
+blocked_body = texts(read_blocked)
+assert "unavailable — Vivino blocks our requests" in blocked_body, blocked_body[-1200:]
+# Not the raw exception text - that would read as a bug rather than a known,
+# external, permanent limit.
+assert "403 Client Error" not in blocked_body, blocked_body[-1200:]
+print("a Vivino 403 renders as an explicit unavailable state, not a stack trace: ok")
 
 # An order book that opened and matched nothing is not a shop that sold nothing.
 nothing = texts(run("nomatch"))

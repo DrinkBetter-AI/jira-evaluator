@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import collections
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import datetime as _dt
 import hashlib
 import html
@@ -89,7 +89,8 @@ from teams import (
     team_summary,
 )
 import theme
-from theme import inject_styles, kpi_strip
+import theme_tokens
+from theme import inject_styles
 import report as reporting
 import snapshot as board
 from hygiene import (
@@ -323,6 +324,7 @@ def _render_orders(order_book: orders_client.OrderBook, source: str) -> None:
     if trend["orders"].sum():
         figure = px.bar(trend, x="date", y="orders", title="Orders per day (30 days)")
         figure.update_layout(height=260, margin=dict(l=0, r=0, t=40, b=0))
+        theme.apply_palette(figure)
         theme.plot(figure, width="stretch", key="orders_daily")
 
     st.caption(
@@ -784,19 +786,139 @@ _MERCHANT_SEPARATOR = merchant_client.MERCHANT_SEPARATOR
 # prices are nobody's decision, so they belong outside the denominator rather
 # than inside it with an asterisk.
 #
-# Set ``ACTIVE_MERCHANTS`` to a comma-separated list of merchant names as they
-# appear in the catalogue. Left unset, every merchant counts and the page
-# behaves as it always did - an unset variable must not silently hide data.
+# ``ACTIVE_MERCHANTS`` is semicolon-separated - not comma-separated - to match
+# roles_template.env's own JIRA_ROLES/GITHUB_LOGIN_MAP convention, since a
+# merchant's catalogue name is free to carry a comma of its own.
+#
+# Baked in below, copied verbatim from roles_template.env's own
+# ACTIVE_MERCHANTS line (regenerated 19 Aug 2026), for the same reason
+# roles.py bakes in JIRA_ROLES: Cloud Run carries no ACTIVE_MERCHANTS env var
+# today, that is this deployment's actual state rather than a hypothetical,
+# and the page has to be correct anyway. The env var wins when it is set;
+# unset, the page now falls back to this list rather than to "every merchant,
+# including the ones switched off" - the old fallback silently let a stale
+# catalogue answer the one number this section exists to state.
+#
+# The five names are the vendor panel's Active list (Angel's screenshot):
+# Yiannis, Black Bear, Capital Fine Wine, TheWinesGood, World of wine. Little
+# International is NOT here - DEVIN_PLAN prereq 3 called it active, but the
+# vendor panel is newer and wins (docs/assumptions/3F.md).
 _ACTIVE_MERCHANTS_ENV = "ACTIVE_MERCHANTS"
+_DEFAULT_ACTIVE_MERCHANTS = (
+    "Yiannis;Black Bear;Capital Fine Wine;TheWinesGood;World of wine"
+)
 
 
 def _active_merchant_names() -> frozenset[str] | None:
-    """The configured trading roster, or ``None`` when nobody has said."""
-    raw = os.getenv(_ACTIVE_MERCHANTS_ENV, "").strip()
-    if not raw:
-        return None
-    names = frozenset(part.strip() for part in raw.split(",") if part.strip())
+    """The trading roster: ``ACTIVE_MERCHANTS`` if set, else the baked default.
+
+    Never ``None`` in practice any more - the baked default is a fixed,
+    non-empty string - but the return type stays optional so a caller that
+    checks ``if active:`` before filtering keeps working unchanged.
+    """
+    raw = os.getenv(_ACTIVE_MERCHANTS_ENV, "").strip() or _DEFAULT_ACTIVE_MERCHANTS
+    names = frozenset(part.strip() for part in raw.split(";") if part.strip())
     return names or None
+
+
+# A separate, still-open question from the roster above: whether
+# ``medusa.store``'s own metadata agrees with ACTIVE_MERCHANTS. Read-only and
+# best-effort - this is a provenance note, not a source of truth the filter
+# above depends on, so a failed read here degrades to a caption saying so
+# rather than touching what counts as trading. See docs/assumptions/3F.md for
+# the exact verification query this mirrors.
+_STORE_METADATA_SQL = "select name, metadata from medusa.store limit 12"
+
+
+def _store_metadata_note(rows: list[tuple[str, dict | None]]) -> str:
+    """The data-provenance caption: which metadata key decided each row.
+
+    Split from the DB read below so it can be exercised with fabricated rows
+    and no database in the loop. Never raises: ``merchant_client.resolve_store_status``
+    already doesn't, and this only sorts and joins its answers.
+    """
+    matched: dict[str, str] = {}
+    for name, metadata in rows:
+        name = str(name or "").strip()
+        if not name:
+            continue
+        _active, key = merchant_client.resolve_store_status(metadata, name)
+        if key:
+            matched[name] = key
+    if not matched:
+        return (
+            "Store metadata: none of medusa.store's rows carried "
+            + ", ".join(merchant_client.STORE_STATUS_KEYS)
+            + f" ({len(rows)} row(s) read). Active/inactive above comes from "
+            f"{_ACTIVE_MERCHANTS_ENV} alone."
+        )
+    keys_used = sorted(set(matched.values()))
+    if len(keys_used) == 1:
+        return (
+            f"Store metadata: every row read used the {keys_used[0]!r} key "
+            f"({len(matched)} of {len(rows)}). Safe to trim "
+            "merchant_client.STORE_STATUS_KEYS to just that one."
+        )
+    detail = ", ".join(f"{n}={k}" for n, k in sorted(matched.items()))
+    return f"Store metadata: the matching key varies by store - {detail}."
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _store_metadata_note_cached(source: str) -> str:
+    """:func:`_store_metadata_note`, over a live sample - or why it could not run.
+
+    Cached for an hour on the DB config's label, same pattern as
+    ``_offer_merchants_cached``: this is a provenance sentence, not live
+    inventory, and re-reading it every rerun would cost a database round trip
+    for text that does not change between page loads.
+    """
+    config = orders_client.load_medusa_env()
+    if config is None or config.label != source:
+        return "Store metadata: not checked, the order database is not configured."
+    try:
+        import psycopg2
+
+        # ``closing``, not a bare ``with``: a psycopg2 connection used as a
+        # context manager ends the transaction and leaves the socket open.
+        # ``orders_client`` learned this the hard way (see its comment about
+        # leaking a connection on every refresh until the server ran out) and
+        # every read there goes through ``closing``; this one now does too.
+        with closing(
+            psycopg2.connect(
+                host=config.host,
+                port=config.port,
+                dbname=config.database,
+                user=config.user,
+                password=config.password,
+                connect_timeout=10,
+            )
+        ) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(_STORE_METADATA_SQL)
+                rows = cursor.fetchall()
+    except Exception as exc:  # noqa: BLE001 - a caption, not a page, on failure
+        logger.info("store metadata read failed: %s", exc)
+        return (
+            "Store metadata: not verified, the medusa.store read failed "
+            f"({str(exc)[:120]}). Tried, in order: "
+            + ", ".join(merchant_client.STORE_STATUS_KEYS)
+            + "."
+        )
+    return _store_metadata_note(rows)
+
+
+def _store_metadata_provenance() -> str:
+    """The caption above, guarded so a surprise here never breaks the page."""
+    try:
+        config = orders_client.load_medusa_env()
+    except Exception:  # noqa: BLE001
+        config = None
+    if config is None:
+        return "Store metadata: not checked, the order database is not configured."
+    try:
+        return _store_metadata_note_cached(config.label)
+    except Exception as exc:  # noqa: BLE001
+        return f"Store metadata: not checked ({str(exc)[:120]})."
 
 
 def _trading_only(
@@ -910,6 +1032,21 @@ def _vivino_comparison_cached(
     return vivino_client.compare(ours, shop)
 
 
+def _vivino_blocked(exc: Exception) -> bool:
+    """Whether ``exc`` is Vivino's 403, as opposed to any other read failure.
+
+    Vivino refuses Cloud Run's shared egress addresses outright (see
+    vivino_client.py's own note on ``_PROXY_VAR``); every request this
+    deployment makes to it fails the same specific way. ``vivino_client``
+    always surfaces that as a ``VivinoError`` or a wrapped
+    ``requests.HTTPError`` whose message carries "403" - not a status code
+    attribute this function can read directly, since the wrapping loses it -
+    so the text is what is checked. A miss here (a timeout, a 5xx, a changed
+    page) still falls through to the generic warning below, unchanged.
+    """
+    return "403" in str(exc)
+
+
 def _render_vivino(chosen: str, picker: bool = True) -> None:
     """What the chosen merchant charges on Vivino against what they charge here.
 
@@ -979,7 +1116,21 @@ def _render_vivino(chosen: str, picker: bool = True) -> None:
         except Exception as exc:  # noqa: BLE001 - a bad reply stays in this tab
             # Not recorded as read: a failure would otherwise restart the
             # minutes-long pull on every rerun instead of waiting for the button.
-            st.warning(f"Could not compare their Vivino prices: {str(exc)[:300]}")
+            if _vivino_blocked(exc):
+                # 403 from Vivino is not a bug in this page - it is Vivino's
+                # shared-egress block, permanent until VIVINO_PROXY names a
+                # host Vivino answers - and a raw exception dump reads as one.
+                # Saying "unavailable" plainly is honest where a stack trace
+                # is not: nothing here failed, Vivino refused the request.
+                st.info(
+                    "Their Vivino price: unavailable — Vivino blocks our "
+                    "requests. This is a known, permanent limit for this "
+                    "deployment's egress, not a fault in the page; set "
+                    "VIVINO_PROXY to a forward proxy Vivino will answer to "
+                    "compare here."
+                )
+            else:
+                st.warning(f"Could not compare their Vivino prices: {str(exc)[:300]}")
             return
         reads[slug] = (time.time(), result)
 
@@ -1310,20 +1461,36 @@ def _band_pictures(bands: pd.DataFrame, merchant: str) -> None:
     }
     left, right = st.columns(2)
     with left:
-        ring = px.pie(
-            slices,
-            names=slices["band"].astype(str),
-            values="listings",
-            color=slices["band"].astype(str),
+        # A pie of four bands still asks the eye to compare angles; the band
+        # a shop should worry about is the one with the most wine in it, and a
+        # bar sorted by size names that band without asking anyone to guess a
+        # slice's share by looking at it. Ascending order, undrawn-first: a
+        # horizontal bar chart stacks its first row at the bottom, so the
+        # smallest band ends up there and the one to act on lands at the top.
+        ranked_bands = slices.sort_values("listings", ascending=True)
+        by_band = px.bar(
+            ranked_bands,
+            x="listings",
+            y=ranked_bands["band"].astype(str),
+            orientation="h",
+            color=ranked_bands["band"].astype(str),
             color_discrete_map=colours,
-            hole=0.35,
             # Kept short: the text is drawn larger than it used to be, and a
             # title long enough to be clipped is worse than a terse one.
             title="Wines by price against the market",
+            text=ranked_bands["listings"].map(lambda value: f"{int(value):,}"),
         )
-        ring.update_traces(textinfo="percent", hovertemplate="%{label}: %{value} wines")
-        ring.update_layout(margin=dict(t=54, b=0, l=0, r=0), legend_title_text="")
-        theme.plot(ring, width="stretch")
+        by_band.update_traces(
+            textposition="outside", cliponaxis=False,
+            hovertemplate="%{y}: %{x:,} wines<extra></extra>",
+        )
+        by_band.update_layout(
+            margin=dict(t=54, b=0, l=0, r=48),
+            showlegend=False,
+            xaxis_title="",
+            yaxis_title="",
+        )
+        theme.plot(by_band, width="stretch")
     rated = bands[bands["per_100_clicks"].notna()]
     if rated.empty:
         return
@@ -1391,7 +1558,7 @@ def _price_sales_scatter(points: pd.DataFrame, merchant: str, money: str) -> Non
     )
     # The market itself, so a dot's side of the line is readable without doing
     # arithmetic on the axis.
-    figure.add_vline(x=0, line_dash="dash", line_color="#6b7280")
+    figure.add_vline(x=0, line_dash="dash", line_color=theme_tokens.INK["3"])
     # Only where the coefficient is quotable. A fitted line through nine dots
     # looks as confident as one through ninety, and drawn beside a figure that
     # says "not enough wines" it is the chart contradicting its own caption.
@@ -1407,7 +1574,9 @@ def _price_sales_scatter(points: pd.DataFrame, merchant: str, money: str) -> Non
                 y=fit[1],
                 mode="lines",
                 name="Trend",
-                line=dict(color="#111827", width=3),
+                # 2px, the ceiling every line on the dashboard is held to
+                # (docs/assumptions/5A.md) - was 3px.
+                line=dict(color=theme_tokens.INK["1"], width=2),
                 hoverinfo="skip",
             )
         )
@@ -1520,10 +1689,12 @@ def _price_ladder(points: pd.DataFrame, merchant: str, money: str) -> None:
                 y=[labels.iloc[row], labels.iloc[row]],
                 mode="lines",
                 line=dict(
-                    color="#b91c1c"
+                    color=theme_tokens.STATUS["crit"][0]
                     if float(ladder["gap"].iloc[row]) > 0
-                    else "#15803d",
-                    width=3,
+                    else theme_tokens.STATUS["good"][0],
+                    # 2px, the ceiling every line on the dashboard is held to
+                    # (docs/assumptions/5A.md) - was 3px.
+                    width=2,
                 ),
                 showlegend=False,
                 hoverinfo="skip",
@@ -1535,7 +1706,7 @@ def _price_ladder(points: pd.DataFrame, merchant: str, money: str) -> None:
             y=labels,
             mode="markers",
             name="The market",
-            marker=dict(size=11, color="#6b7280", symbol="diamond"),
+            marker=dict(size=11, color=theme_tokens.INK["3"], symbol="diamond"),
         )
     )
     figure.add_trace(
@@ -1544,7 +1715,7 @@ def _price_ladder(points: pd.DataFrame, merchant: str, money: str) -> None:
             y=labels,
             mode="markers",
             name="Our price",
-            marker=dict(size=13, color="#1d4ed8"),
+            marker=dict(size=13, color=theme_tokens.STATUS["info"][0]),
         )
     )
     figure.update_layout(
@@ -1926,25 +2097,38 @@ def _ad_pictures(frame: pd.DataFrame, money: str) -> None:
     left, right = st.columns(2)
     if not split.empty and float(split["spend"].sum()) > 0:
         with left:
-            ring = px.pie(
-                split,
-                names="outcome",
-                values="spend",
+            # Two slices is still a pie a reader has to measure by angle; the
+            # question this picture answers ("how much went to wine that
+            # never sold") is a single comparison, which a bar states directly
+            # instead of asking for one. Ascending, undrawn-first, so the
+            # larger outcome - the one worth a sentence - lands at the top.
+            ranked_split = split.sort_values("spend", ascending=True)
+            by_outcome = px.bar(
+                ranked_split,
+                x="spend",
+                y="outcome",
+                orientation="h",
                 color="outcome",
                 color_discrete_map=ads_evidence.SPLIT_COLOURS,
-                hole=0.35,
                 title=f"Ad spend, last {merchant_client.SALES_DAYS} days",
+                text=ranked_split["spend"].map(lambda value: _money(value, money)),
             )
-            ring.update_traces(
-                textinfo="percent",
-                # A written sentence per slice rather than a template over
+            by_outcome.update_traces(
+                textposition="outside",
+                cliponaxis=False,
+                # A written sentence per bar rather than a template over
                 # ``customdata``: the money is formatted here anyway, to carry
-                # the currency Google billed rather than Plotly's ``$``.
-                hovertext=ads_evidence.split_hovers(split, money),
+                # the currency Google billed rather than Plotly's default.
+                hovertext=ads_evidence.split_hovers(ranked_split, money),
                 hovertemplate="%{hovertext}<extra></extra>",
             )
-            ring.update_layout(margin=dict(t=54, b=0, l=0, r=0), legend_title_text="")
-            theme.plot(ring, width="stretch")
+            by_outcome.update_layout(
+                margin=dict(t=54, b=0, l=0, r=48),
+                showlegend=False,
+                xaxis_title="",
+                yaxis_title="",
+            )
+            theme.plot(by_outcome, width="stretch")
     rated = bands[bands["per_dollar"].notna()]
     if rated.empty:
         return
@@ -2354,18 +2538,21 @@ def _render_price_benchmark() -> None:
         st.caption(
             f"{set_aside:,} offer(s) left out: they belong only to shops that "
             f"are switched off. Every figure here is the {len(active)} trading "
-            f"merchant(s) named in {_ACTIVE_MERCHANTS_ENV}."
+            f"merchant(s) named in {_ACTIVE_MERCHANTS_ENV} (env var, or the "
+            "vendor-panel default baked in when it is unset)."
         )
     elif active and not named:
         st.caption(
-            f"{_ACTIVE_MERCHANTS_ENV} is set, but the catalogue could not be "
-            "read to apply it, so every merchant is counted below."
+            f"{_ACTIVE_MERCHANTS_ENV} names a trading roster, but the "
+            "catalogue could not be read to apply it, so every merchant is "
+            "counted below."
         )
     elif active:
         st.caption(
             f"{_ACTIVE_MERCHANTS_ENV} names no shop this catalogue knows, so "
             "every merchant is counted below. Check the names match the feed."
         )
+    st.caption(_store_metadata_provenance())
     money = prices.currency
     tiles = st.columns(3)
     _tile(
@@ -2900,7 +3087,8 @@ def _render_ads(order_book: orders_client.OrderBook | None) -> None:
         f"Spend ({days}d)",
         _money(spend.cost, money),
         **_delta_arrow(
-            _money_delta(spend.cost_change, money) if spend.prev_cost else None
+            _money_delta(spend.cost_change, money) if spend.prev_cost else None,
+            higher_is_better=False,
         ),
     )
     _tile(
@@ -3429,7 +3617,8 @@ def _render_cloud(
         **_delta_arrow(
             _money_delta(burn.cost_change, money)
             if burn.prev_cost and burn.comparable
-            else None
+            else None,
+            higher_is_better=False,
         ),
     )
     # A day rather than a month, unlike the AI tile beside it: Cloud is billed
@@ -3577,7 +3766,8 @@ def _render_ai_costs(
         f"OpenAI ({days}d)",
         _money(burn.cost, money),
         **_delta_arrow(
-            _money_delta(burn.cost_change, money) if burn.prev_cost else None
+            _money_delta(burn.cost_change, money) if burn.prev_cost else None,
+            higher_is_better=False,
         ),
     )
     _tile(
@@ -4003,8 +4193,13 @@ def _render_product_funnel() -> None:
         funnel,
         "Biggest drop-off",
         worst["step"],
+        # A magnitude, not a period-over-period change - the sign is only
+        # here so st.metric draws a down arrow. "inverse" would colour that
+        # arrow green (inverse flips red/negative to green), which is a
+        # rising-stall-count-in-green bug for a tile whose whole point is
+        # "this many people were lost". "normal" keeps negative red.
         delta=f"-{int(worst['lost']):,} people",
-        delta_color="inverse",
+        delta_color="normal",
     )
 
     figure = px.bar(
@@ -4016,6 +4211,7 @@ def _render_product_funnel() -> None:
     )
     figure.update_yaxes(autorange="reversed")
     figure.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
+    theme.apply_palette(figure)
     theme.plot(figure, width="stretch", key="funnel_steps")
 
     table = steps.assign(
@@ -4156,16 +4352,26 @@ def _per_hundred(rate: float) -> str:
     return f"{people} of every 100"
 
 
-def _delta_arrow(change: str | None) -> dict:
+def _delta_arrow(change: str | None, *, higher_is_better: bool = True) -> dict:
     """``st.metric`` arguments that do not call standing still an improvement.
 
     Streamlit colours a tile's delta by whether the string begins with a minus,
     so "flat" and "+0 people" would both be drawn as a green arrow upwards. In a
     table or a sentence those words are read; on a tile only the arrow is.
+
+    ``higher_is_better`` decides the mapping, not the sign alone: a rise in
+    people converted is good (green), a rise in cloud spend is not
+    (``st.metric``'s ``delta_color="inverse"`` flips red/green so a cost tile
+    does not draw the same green-for-up arrow a growth tile does). Callers
+    that only ever show growth metrics can leave this at its default; every
+    cost tile in this file passes ``higher_is_better=False`` explicitly - see
+    docs/assumptions/5A.md for the audit that found the ones that didn't.
     """
     if change is None:
         return {}
-    return {"delta": change, "delta_color": "off" if _unmoved(change) else "normal"}
+    if _unmoved(change):
+        return {"delta": change, "delta_color": "off"}
+    return {"delta": change, "delta_color": "normal" if higher_is_better else "inverse"}
 
 
 def _unmoved(change: str) -> bool:

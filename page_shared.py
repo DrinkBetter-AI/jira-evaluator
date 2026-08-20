@@ -1,6 +1,6 @@
 """Phase 8: the small reporting / tile / KPI / board-delivery framework
 shared by every page - the printable-report bookkeeping (`_report`,
-`_tile`, `_kpis`, `_said`), the whole-board PDF/HTML offer
+`_tile`, `_said`), the whole-board PDF/HTML offer
 (`_download_report`, `_offer_board_snapshot`, `_build_board_file`,
 `_deliver_board_snapshot`), and a handful of tiny formatting helpers used
 across pages. Split out of app.py so data_layer.py and pages/*.py can use
@@ -92,7 +92,7 @@ from teams import (
     team_summary,
 )
 import theme
-from theme import inject_styles, kpi_strip
+from theme import inject_styles
 import report as reporting
 import snapshot as board
 from hygiene import (
@@ -211,13 +211,6 @@ def _tile(column, tab: str, section: str, label: str, value: str, **kwargs) -> N
     """One metric, drawn on the page and kept for the printable report."""
     _report(tab).figure(section, label, value, str(kwargs.get("delta") or ""))
     column.metric(label, value, **kwargs)
-
-
-def _kpis(tab: str, section: str, cards: list[tuple[str, str, str, str]]) -> None:
-    """A KPI strip, drawn on the page and kept for the printable report."""
-    for label, value, note, _accent in cards:
-        _report(tab).figure(section, label, value, note)
-    kpi_strip(cards)
 
 
 def _said(tab: str, section: str, lines: list[str]) -> None:

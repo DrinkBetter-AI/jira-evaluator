@@ -18,7 +18,13 @@ because each one is a prompt to look at a person's PRs, not a verdict on them:
   other?") and never an accusation;
 - self-merges and unapproved merges;
 - abandoned PRs, which cost the same hours as shipped ones;
-- traceability of *merged* work back to a Jira ticket.
+- traceability of *merged* work back to a Jira ticket;
+- reviews nobody asked for, which is the proactivity signal review counts
+  alone cannot show;
+- a PR going back to draft after a reviewer was already asked - the specific
+  ordering that turns "hide a PR in draft" from a click into a fact; and
+- size converted into points, count and median bound together so a count
+  alone can never leave this module.
 
 Two honest limits run through all of it. Diff size measures typing, not
 thinking: a one-line fix to a race condition can be the hardest work of the
@@ -44,6 +50,20 @@ SMALL_MAX = 100
 MEDIUM_MAX = 400
 LARGE_MAX = 1000  # over this is "oversized": too big to review honestly
 SIZE_BANDS = ("trivial", "small", "medium", "large", "oversized")
+
+# Points a merged PR in each band is worth, for :func:`delivered_points`.
+# Convex up to "large" (bigger, well-scoped work is worth more than the same
+# work split small, which is exactly what KPI_SPEC exploit #3 rewards today),
+# flat from "large" to "oversized": past LARGE_MAX a diff is "too big to
+# review honestly" per the band's own docstring, so it stops earning more for
+# being bigger still - that would reward the dump, not the work.
+SIZE_POINTS = {
+    "trivial": 1,
+    "small": 3,
+    "medium": 8,
+    "large": 20,
+    "oversized": 20,
+}
 
 # The AI reviewer's login. GitHub apps post as ``name[bot]``, so this is a glob.
 # Configurable because the reviewer can be swapped for another one.
@@ -552,6 +572,136 @@ def reciprocity(
     return Reciprocity(pairs, by_person)
 
 
+def unprompted_reviews(
+    prs: pd.DataFrame,
+    reviewer_patterns: tuple[str, ...] | list[str] = AI_REVIEWER_PATTERNS,
+) -> pd.DataFrame:
+    """Per person: reviews given that nobody asked for, with the PRs as evidence.
+
+    DEVIN_PLAN §6 calls this "the proactivity signal - the rest is
+    compliance": ``review_citizenship`` counts reviews given, but a review
+    given because a person was assigned one and a review given because
+    someone went looking for work to unblock are the same row in that table.
+    A review counts as unprompted here when nothing in the PR's timeline
+    asked *this* reviewer for one at or before the moment they submitted it.
+
+    Ordering is the whole signal, and it runs one direction only: a review
+    request logged *after* the review still leaves the review unprompted - it
+    was volunteered before anyone asked, and a request filed afterwards (a
+    maintainer formalising it, a re-request for the record) does not undo
+    that. A request at or before the review is what makes a review
+    compliance instead.
+
+    Read alongside :func:`reciprocity` on purpose - ``top_partner_share`` and
+    ``concentration`` are joined onto the per-person result, because ten
+    unprompted reviews aimed entirely at one colleague is the closed
+    approval loop reciprocity already looks for, not proactivity, and the
+    two should never be read apart.
+
+    Evidence travels twice: ``prs`` is the distinct PR numbers, and ``pr_refs``
+    the same PRs as ``(number, url)`` pairs. A PR number is unique only within
+    one repository, so ``pr_refs`` is what a link should be built from; ``prs``
+    is for counting and for display where the repo is already established.
+
+    Blind spot: this needs the extended timeline payload
+    (``timeline_events``/``extended_fetched`` from :mod:`github_client`'s
+    extended query). A PR fetched on the lean or detail payload contributes
+    nothing here - not zero unprompted reviews, no evidence at all - and a
+    request made outside GitHub (Slack, standup, "can you look at this")
+    cannot be seen either, so this undercounts compliance, never proactivity.
+    """
+    columns = [
+        "reviewer",
+        "unprompted_reviews",
+        "prs",
+        "pr_refs",
+        "top_partner",
+        "top_partner_share",
+        "concentration",
+    ]
+    if prs.empty:
+        return _empty(columns)
+    prs = _rows(prs)
+    if "timeline_events" not in prs.columns:
+        return _empty(columns)
+
+    rows = []
+    for _, row in prs.iterrows():
+        events = row.get("timeline_events")
+        reviews = row.get("reviews")
+        if not isinstance(events, list) or not isinstance(reviews, list):
+            continue
+        author = str(row.get("author") or "unknown")
+        requested_at: dict[str, list[pd.Timestamp]] = {}
+        for event in events:
+            if event.get("type") != "review_requested":
+                continue
+            reviewer = event.get("requested_reviewer")
+            at = pd.to_datetime(event.get("created_at"), utc=True, errors="coerce")
+            if not reviewer or pd.isna(at):
+                continue
+            requested_at.setdefault(str(reviewer), []).append(at)
+        for review in reviews:
+            reviewer = str(review.get("reviewer") or "unknown")
+            if reviewer == author or _is_ai(reviewer, reviewer_patterns):
+                continue
+            submitted = pd.to_datetime(review.get("submitted_at"), utc=True, errors="coerce")
+            if pd.isna(submitted):
+                continue
+            # Prompted only by a request at or before the review; one logged
+            # afterwards does not retroactively make the review compliance.
+            asked = requested_at.get(reviewer, [])
+            prompted = any(at <= submitted for at in asked)
+            if not prompted:
+                rows.append(
+                    {
+                        "reviewer": reviewer,
+                        "number": row.get("number"),
+                        "url": row.get("url"),
+                    }
+                )
+    if not rows:
+        return _empty(columns)
+
+    detail = pd.DataFrame(rows)
+    grouped = detail.groupby("reviewer", dropna=False)
+    out = pd.DataFrame(
+        {
+            "unprompted_reviews": grouped.size(),
+            "prs": grouped["number"].apply(
+                lambda s: tuple(sorted({int(n) for n in s if pd.notna(n)}))
+            ),
+        }
+    ).reset_index()
+    # ``pr_refs`` is the same evidence keyed the way GitHub actually identifies a
+    # PR. ``prs`` collapses on the number alone, which is unique only inside one
+    # repository: two repos both having a #42 is ordinary, and a reader following
+    # a bare number can land on the wrong PR entirely. Carrying the URL from the
+    # row the review was found on removes the guess - nothing downstream has to
+    # resolve a number back to a URL, so nothing downstream can resolve it wrong.
+    refs = {
+        reviewer: tuple(
+            sorted(
+                {
+                    (int(number), str(url))
+                    for number, url in zip(group["number"], group["url"])
+                    if pd.notna(number) and url
+                }
+            )
+        )
+        for reviewer, group in detail.groupby("reviewer", dropna=False)
+    }
+    out["pr_refs"] = out["reviewer"].map(refs)
+
+    _, by_person = reciprocity(prs, reviewer_patterns)
+    out = out.merge(
+        by_person[["reviewer", "top_partner", "top_partner_share", "concentration"]],
+        on="reviewer",
+        how="left",
+    )
+    return out[columns].sort_values("unprompted_reviews", ascending=False, ignore_index=True)
+
+
 # --------------------------------------------------------------------------- #
 # How work got merged
 # --------------------------------------------------------------------------- #
@@ -785,3 +935,168 @@ def traceability(
     return out[columns].sort_values(
         ["traceability", "merged_prs"], ascending=[True, False], ignore_index=True
     )
+
+
+# --------------------------------------------------------------------------- #
+# Hiding in draft
+# --------------------------------------------------------------------------- #
+
+
+class DraftTransitions(NamedTuple):
+    """Per-PR draft round-trips, and what became of the ones that look deliberate.
+
+    ``detail`` is one row per PR: how many times it went back into draft
+    (``draft_round_trips``), and whether that happened *after* a reviewer was
+    asked for (``after_review_request``) - a PR opened as a draft and marked
+    ready once has neither, and is not in this file for anything but a normal
+    open. ``outcome`` runs :func:`abandoned_rate` on exactly the PRs flagged
+    ``after_review_request``, so "of the PRs that hid in draft after being
+    asked for review, how many actually shipped" reuses the real
+    abandoned-work arithmetic rather than a second one invented here.
+    """
+
+    detail: pd.DataFrame
+    outcome: pd.DataFrame
+
+
+def draft_transitions(prs: pd.DataFrame) -> DraftTransitions:
+    """KPI_SPEC exploit #6, made visible: hiding a PR in draft after asking for review.
+
+    ``_open_query`` carries ``draft:false``, so one click removes a PR from
+    Open, Stuck, Never-reviewed and every hygiene tab - and the removal is
+    silent, because a draft PR simply stops matching the query rather than
+    appearing anywhere flagged. This counts every draft round trip per PR
+    from the timeline and isolates the ones where the PR went to draft
+    *after* someone was already asked to review it - ordering is the whole
+    signal named in KPI_SPEC: a PR that starts life as a draft is an
+    engineer working in the open, and is not this at all.
+
+    Innocent readings exist for the flagged case too - a reviewer found a
+    real problem and the author correctly pulled the PR back to fix it - so
+    this is a queue to open, not a verdict. What it removes is the silence:
+    today that PR vanishes from every view instead of turning up in one.
+
+    Blind spot: needs the extended timeline payload
+    (``timeline_events``/``extended_fetched``). A PR fetched on the lean or
+    detail payload is silently absent from both frames, not silently "no
+    round trips" - there is no column here that would let the two be told
+    apart, which is itself worth knowing before reading a quiet page as a
+    clean one.
+    """
+    detail_columns = ["author", "number", "url", "draft_round_trips", "after_review_request"]
+    empty_outcome = abandoned_rate(pd.DataFrame())
+    if prs.empty:
+        return DraftTransitions(_empty(detail_columns), empty_outcome)
+    prs = _rows(prs)
+    if "timeline_events" not in prs.columns:
+        return DraftTransitions(_empty(detail_columns), empty_outcome)
+
+    rows = []
+    flagged_positions = []
+    for idx, row in prs.iterrows():
+        events = row.get("timeline_events")
+        if not isinstance(events, list):
+            continue
+        draft_times = sorted(
+            t
+            for t in (
+                pd.to_datetime(e.get("created_at"), utc=True, errors="coerce")
+                for e in events
+                if e.get("type") == "converted_to_draft"
+            )
+            if pd.notna(t)
+        )
+        request_times = sorted(
+            t
+            for t in (
+                pd.to_datetime(e.get("created_at"), utc=True, errors="coerce")
+                for e in events
+                if e.get("type") == "review_requested"
+            )
+            if pd.notna(t)
+        )
+        after_request = any(d > r for d in draft_times for r in request_times)
+        rows.append(
+            {
+                "author": str(row.get("author") or "unknown"),
+                "number": row.get("number"),
+                "url": row.get("url") or "",
+                "draft_round_trips": len(draft_times),
+                "after_review_request": after_request,
+            }
+        )
+        if after_request:
+            flagged_positions.append(idx)
+
+    if not rows:
+        return DraftTransitions(_empty(detail_columns), empty_outcome)
+    detail = pd.DataFrame(rows)[detail_columns]
+    outcome = abandoned_rate(prs.loc[flagged_positions]) if flagged_positions else empty_outcome
+    return DraftTransitions(detail, outcome)
+
+
+# --------------------------------------------------------------------------- #
+# Size in points
+# --------------------------------------------------------------------------- #
+
+
+class DeliveredPoints(NamedTuple):
+    """One person's size-weighted output - count and median size, bound together.
+
+    KPI_SPEC §3.3 is explicit: "Report count and median size together,
+    always. A count alone is exploit #3" - five trivial PRs beating one real
+    one on every raw count the dashboard has. A ``NamedTuple`` with no
+    default on ``median_changed_lines`` makes a count-only reading a
+    ``TypeError`` at construction, not a value some later caller can quietly
+    drop: there is no second, scalar-returning function anywhere in this
+    module that hands back ``points`` or ``prs`` alone.
+
+    Blind to the same thing :func:`size_bands` is blind to: diff size
+    measures typing, not thinking or difficulty. A high score here is a
+    volume of well-scoped, mergeable work; it is not evidence the work was
+    hard, or good.
+    """
+
+    author: str
+    prs: int
+    median_changed_lines: float
+    points: float
+    trivial_share: float
+
+
+def delivered_points(prs: pd.DataFrame) -> list[DeliveredPoints]:
+    """Per person: size-band counts converted into points, via :func:`size_bands`.
+
+    Built directly on :func:`size_bands` rather than reclassifying diffs a
+    second time, so the two can never disagree about which band a PR falls
+    in. ``SIZE_POINTS`` weights the bands so splitting one change into five
+    trivial PRs (exploit #3) scores below shipping it as one - five trivial
+    PRs earn ``5 * SIZE_POINTS["trivial"]``, well under one medium PR's
+    ``SIZE_POINTS["medium"]`` for a fraction of the real work, and nowhere
+    close to what the same total size shipped as one PR would earn.
+
+    Returns a plain list, not a frame: a ``DataFrame`` would let a caller
+    select the ``prs`` column alone and hand it around as if it were the
+    complete picture, which is the exact shortcut KPI_SPEC §3.3 rules out.
+    Every element is a whole :class:`DeliveredPoints`, count and median
+    inseparable.
+    """
+    bands = size_bands(prs)
+    if bands.empty:
+        return []
+    out = [
+        DeliveredPoints(
+            author=str(row["author"]),
+            prs=int(row["prs"]),
+            median_changed_lines=(
+                float(row["median_changed_lines"]) if pd.notna(row["median_changed_lines"]) else float("nan")
+            ),
+            points=float(sum(row[band] * SIZE_POINTS[band] for band in SIZE_BANDS)),
+            trivial_share=(
+                float(row["trivial_share"]) if pd.notna(row["trivial_share"]) else float("nan")
+            ),
+        )
+        for _, row in bands.iterrows()
+    ]
+    out.sort(key=lambda d: d.points, reverse=True)
+    return out

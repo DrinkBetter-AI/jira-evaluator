@@ -1,0 +1,141 @@
+{
+  "_comment": "Hand-built payload in the shape JiraClient.search_issues(expand=\"changelog\") returns. Two issues, seven history entries, one items[] entry each. Nothing here is random: every entry stands in for one specific parsing or attribution case, named in its own _comment. tests/apptests/test_changelog_fixture.py pins every field of every parsed row against it, so an attribution regression surfaces as \"this row, this field\" rather than a frame-shape diff.",
+  "issues": [
+    {
+      "key": "VV-100",
+      "_comment": "The ticket that bounced and healed: resolved, dragged back out, resolved again by a different person. reresolve_events() reads it as 2 resolutions / 1 reopen / hidden_rework, which is exactly the shape a present-tense JQL query for reopened tickets cannot see.",
+      "changelog": {
+        "histories": [
+          {
+            "id": "10001",
+            "_comment": "h1 - plain status move, both ends unresolved, named author. The baseline every other entry is a variation on.",
+            "created": "2026-01-05T09:00:00.000+0000",
+            "author": {
+              "accountId": "acc-priya",
+              "displayName": "Priya Shah",
+              "emailAddress": "priya.shah@example.com"
+            },
+            "items": [
+              {
+                "field": "status",
+                "fieldId": "status",
+                "fromString": "To Do",
+                "toString": "In Progress"
+              }
+            ]
+          },
+          {
+            "id": "10002",
+            "_comment": "h2 - a label-only edit. COSMETIC_FIELDS, not a status move, so is_status is False and from_stage/to_stage are never computed. This is the touch that must not reset a staleness clock.",
+            "created": "2026-01-06T14:30:00.000+0000",
+            "author": {
+              "accountId": "acc-priya",
+              "displayName": "Priya Shah",
+              "emailAddress": "priya.shah@example.com"
+            },
+            "items": [
+              {
+                "field": "labels",
+                "fieldId": "labels",
+                "fromString": null,
+                "toString": "needs-design"
+              }
+            ]
+          },
+          {
+            "id": "10003",
+            "_comment": "h3 - the resolving transition. In Progress is not in DEFAULT_RESOLVED_STATUSES; Review in Staging is, which is the whole reason this team can resolve a ticket that is emphatically not done. Credit for this resolution belongs to Priya, the changelog author, not to whoever holds the assignee field today.",
+            "created": "2026-01-10T11:15:00.000+0000",
+            "author": {
+              "accountId": "acc-priya",
+              "displayName": "Priya Shah",
+              "emailAddress": "priya.shah@example.com"
+            },
+            "items": [
+              {
+                "field": "status",
+                "fieldId": "status",
+                "fromString": "In Progress",
+                "toString": "Review in Staging"
+              }
+            ]
+          },
+          {
+            "id": "10004",
+            "_comment": "h4 - the reopen, straight back out of the resolved status, by someone other than the person who resolved it. The one row reresolve_events() counts as VV-100's reopen.",
+            "created": "2026-01-11T08:45:00.000+0000",
+            "author": {
+              "accountId": "acc-marco",
+              "displayName": "Marco Diaz",
+              "emailAddress": "marco.diaz@example.com"
+            },
+            "items": [
+              {
+                "field": "status",
+                "fieldId": "status",
+                "fromString": "Review in Staging",
+                "toString": "In Progress"
+              }
+            ]
+          },
+          {
+            "id": "10005",
+            "_comment": "h5 - the re-resolution: a second, distinct entry into a resolved status on the same ticket. Makes VV-100 count 2 resolutions rather than 1 and marks it hidden_rework, because it is sitting resolved right now and a present-tense query would call it clean.",
+            "created": "2026-01-12T16:00:00.000+0000",
+            "author": {
+              "accountId": "acc-marco",
+              "displayName": "Marco Diaz",
+              "emailAddress": "marco.diaz@example.com"
+            },
+            "items": [
+              {
+                "field": "status",
+                "fieldId": "status",
+                "fromString": "In Progress",
+                "toString": "Review in Staging"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "key": "VV-200",
+      "_comment": "The clean second ticket, carrying the authorless case. Its resolving move is not its first changelog entry, so the parse is exercised on the ordinary many-transition shape rather than a resolution-on-first-touch special case.",
+      "changelog": {
+        "histories": [
+          {
+            "id": "20001",
+            "_comment": "h1 - a plain status move by a bot account, so the resolving entry below is not this ticket's first.",
+            "created": "2026-02-10T09:00:00.000+0000",
+            "author": {
+              "accountId": "acc-devinbot",
+              "displayName": "Devin Bot"
+            },
+            "items": [
+              {
+                "field": "status",
+                "fieldId": "status",
+                "fromString": "To Do",
+                "toString": "In Progress"
+              }
+            ]
+          },
+          {
+            "id": "20002",
+            "_comment": "h2 - a resolving transition with the author key absent from the history entry entirely: the deprovisioned-user / some-automation shape. changelog_events() falls back to the \"Unknown\" sentinel and author_id stays None because there is no author dict to read accountId from. Invisible to credited_resolutions() - there is nobody to credit - which is precisely why unattributed_resolutions() exists to catch it.",
+            "created": "2026-02-11T10:00:00.000+0000",
+            "items": [
+              {
+                "field": "status",
+                "fieldId": "status",
+                "fromString": "In Progress",
+                "toString": "Done"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
