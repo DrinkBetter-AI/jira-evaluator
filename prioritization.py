@@ -250,7 +250,13 @@ def assignee_rollup(df: pd.DataFrame, events: pd.DataFrame | None = None) -> pd.
     working["_unowned"] = unowned.astype(int)
     idle_days = pd.to_numeric(working.get("idle_days"), errors="coerce").fillna(0.0)
     staleness_days, masked_days = _staleness_days(working, events)
-    has_events = events is not None and not events.empty
+    # ``masked_days is not None`` is the signal that ``_staleness_days`` really
+    # read status ages, not that events were merely passed in. When it falls
+    # back to ``idle_days`` (no ``key`` column, or a ``status_age_days`` frame
+    # that does not line up row-for-row) there is nothing to put in a column
+    # named ``avg_status_age_days``, and emitting idle days under that name
+    # would be the exact substitution this module exists to stop.
+    has_events = masked_days is not None
     working["_status_age_days"] = staleness_days
     working["_masked_days"] = masked_days if masked_days is not None else float("nan")
     working["_stale"] = (staleness_days >= 15).astype(int)

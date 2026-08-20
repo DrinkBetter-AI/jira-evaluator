@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import collections
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import datetime as _dt
 import hashlib
 import html
@@ -878,13 +878,20 @@ def _store_metadata_note_cached(source: str) -> str:
     try:
         import psycopg2
 
-        with psycopg2.connect(
-            host=config.host,
-            port=config.port,
-            dbname=config.database,
-            user=config.user,
-            password=config.password,
-            connect_timeout=10,
+        # ``closing``, not a bare ``with``: a psycopg2 connection used as a
+        # context manager ends the transaction and leaves the socket open.
+        # ``orders_client`` learned this the hard way (see its comment about
+        # leaking a connection on every refresh until the server ran out) and
+        # every read there goes through ``closing``; this one now does too.
+        with closing(
+            psycopg2.connect(
+                host=config.host,
+                port=config.port,
+                dbname=config.database,
+                user=config.user,
+                password=config.password,
+                connect_timeout=10,
+            )
         ) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(_STORE_METADATA_SQL)

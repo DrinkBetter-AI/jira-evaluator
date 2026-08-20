@@ -197,10 +197,12 @@ def tickets_resolved_series(
 
     ``tickets`` is expected to already be scoped to resolved tickets - the
     shape :func:`data_layer.fetch_resolved_tickets` returns. There is no
-    ``resolutiondate``-style column on that frame (``RESOLVED_FIELDS`` never
-    requests one; see ``jira_client.py``'s row builder), so this buckets on
+    ``resolutiondate`` column on that frame, so this buckets on
     ``status_category_changed_date``, the closest machine-recorded stand-in
-    for "when this left the board" the frame carries. That is a deliberate
+    for "when this left the board" the frame carries. ``RESOLVED_FIELDS``
+    asks Jira for that field by name: the row builder emits the column either
+    way, so omitting it yielded not a missing column but a null one, and
+    twelve weeks of silent zeros. That is a deliberate
     approximation, recorded in ``docs/assumptions/2F.md``: a ticket that
     re-entered a resolved status more than once (KPI_SPEC exploit #2) only
     shows its most recent category change here, not every re-entry -

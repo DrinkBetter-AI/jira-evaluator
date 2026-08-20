@@ -90,6 +90,54 @@ def _card(body_html: str, *, title: str = "", subtitle: str = "") -> str:
     return "".join(parts)
 
 
+# The windows this page scores over are 90 days wide - ``_credited_map(..., 90.0)``,
+# ``integrity_flags(..., 90.0)``, ``estimate_churn(window_days=90.0)`` - but the
+# bundle's opening read only carries 30 (``resolved_30``, sized for the per-person
+# pie elsewhere). Feeding a 30-day frame to a 90-day window does not fail, it
+# understates: resolutions 31-90 days ago are in neither frame, so a person's
+# prior-period pace reads as zero and a rate measured against it reads as
+# perfect. This is the same dedicated wider read ``pages/today.py`` makes for its
+# 12-week throughput line, for the same reason, kept as its own function so tests
+# can replace it without a Jira credential.
+_RESOLVED_WINDOW_DAYS = 90
+
+
+def _fetch_resolved_window(days: int = _RESOLVED_WINDOW_DAYS) -> pd.DataFrame:
+    """Resolved tickets over ``days``, with changelog, through the cached reader."""
+    import data_layer
+
+    return data_layer.fetch_resolved_tickets(
+        creds_path=data_layer.CREDS_PATH,
+        profile_name=data_layer.PROFILE_NAME,
+        days=days,
+        statuses=data_layer.RESOLVED_STATUSES,
+        max_results=data_layer.MAX_RESULTS,
+        page_size=data_layer.JIRA_PAGE_SIZE,
+        schema_version=data_layer.FETCH_SCHEMA_VERSION,
+    )
+
+
+def _resolved_window_or_bundle(bundle) -> pd.DataFrame:
+    """The 90-day resolved frame, falling back to the bundle's 30-day one.
+
+    A failed wider read degrades to exactly what this page saw before - the
+    bundle's ``resolved_30`` - rather than to an empty frame, because an empty
+    frame here would zero every changelog-credited count on the page. The
+    fallback is narrower than the window that reads it, which is the flaw this
+    function exists to fix; it is the safe direction to fail in (an understated
+    count, never an invented one) and it is what runs when Jira is unreachable.
+    """
+    fallback = bundle.data.get("resolved_30")
+    fallback = fallback if isinstance(fallback, pd.DataFrame) else pd.DataFrame()
+    try:
+        wider = _fetch_resolved_window()
+    except Exception:  # noqa: BLE001 - a narrower window, not a broken page
+        return fallback
+    if not isinstance(wider, pd.DataFrame) or wider.empty:
+        return fallback
+    return wider
+
+
 def _combined_org_events(
     bundle_events: pd.DataFrame, resolved_tickets: pd.DataFrame | None
 ) -> pd.DataFrame:
@@ -98,17 +146,19 @@ def _combined_org_events(
     ``bundle_events`` alone only carries history for tickets the board's JQL
     still returns (open, non-Done) - a ticket that fully closed drops out of
     it, and with it every resolving transition it ever made.
-    ``resolved_tickets`` (``bundle.data["resolved_30"]``, fetched with
-    ``expand=changelog``) is the other half. Deduped on ``(key, entry_id)``
-    so a ticket in both frames is not double-counted. Same construction as
-    ``pages/delivery.py``'s ``_combined_org_events`` - duplicated rather than
-    imported, since that function is private to a page this task does not
-    own.
+    ``resolved_tickets`` (this page's own 90-day read, see
+    ``_resolved_window_or_bundle``, fetched with ``expand=changelog``) is the
+    other half. Deduped on ``(key, entry_id)`` so a ticket in both frames is
+    not double-counted. Same construction as ``pages/delivery.py``'s
+    ``_combined_org_events`` - duplicated rather than imported, since that
+    function is private to a page this task does not own.
 
-    Blind to: a ticket that fully resolved and closed more than 30 days ago
-    (the window ``resolved_30`` was fetched over) is in neither frame -
-    invisible here the same way it is invisible to Delivery's org-wide
-    figures built the same way.
+    Blind to: a ticket that fully resolved and closed before the window
+    ``resolved_tickets`` was fetched over is in neither frame - invisible
+    here the same way it is invisible to Delivery's org-wide figures built
+    the same way. That window is what has to match the window the callers
+    score over; a 30-day frame read by a 90-day metric is the bug
+    ``_resolved_window_or_bundle`` exists to close.
     """
     parts = []
     if bundle_events is not None and not bundle_events.empty:
@@ -326,9 +376,10 @@ def _github_search_url(org: str | None, query: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _credited_map(
+def _credited_by_person(
     events: pd.DataFrame, resolved_tickets: pd.DataFrame, window_days: float, now=None
-) -> dict[str, int]:
+) -> pd.DataFrame:
+    """``credited_resolutions``' per-person frame, or an empty one with its columns."""
     result = integrity.credited_resolutions(
         events,
         tickets=resolved_tickets,
@@ -337,8 +388,28 @@ def _credited_map(
         resolved_statuses=RESOLVED_STATUSES,
     )
     if result.by_person is None or result.by_person.empty:
+        return pd.DataFrame(columns=["person", "credited_resolutions", "keys"])
+    return result.by_person
+
+
+def _credited_map(
+    events: pd.DataFrame, resolved_tickets: pd.DataFrame, window_days: float, now=None
+) -> dict[str, int]:
+    by_person = _credited_by_person(events, resolved_tickets, window_days, now)
+    if by_person.empty:
         return {}
-    return dict(zip(result.by_person["person"], result.by_person["credited_resolutions"].astype(int)))
+    return dict(zip(by_person["person"], by_person["credited_resolutions"].astype(int)))
+
+
+def _credited_keys(by_person: pd.DataFrame, person: str) -> list[str]:
+    """The ticket keys behind one person's credited count, in the order stored."""
+    if by_person.empty or "keys" not in by_person.columns:
+        return []
+    row = by_person[by_person["person"] == person]
+    if row.empty:
+        return []
+    raw = row["keys"].iloc[0]
+    return [key.strip() for key in str(raw or "").split(",") if key.strip()]
 
 
 def _reopened_map(
@@ -469,7 +540,16 @@ def _evidence_rows(
         else:
             merged_count = int(len(mine))
 
-    resolved_90 = _credited_map(combined_events, resolved_tickets, 90.0, now).get(person, 0) if events_present else 0
+    credited_90 = (
+        _credited_by_person(combined_events, resolved_tickets, 90.0, now)
+        if events_present
+        else pd.DataFrame(columns=["person", "credited_resolutions", "keys"])
+    )
+    resolved_90 = 0
+    if not credited_90.empty:
+        mine_credit = credited_90[credited_90["person"] == person]
+        if not mine_credit.empty:
+            resolved_90 = int(mine_credit["credited_resolutions"].iloc[0])
 
     reviews_count = 0
     if login and isinstance(prs, pd.DataFrame) and not prs.empty:
@@ -490,7 +570,21 @@ def _evidence_rows(
             ]
             churn_count = int(len(mine))
 
-    jql_resolved = f'assignee = "{person}" AND resolutiondate >= -90d ORDER BY resolutiondate DESC'
+    # The count beside this link is credited from the changelog - whoever
+    # authored the resolving transition - so the link has to select the same
+    # tickets. ``assignee = person AND resolutiondate >= -90d`` selects a
+    # different population twice over: it reads the current assignee, which is
+    # the field the credit fix exists to stop trusting, and it reads Jira's
+    # ``resolutiondate``, which a move into "Review in Staging" does not set
+    # even though this team counts that as resolved. Listing the credited keys
+    # is the only query that returns exactly the tickets that were counted.
+    credited_keys = _credited_keys(credited_90, person)
+    if credited_keys:
+        jql_resolved = "key IN (" + ", ".join(credited_keys) + ") ORDER BY resolutiondate DESC"
+    else:
+        # Nothing credited: a query that honestly returns nothing, rather than
+        # an assignee search that would return somebody else's tickets.
+        jql_resolved = f'assignee = "{person}" AND resolutiondate >= -90d ORDER BY resolutiondate DESC'
     jql_estimates = f'assignee = "{person}" AND updated >= -90d ORDER BY updated DESC'
 
     return [
@@ -619,8 +713,7 @@ def _render_people_page() -> None:
 
     roster = roles.load_roster()
 
-    resolved_tickets = bundle.data.get("resolved_30")
-    resolved_tickets = resolved_tickets if isinstance(resolved_tickets, pd.DataFrame) else pd.DataFrame()
+    resolved_tickets = _resolved_window_or_bundle(bundle)
     combined_events = _combined_org_events(bundle.events, resolved_tickets)
 
     open_tickets = estimate_policy(_metrics_df(bundle.df, include_backlogs=False), BACKLOG_STATUSES)

@@ -8,6 +8,8 @@ result. Both are tested directly, not inferred from a broader scenario.
 
 from __future__ import annotations
 
+import inspect
+
 import sys
 from pathlib import Path
 
@@ -261,3 +263,56 @@ def test_empty_pr_frame_still_returns_twelve_buckets_and_zero_bots():
     result = series.prs_merged_series(pd.DataFrame(), weeks=12)
     assert len(result.buckets) == 12
     assert result.bots_excluded == 0
+
+
+# ---------------------------------------------------------------------------
+# The resolved frame has to actually carry the column this buckets on.
+# ---------------------------------------------------------------------------
+
+
+def test_the_field_the_resolved_series_buckets_on_is_one_jira_was_asked_for():
+    """``RESOLVED_FIELDS`` must request whatever ``tickets_resolved_series`` reads.
+
+    Jira returns only the fields a search asks for, but
+    ``jira_client``'s row builder emits ``status_category_changed_date``
+    unconditionally - ``fields.get("statuscategorychangedate")``. Leaving the
+    field out of the request therefore produced no missing column and no
+    error: it produced a column that was null on every row, which
+    ``weekly_buckets`` dropped as unparseable, drawing twelve weeks of zero
+    throughput beside a nonzero headline resolved count.
+
+    Every fixture in this file populates the column by hand, so no amount of
+    unit testing the bucketing could catch it. This asserts the request
+    instead, which is where the bug actually lived.
+    """
+    import data_layer
+    import jira_client
+
+    date_col = inspect.signature(series.tickets_resolved_series).parameters["date_col"].default
+    assert date_col == "status_category_changed_date"
+    # Both names pinned, because they are not each other with the underscores
+    # taken out: Jira's field id is "statuscategorychangedate" (one "d" in
+    # "changedate"), the row builder's column is "status_category_changed_date"
+    # (two). ``jira_client``'s row builder is the join between them.
+    assert "statuscategorychangedate" in data_layer.RESOLVED_FIELDS
+    builder = inspect.getsource(jira_client.JiraClient._issues_to_dataframe)
+    assert '"status_category_changed_date": fields.get("statuscategorychangedate")' in builder
+
+
+def test_a_resolved_frame_whose_bucket_column_is_null_produces_no_silent_zeros():
+    """The failure mode above, reproduced: all-null dates must not read as "zero resolved".
+
+    This is the shape the live read actually returned. The series comes back
+    with every bucket at zero, which is indistinguishable from a genuinely
+    idle twelve weeks - which is exactly why the request-side assertion above
+    is the real guard, and why this one is here to name the symptom.
+    """
+    frame = pd.DataFrame(
+        [
+            {"assignee": "alice", "status_category_changed_date": None},
+            {"assignee": "bob", "status_category_changed_date": None},
+        ]
+    )
+    out = series.tickets_resolved_series(frame, weeks=12)
+    assert len(out.buckets) == 12
+    assert {bucket.value for bucket in out.buckets} == {0}

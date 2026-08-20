@@ -245,7 +245,16 @@ def fetch_tickets(
 LIST_FIELDS = ("summary", "status", "priority", "assignee", "created")
 # ``assignee`` here is the current assignee, kept for comparison against the
 # credited resolver - see ``credited_resolvers`` - not the credit itself.
-RESOLVED_FIELDS = ("assignee",)
+#
+# ``statuscategorychangedate`` is requested because ``series.tickets_resolved_series``
+# buckets this frame's weeks on it. Jira returns only the fields asked for, so
+# leaving it out did not produce a missing column - ``jira_client``'s row builder
+# emits ``status_category_changed_date`` unconditionally - it produced a column
+# that was null on every row, which ``weekly_buckets`` then dropped as
+# unparseable. The Today page's 12-week throughput line drew twelve zeros beside
+# a nonzero headline resolved count. Tests never caught it because every fixture
+# populates the column by hand; only a live read could.
+RESOLVED_FIELDS = ("assignee", "statuscategorychangedate")
 
 
 def _jql_status_list(statuses: tuple[str, ...]) -> str:

@@ -13,6 +13,7 @@ page writes is captured and asserted on as HTML.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from urllib.parse import unquote
 
 import pandas as pd
 
@@ -558,3 +559,149 @@ def test_role_filter_narrows_the_table_and_all_roles_restores_it(monkeypatch):
 def test_the_page_renders_end_to_end_on_an_empty_frame_without_raising(monkeypatch):
     html_out = _render_page(monkeypatch, pd.DataFrame(), data={})
     assert "People" in html_out
+
+
+def _one_event_frame() -> pd.DataFrame:
+    """A single, structurally complete changelog event.
+
+    ``_evidence_rows`` only needs ``combined_events`` to be non-empty and
+    well-shaped - the credited count itself is stubbed in these tests - but
+    ``estimate_churn`` reads ``ts`` on the way past, so the row carries every
+    column ``integrity.EVENT_COLUMNS`` declares rather than just a key.
+    """
+    return integrity.changelog_events(
+        [
+            {
+                "key": "VV-100",
+                "changelog": {
+                    "histories": [
+                        {
+                            "id": "1",
+                            "created": "2026-08-01T09:00:00.000+0000",
+                            "author": {"accountId": "acc-priya", "displayName": "Priya Shah"},
+                            "items": [
+                                {
+                                    "field": "status",
+                                    "fieldId": "status",
+                                    "fromString": "In Progress",
+                                    "toString": "Review in Staging",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            }
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# The window the page reads has to be the window the page scores over.
+# ---------------------------------------------------------------------------
+
+
+def test_the_page_reads_ninety_days_not_the_bundles_thirty(monkeypatch):
+    """``_credited_map(..., 90.0)`` needs 90 days of changelog to read.
+
+    The bundle's opening read carries ``resolved_30``. Handing it to a 90-day
+    window does not raise - it silently omits every resolution 31 to 90 days
+    old, so a prior-period pace reads as zero and a rate measured against
+    zero reads as perfect. The page takes its own wider read instead.
+    """
+    wide = pd.DataFrame([{"key": "VV-9", "assignee": "alice"}])
+    calls: dict = {}
+
+    def _fake_fetch(days: int = 90) -> pd.DataFrame:
+        calls["days"] = days
+        return wide
+
+    monkeypatch.setattr(people_page, "_fetch_resolved_window", _fake_fetch)
+    bundle = SimpleNamespace(data={"resolved_30": pd.DataFrame([{"key": "VV-1"}])})
+
+    out = people_page._resolved_window_or_bundle(bundle)
+    assert calls["days"] == 90
+    assert list(out["key"]) == ["VV-9"]
+
+
+def test_an_unreachable_wider_read_falls_back_to_the_bundle_not_to_empty(monkeypatch):
+    """Failing to an empty frame would zero every credited count on the page.
+
+    The fallback is narrower than the window that reads it - which is the
+    flaw being fixed - but it is the safe direction to fail in: an
+    understated count, never an invented one.
+    """
+    narrow = pd.DataFrame([{"key": "VV-1", "assignee": "alice"}])
+
+    def _boom(days: int = 90) -> pd.DataFrame:
+        raise RuntimeError("Jira unreachable")
+
+    monkeypatch.setattr(people_page, "_fetch_resolved_window", _boom)
+    bundle = SimpleNamespace(data={"resolved_30": narrow})
+
+    out = people_page._resolved_window_or_bundle(bundle)
+    assert list(out["key"]) == ["VV-1"]
+
+
+def test_an_empty_wider_read_also_falls_back(monkeypatch):
+    narrow = pd.DataFrame([{"key": "VV-1", "assignee": "alice"}])
+    monkeypatch.setattr(people_page, "_fetch_resolved_window", lambda days=90: pd.DataFrame())
+    bundle = SimpleNamespace(data={"resolved_30": narrow})
+    assert list(people_page._resolved_window_or_bundle(bundle)["key"]) == ["VV-1"]
+
+
+# ---------------------------------------------------------------------------
+# The evidence link has to select the tickets the count counted.
+# ---------------------------------------------------------------------------
+
+
+def test_the_resolved_evidence_link_lists_the_credited_keys(monkeypatch):
+    """The count is changelog-credited; the link has to be too.
+
+    ``assignee = person AND resolutiondate >= -90d`` selects a different
+    population twice over: it reads the current assignee - the field the
+    credit fix exists to stop trusting - and it reads Jira's
+    ``resolutiondate``, which a move into "Review in Staging" never sets even
+    though this team counts that as resolved. Listing the credited keys is
+    the only query that returns exactly what was counted.
+    """
+    by_person = pd.DataFrame(
+        [{"person": "Priya Shah", "credited_resolutions": 2, "keys": "VV-100, VV-101"}]
+    )
+    monkeypatch.setattr(people_page, "_credited_by_person", lambda *a, **k: by_person)
+
+    roster = roles.load_roster()
+    rows = people_page._evidence_rows(
+        person="Priya Shah",
+        roster=roster,
+        prs=pd.DataFrame(),
+        combined_events=_one_event_frame(),
+        resolved_tickets=pd.DataFrame(),
+        browse_base="https://example.atlassian.net",
+        github_org=None,
+    )
+    label, value, url = next(r for r in rows if "resolved" in r[0].lower())
+    assert value == "2"
+    decoded = unquote(url)
+    assert "key IN (VV-100, VV-101)" in decoded
+    assert "assignee" not in decoded
+
+
+def test_the_resolved_evidence_link_stays_an_honest_query_when_nothing_is_credited(monkeypatch):
+    """No credited keys means no key list to build - not an empty IN () clause."""
+    monkeypatch.setattr(
+        people_page,
+        "_credited_by_person",
+        lambda *a, **k: pd.DataFrame(columns=["person", "credited_resolutions", "keys"]),
+    )
+    rows = people_page._evidence_rows(
+        person="Priya Shah",
+        roster=roles.load_roster(),
+        prs=pd.DataFrame(),
+        combined_events=_one_event_frame(),
+        resolved_tickets=pd.DataFrame(),
+        browse_base="https://example.atlassian.net",
+        github_org=None,
+    )
+    label, value, url = next(r for r in rows if "resolved" in r[0].lower())
+    assert value == "0"
+    assert "IN ()" not in unquote(url)

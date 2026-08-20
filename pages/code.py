@@ -397,40 +397,24 @@ def _extended_pr_pool(token: str | None, org: str | None) -> tuple[pd.DataFrame,
     return _extended_pr_pool_cached(token, org)
 
 
-def _pr_url_lookup(pool: pd.DataFrame) -> dict[int, str]:
-    """First known URL per PR number in ``pool``.
+def _pr_evidence_html(refs: tuple) -> str:
+    """Linked PR numbers for one reviewer's unprompted-review evidence.
 
-    ``pr_quality.unprompted_reviews`` hands back PR numbers as evidence, not
-    URLs — it has no reason to carry a URL column itself. This is the join
-    back to one, built from the same pool the numbers came from. A PR number
-    can repeat across repos; the first URL seen for a number wins, so a
-    reader should take a linked number as "here is *a* matching PR", not
-    proof there is only one.
+    ``refs`` is ``pr_quality.unprompted_reviews``' ``pr_refs`` column:
+    ``(number, url)`` pairs, each URL taken from the row the review was
+    actually found on. There used to be a number-to-URL lookup built here
+    instead, which was wrong in a way nobody would notice - a PR number is
+    unique within a repository, not across an org, so two repos each with a
+    #42 gave one of them a link to the other's PR. The pair carries its own
+    identity, so there is no lookup left to get wrong.
     """
-    if pool.empty or "number" not in pool.columns or "url" not in pool.columns:
-        return {}
-    lookup: dict[int, str] = {}
-    for number, url in zip(pool["number"], pool["url"]):
-        if pd.isna(number) or not url:
-            continue
-        try:
-            n = int(number)
-        except (TypeError, ValueError):
-            continue
-        lookup.setdefault(n, str(url))
-    return lookup
-
-
-def _pr_evidence_html(numbers: tuple, url_lookup: dict[int, str]) -> str:
-    """Linked PR numbers for one reviewer's unprompted-review evidence."""
-    if not numbers:
+    if refs is None or len(refs) == 0:
         return '<span class="dim">none</span>'
     parts = []
-    for n in numbers:
-        n_int = int(n)
-        url = url_lookup.get(n_int)
+    for number, url in refs:
+        n_int = int(number)
         if url:
-            parts.append(f'<a href="{html.escape(url)}">#{n_int}</a>')
+            parts.append(f'<a href="{html.escape(str(url))}">#{n_int}</a>')
         else:
             parts.append(f"#{n_int}")
     return ", ".join(parts)
@@ -462,7 +446,6 @@ def _render_unprompted_reviews(pool: pd.DataFrame) -> None:
             "PR payload (GITHUB_EXTENDED_PR_DATA=1)."
         )
         return
-    url_lookup = _pr_url_lookup(pool)
     columns = [
         theme_html.Column("Reviewer"),
         theme_html.Column("Unprompted", kind="strong-num"),
@@ -485,7 +468,7 @@ def _render_unprompted_reviews(pool: pd.DataFrame) -> None:
             [
                 theme_html.Cell(row.reviewer),
                 theme_html.Cell(row.unprompted_reviews),
-                theme_html.Cell(_pr_evidence_html(row.prs, url_lookup)),
+                theme_html.Cell(_pr_evidence_html(row.pr_refs)),
                 theme_html.Cell(partner),
             ]
         )

@@ -598,6 +598,11 @@ def unprompted_reviews(
     approval loop reciprocity already looks for, not proactivity, and the
     two should never be read apart.
 
+    Evidence travels twice: ``prs`` is the distinct PR numbers, and ``pr_refs``
+    the same PRs as ``(number, url)`` pairs. A PR number is unique only within
+    one repository, so ``pr_refs`` is what a link should be built from; ``prs``
+    is for counting and for display where the repo is already established.
+
     Blind spot: this needs the extended timeline payload
     (``timeline_events``/``extended_fetched`` from :mod:`github_client`'s
     extended query). A PR fetched on the lean or detail payload contributes
@@ -609,6 +614,7 @@ def unprompted_reviews(
         "reviewer",
         "unprompted_reviews",
         "prs",
+        "pr_refs",
         "top_partner",
         "top_partner_share",
         "concentration",
@@ -647,7 +653,13 @@ def unprompted_reviews(
             asked = requested_at.get(reviewer, [])
             prompted = any(at <= submitted for at in asked)
             if not prompted:
-                rows.append({"reviewer": reviewer, "number": row.get("number")})
+                rows.append(
+                    {
+                        "reviewer": reviewer,
+                        "number": row.get("number"),
+                        "url": row.get("url"),
+                    }
+                )
     if not rows:
         return _empty(columns)
 
@@ -661,6 +673,25 @@ def unprompted_reviews(
             ),
         }
     ).reset_index()
+    # ``pr_refs`` is the same evidence keyed the way GitHub actually identifies a
+    # PR. ``prs`` collapses on the number alone, which is unique only inside one
+    # repository: two repos both having a #42 is ordinary, and a reader following
+    # a bare number can land on the wrong PR entirely. Carrying the URL from the
+    # row the review was found on removes the guess - nothing downstream has to
+    # resolve a number back to a URL, so nothing downstream can resolve it wrong.
+    refs = {
+        reviewer: tuple(
+            sorted(
+                {
+                    (int(number), str(url))
+                    for number, url in zip(group["number"], group["url"])
+                    if pd.notna(number) and url
+                }
+            )
+        )
+        for reviewer, group in detail.groupby("reviewer", dropna=False)
+    }
+    out["pr_refs"] = out["reviewer"].map(refs)
 
     _, by_person = reciprocity(prs, reviewer_patterns)
     out = out.merge(

@@ -239,16 +239,53 @@ def test_unprompted_reviews_has_per_person_counts_and_linked_pr_evidence():
     assert list(out["reviewer"]) == ["bob"]
     assert int(out.loc[0, "unprompted_reviews"]) == 1
     assert out.loc[0, "prs"] == (11,)
+    assert out.loc[0, "pr_refs"] == ((11, "https://github.com/o/r/pull/11"),)
 
-    url_lookup = code_page._pr_url_lookup(pool)
-    assert url_lookup == {11: "https://github.com/o/r/pull/11"}
-    evidence = code_page._pr_evidence_html(out.loc[0, "prs"], url_lookup)
+    evidence = code_page._pr_evidence_html(out.loc[0, "pr_refs"])
     assert '<a href="https://github.com/o/r/pull/11">#11</a>' in evidence
 
 
+def test_the_same_pr_number_in_two_repos_links_to_each_repos_own_pr():
+    """A PR number is unique inside a repo, not across an org.
+
+    Both PRs below are #42, in different repositories, both reviewed
+    unprompted by the same person. The evidence has to carry two links to
+    two different URLs. Resolving a bare number to "the first #42 we saw"
+    - which is what this column used to do - sends a reader to the wrong
+    repository's PR and shows one row where there are two.
+    """
+    def unprompted_pr(repo: str, author: str) -> dict:
+        return {
+            "number": 42,
+            "url": f"https://github.com/o/{repo}/pull/42",
+            "author": author,
+            "reviews": [
+                {
+                    "reviewer": "bob",
+                    "state": "APPROVED",
+                    "submitted_at": "2026-08-01T09:00:00Z",
+                    "body": "",
+                }
+            ],
+            "timeline_events": [],
+        }
+
+    pool = pd.DataFrame([unprompted_pr("api", "alice"), unprompted_pr("web", "carol")])
+    out = code_page._unprompted_reviews_rows(pool)
+    assert int(out.loc[0, "unprompted_reviews"]) == 2
+    assert out.loc[0, "pr_refs"] == (
+        (42, "https://github.com/o/api/pull/42"),
+        (42, "https://github.com/o/web/pull/42"),
+    )
+
+    evidence = code_page._pr_evidence_html(out.loc[0, "pr_refs"])
+    assert '<a href="https://github.com/o/api/pull/42">#42</a>' in evidence
+    assert '<a href="https://github.com/o/web/pull/42">#42</a>' in evidence
+
+
 def test_evidence_falls_back_to_a_bare_number_when_the_url_is_unknown():
-    assert code_page._pr_evidence_html((5,), {}) == "#5"
-    assert "none" in code_page._pr_evidence_html((), {})
+    assert code_page._pr_evidence_html(((5, ""),)) == "#5"
+    assert "none" in code_page._pr_evidence_html(())
 
 
 def test_unprompted_reviews_column_renders_an_honest_empty_state(monkeypatch):

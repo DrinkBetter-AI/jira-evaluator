@@ -805,6 +805,54 @@ def test_a_label_only_edit_does_not_drop_a_ticket_out_of_the_stale_queue():
     assert "avg_status_age_days" not in rollup_no_events.columns
 
 
+def test_a_rollup_that_fell_back_to_idle_days_does_not_label_them_status_age(monkeypatch):
+    """Events present is not the same as status ages derivable.
+
+    ``_staleness_days`` falls back to ``idle_days`` whenever it cannot line a
+    ``status_age_days`` frame up with the board, and signals that by returning
+    ``masked_days`` as None. The rollup used to gate its status-age columns on
+    "were events passed in" instead, so on the fallback it returned
+    ``avg_status_age_days`` filled with idle days and ``avg_masked_days``
+    all-NaN beside it - idle days under a column named for status age, which
+    is the exact substitution this module exists to make impossible.
+
+    Reaching the fallback on a keyed board takes a stub: ``status_age_days``
+    returns one row per ticket for any board carrying ``key``, so today the
+    mismatch only happens on a keyless frame, which ``assignee_rollup``'s own
+    ``("key", "count")`` aggregation cannot process anyway. The gate is
+    therefore defensive rather than a live bug being closed - but it is gated
+    on the signal that means what it says.
+    """
+    board = pd.DataFrame(
+        [
+            {
+                "key": "VV-80",
+                "assignee": "Ana",
+                "status": "In Progress",
+                "priority": "High",
+                "idle_days": 42.0,
+                "ticket_age_days": 60.0,
+                "carry_over_count": 0.0,
+            }
+        ]
+    )
+    events = integrity.changelog_events(
+        [issue("VV-80", history(when(3), "Ana", status("To Do", "In Progress")))]
+    )
+    scored = prioritization.add_priority_score(board, events)
+
+    # The mismatch _staleness_days guards against, forced.
+    monkeypatch.setattr(prioritization.integrity, "status_age_days", lambda *a, **k: pd.DataFrame())
+    rollup = prioritization.assignee_rollup(scored, events)
+
+    assert not rollup.empty
+    assert "avg_status_age_days" not in rollup.columns
+    assert "max_status_age_days" not in rollup.columns
+    assert "avg_masked_days" not in rollup.columns
+    # The idle-day columns are still there, still honest about what they are.
+    assert rollup[rollup["assignee"] == "Ana"].iloc[0]["avg_idle_days"] == 42.0
+
+
 # --------------------------------------------------------------------------
 # 9. Resolution credit: the changelog author, not the current assignee
 # --------------------------------------------------------------------------
