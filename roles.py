@@ -18,7 +18,8 @@ silent pass-through - for any role string it doesn't recognise, and
 ``JIRA_ROLES`` at collection time, so a role key added to the env without a
 rubric decision fails the build instead of failing silently in production.
 
-Defaults are baked in from ``roles_template.env`` (regenerated 19 Aug 2026)
+Defaults are baked in from ``roles_template.env`` (regenerated 20 Aug 2026
+from the org-chart upload)
 as literal strings below, because the Cloud Run env vars for this app have
 not been set - that is the actual deployed state today, not a hypothetical -
 and the dashboard has to be correct anyway. Each of the four env vars falls
@@ -34,8 +35,8 @@ from dataclasses import dataclass, field
 from typing import Mapping
 
 # ---------------------------------------------------------------------------
-# Baked-in defaults, copied verbatim from roles_template.env (19 Aug 2026
-# regen). Not read from disk at runtime - a missing or stale file on a
+# Baked-in defaults, copied verbatim from roles_template.env (20 Aug 2026
+# regen, org-chart upload). Not read from disk at runtime - a missing or stale file on a
 # deploy target must not be able to blank out the roster.
 # ---------------------------------------------------------------------------
 
@@ -48,10 +49,10 @@ _DEFAULT_JIRA_ROLES = (
     "platform=Tam;backend=Shawn;frontend=Mohsen Davoudi,David;"
     "frontend-mobile=Farid Shahidi;mobile=Ali;"
     "crm-backend=Jal Haidar,Anouar Kacem;qa-automated=Santi Caamaño;"
-    "qa-manual=Dina QA;ai-recommendation=Mehdi Ordikhani;"
+    "qa-manual=Dina QA;ai-recommendation=Mehdi Ordikhani,Shiva Naduvin;"
     "infrastructure=Gaston;designer=Robert Surpateanu,Alesya Kasovich;"
     "pm=Mihai Manea;seo=Igor Taborsak;"
-    "wine=Evmorfia Kostaki,Matthew,Sylvia;advisor=zoe;"
+    "wine=Evmorfia Kostaki,Matthew,Sylvia;advisor=zoe,Jim;"
     "exec=Angel Vossough,Arsalan"
 )
 

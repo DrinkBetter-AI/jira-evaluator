@@ -1,9 +1,10 @@
-# Roster — confirmed by Angel, 16 Aug 2026
+# Roster — confirmed by Angel, 16 Aug 2026; titles updated 20 Aug 2026 from
+# the org-chart upload CSV ("VinoVoss -Org Chart Upload-v1")
 
 Source of truth for `JIRA_ROLES` and `GITHUB_LOGIN_MAP` until moved into env.
-Everyone is hourly **except** Angel (CEO) and Arsalan (CTO).
+Everyone is hourly **except** Angel (CEO) and Arsalan (CPO, ex-CTO).
 
-## Active — engineering (12)
+## Active — engineering (13)
 
 | Person | Role | Notes |
 |---|---|---|
@@ -17,6 +18,7 @@ Everyone is hourly **except** Angel (CEO) and Arsalan (CTO).
 | Anouar Kacem | CRM/Medusa backend (marketplace) | Tunisia · GitHub **anouar-source** (confirmed) |
 | Santi Caamaño | QA — automated | Uruguay · transparency concern (Angel) · GitHub **SantiVinoVoss** (confirmed) |
 | Mehdi Ordikhani | AI recommendation (ML team) | very expensive/hr · GitHub **Morse-vv** (confirmed) |
+| Shiva Naduvin | AI recommendation (ML team) | Senior ML Engineer (org chart 20 Aug) · no GitHub login mapped yet — confirm |
 | Gaston | infrastructure | expensive/hr · padding concern (Angel) · GitHub **gsalgado-cloudacio** (confirmed) |
 | Dina QA | QA — manual | Vietnam · cheap, very good |
 
@@ -24,16 +26,18 @@ Everyone is hourly **except** Angel (CEO) and Arsalan (CTO).
 
 | Person | Role | Notes |
 |---|---|---|
-| Mihai Manea | PM — all boards (ML/Marketplace/App/Mobile) | owns the departed-staff cleanup below |
-| Robert Surpateanu | designer | very expensive/hr · GitHub **robertsurpe** (confirmed) |
-| Alesya Kasovich | designer | cheap/hr |
-| Igor Taborsak | SEO | |
-| Evmorfia Kostaki, Matthew, Sylvia | wine experts team | |
-| zoe | advisor | |
-| Jim | ML advisor | not in Jira assignee data |
-| Praveen Rai | biz dev | super expensive/hr · **the only person not on Clockify** |
+| Mihai Manea | PM — all boards (ML/Marketplace/App/Mobile) | title now **Operations Manager** (org chart 20 Aug); keeps the `pm` rubric · owns the departed-staff cleanup below |
+| Robert Surpateanu | designer | UI\|UX Specialist · very expensive/hr · GitHub **robertsurpe** (confirmed) |
+| Alesya Kasovich | designer | UI/UX designer · cheap/hr · org chart spells the surname **Kosovich**; Jira display name kept here |
+| Igor Taborsak | SEO | SEO Specialist |
+| Evmorfia Kostaki, Matthew Cocks, Sylvia (Shan) Ba | wine experts team | Jira display names remain `Matthew`, `Sylvia` |
+| zoe (Zohreh Karimi) | advisor | Product Marketing Advisor |
+| Jim (Jinxing) Cheng | advisor | Technical Advisor (org chart 20 Aug) · listed as `Jim` under `advisor` · not in Jira assignee data |
+| Praveen Rai | biz dev — Head of Business Development | super expensive/hr · **the only person not on Clockify** · no matching role key, stays out of `JIRA_ROLES` |
+| Jason Yocum | Fractional CFO | org chart 20 Aug · no Jira presence, not in `JIRA_ROLES` |
+| Jeff Huber | Board member | org chart 20 Aug · no Jira presence, not in `JIRA_ROLES` |
 | Angel Vossough | CEO | GitHub **avosmod8** (confirmed) — #2 producer, 132 merged/30d · exempt |
-| Arsalan | CTO | GitHub **arsalanvm** (confirmed) · exempt from hourly-incentive metrics |
+| Arsalan | CPO (ex-CTO, org chart 20 Aug) | GitHub **arsalanvm** (confirmed) · exempt from hourly-incentive metrics |
 
 ## Former / inactive — 21 names still present in board data
 
@@ -74,7 +78,7 @@ former staff or service accounts, confirm or retire their access. `VossQABot`,
 ## Env values (paste-ready; unconfirmed logins marked)
 
 ```
-JIRA_ROLES="platform=Tam;backend=Shawn;frontend=Mohsen Davoudi,David;frontend-mobile=Farid Shahidi;mobile=Ali;crm-backend=Jal Haidar,Anouar Kacem;qa-automated=Santi Caamaño;qa-manual=Dina QA;ai-recommendation=Mehdi Ordikhani;infrastructure=Gaston;designer=Robert Surpateanu,Alesya Kasovich;pm=Mihai Manea;seo=Igor Taborsak;wine=Evmorfia Kostaki,Matthew,Sylvia;advisor=zoe;exec=Angel Vossough,Arsalan"
+JIRA_ROLES="platform=Tam;backend=Shawn;frontend=Mohsen Davoudi,David;frontend-mobile=Farid Shahidi;mobile=Ali;crm-backend=Jal Haidar,Anouar Kacem;qa-automated=Santi Caamaño;qa-manual=Dina QA;ai-recommendation=Mehdi Ordikhani,Shiva Naduvin;infrastructure=Gaston;designer=Robert Surpateanu,Alesya Kasovich;pm=Mihai Manea;seo=Igor Taborsak;wine=Evmorfia Kostaki,Matthew,Sylvia;advisor=zoe,Jim;exec=Angel Vossough,Arsalan"
 
 GITHUB_LOGIN_MAP="Tam=Phelan164;Shawn=tungph;David=ahref13;Mehdi Ordikhani=Morse-vv;Angel Vossough=avosmod8;Arsalan=arsalanvm;Mohsen Davoudi=MohsenStack;Farid Shahidi=faridsh69;Ali=alivinovoss;Jal Haidar=jal-vino;Anouar Kacem=anouar-source;Santi Caamaño=SantiVinoVoss;Gaston=gsalgado-cloudacio;Robert Surpateanu=robertsurpe"  # all confirmed by Angel 16 Aug 2026
 ```
@@ -92,7 +96,8 @@ GITHUB_LOGIN_MAP="Tam=Phelan164;Shawn=tungph;David=ahref13;Mehdi Ordikhani=Morse
    infrastructure (Gaston — infra work rarely maps to tickets/PRs one-to-one, so
    his rubric leans on estimate accuracy and hours-vs-delivery, exactly the
    padding checks).
-4. **Scorecard population is 12 engineers + 2 designers + PM + QA** — small
+4. **Scorecard population is 13 engineers + 2 designers + PM + QA** (Shiva
+   added 20 Aug from the org chart) — small
    enough that peer-relative components need care (min 3 peers per role family;
    fold frontend+mobile for comparison purposes).
 5. Angel and Arsalan appear in output charts but are exempt from
