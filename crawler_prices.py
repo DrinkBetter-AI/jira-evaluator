@@ -68,9 +68,10 @@ def _volume(offer: dict) -> int | None:
 def _amount(offer: dict) -> float | None:
     """Read a price that can be compared as a number."""
     try:
-        return float(offer.get("amount"))
+        amount = float(offer.get("amount"))
     except (TypeError, ValueError):
         return None
+    return amount if amount > 0 else None
 
 
 def _empty_listings() -> pd.DataFrame:

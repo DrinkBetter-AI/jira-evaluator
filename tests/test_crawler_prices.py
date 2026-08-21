@@ -52,6 +52,7 @@ def test_filters_merchant_and_volume_and_keeps_cheapest_single_offer():
                     offer("Capital Fine Wine", 4.0),
                     offer("Yianniswinery.com", 19.0),
                     offer("Yiannis Wine Shop", 17.0),
+                    offer("Yianniswinery.com", 0.0),
                     offer("Yianniswinery.com", 9.0, volume_ml=1500),
                 ],
                 _dt.datetime(2026, 8, 21, 17, tzinfo=UTC),
