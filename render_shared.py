@@ -4922,6 +4922,9 @@ def _clear_page_caches(page_title: str) -> None:
             # And what Vivino charges for the same wines: the whole point of a
             # Refresh after a merchant says they have fixed a price there.
             business._vivino_comparison_cached,
+            # The daily crawl refreshes with the rest of the Vivino comparison.
+            business._crawled_comparison_cached,
+            business._crawled_shop_cached,
         )
         for cached in business_caches:
             cached.clear()
@@ -4964,5 +4967,4 @@ def _clear_page_caches(page_title: str) -> None:
         # button was just asked to make stale.
         _delete_board_snapshot()
     logger.info("Cleared cached reads for the %s page", page_title)
-
 

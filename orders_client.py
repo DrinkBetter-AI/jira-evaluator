@@ -166,7 +166,7 @@ def load_medusa_env() -> DbConfig | None:
     )
 
 
-def _connect(config: DbConfig):
+def _connect(config: DbConfig, purpose: str = "order database"):
     """A read-only connection, or a message naming what to fix."""
     try:
         connection = psycopg2.connect(
@@ -180,7 +180,7 @@ def _connect(config: DbConfig):
         )
     except psycopg2.OperationalError as exc:
         raise MedusaConfigError(
-            f"Could not reach the order database at {config.label}: "
+            f"Could not reach the {purpose} at {config.label}: "
             f"{str(exc).strip()} "
             "The host is private to the VPC, so a Cloud Run revision needs "
             "direct VPC egress (--network=default --subnet=default) to see it."
@@ -189,6 +189,11 @@ def _connect(config: DbConfig):
     # cannot become an UPDATE against the shop's order book.
     connection.set_session(readonly=True, autocommit=True)
     return connection
+
+
+def connect_readonly(config: DbConfig, purpose: str = "order database"):
+    """Open the shared read-only connection with an error named for its reader."""
+    return _connect(config, purpose=purpose)
 
 
 def _frame(connection, sql: str, params: dict) -> pd.DataFrame:
@@ -725,6 +730,7 @@ __all__ = [
     "MedusaConfigError",
     "OrderBook",
     "PAID_PAYMENT_STATUSES",
+    "connect_readonly",
     "fetch_catalog",
     "fetch_offer_handles",
     "fetch_offer_sales",

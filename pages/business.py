@@ -19,7 +19,7 @@ import re
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from collections.abc import Sequence
 from typing import Any, Callable, NamedTuple
@@ -106,6 +106,7 @@ import cost_client
 import amplitude_client
 import merchant_client
 import merchant_letter
+import crawler_prices
 import vivino_client
 import orders
 import orders_client
@@ -995,20 +996,28 @@ def _one_merchant(
 # day rather than repeated on every rerun; the refresh button clears it with
 # the other reads.
 _VIVINO_TTL_SECONDS = 24 * 3600
+_CRAWLER_TTL_SECONDS = 3600
 
 
-@read_log.logged_read("app._vivino_comparison_cached")
-@st.cache_data(ttl=_VIVINO_TTL_SECONDS, show_spinner=False)
-def _vivino_comparison_cached(
-    source: str, merchant: str, slug: str
-) -> vivino_client.Comparison:
-    """One merchant's Vivino prices against their prices here, matched wine by wine."""
+@read_log.logged_read("app._crawled_shop_cached")
+@st.cache_data(ttl=_CRAWLER_TTL_SECONDS, show_spinner=False)
+def _crawled_shop_cached(
+    source: str, slug: str
+) -> vivino_client.Shop | None:
+    """Keep the quick daily read separate from the button-gated live fallback."""
     read_log.mark_executed()
     config = orders_client.load_medusa_env()
     if config is None or config.label != source:
         raise orders_client.MedusaConfigError(
             "The order database configuration changed while it was being read."
         )
+    return crawler_prices.fetch_crawled_shop(config, slug)
+
+
+def _vivino_ours(
+    config: orders_client.DbConfig, merchant: str
+) -> pd.DataFrame:
+    """Read one merchant's own catalogue for either Vivino comparison path."""
     prefixes = orders_client.fetch_stores(config)
     # Live store prefixes are merged in after configured aliases, so the last
     # match is the current one; no match at all is a naming problem to report,
@@ -1027,7 +1036,45 @@ def _vivino_comparison_cached(
         orders_client.fetch_catalog(config, prefix, others=others)
         for prefix in matching
     ]
-    ours = pd.concat(pieces, ignore_index=True)
+    return pd.concat(pieces, ignore_index=True)
+
+
+@read_log.logged_read("app._crawled_comparison_cached")
+@st.cache_data(ttl=_CRAWLER_TTL_SECONDS, show_spinner=False)
+def _crawled_comparison_cached(
+    source: str, merchant: str, slug: str
+) -> vivino_client.Comparison | None:
+    """Compare the fast daily crawl, or return none when its merchant is absent."""
+    read_log.mark_executed()
+    config = orders_client.load_medusa_env()
+    if config is None or config.label != source:
+        raise orders_client.MedusaConfigError(
+            "The order database configuration changed while it was being read."
+        )
+    ours = _vivino_ours(config, merchant)
+    crawled = _crawled_shop_cached(source, slug)
+    if crawled is None:
+        return None
+    return replace(
+        vivino_client.compare(ours, crawled),
+        crawled_at=crawled.crawled_at,
+        from_crawler=True,
+    )
+
+
+@read_log.logged_read("app._vivino_comparison_cached")
+@st.cache_data(ttl=_VIVINO_TTL_SECONDS, show_spinner=False)
+def _vivino_comparison_cached(
+    source: str, merchant: str, slug: str
+) -> vivino_client.Comparison:
+    """One merchant's Vivino prices against their prices here, matched wine by wine."""
+    read_log.mark_executed()
+    config = orders_client.load_medusa_env()
+    if config is None or config.label != source:
+        raise orders_client.MedusaConfigError(
+            "The order database configuration changed while it was being read."
+        )
+    ours = _vivino_ours(config, merchant)
     shop = vivino_client.fetch_shop(slug)
     return vivino_client.compare(ours, shop)
 
@@ -1088,54 +1135,96 @@ def _render_vivino(chosen: str, picker: bool = True) -> None:
             + "; if they open one, add it to VIVINO_SHOPS in vivino_client.py."
         )
         return
-    # The read walks the shop's Vivino listings page by page and can take
-    # minutes, and every tab's body runs whether or not it is the one open -
-    # so it starts on a press, not on a merchant being picked for another tab.
-    # The read this session already made is held here with its result, so the
-    # gate cannot outlive what it stands for: the shared cache expiring or
-    # being refreshed elsewhere never restarts the pull without the button.
+    # The daily crawler is quick enough to try on every rerun. Only the live
+    # page-by-page read is held in session state, because it can take minutes
+    # and should not restart when the shared cache is refreshed elsewhere.
     reads = st.session_state.setdefault("vivino_reads", {})
-    held = reads.get(slug)
-    if held and time.time() - held[0] < _VIVINO_TTL_SECONDS:
-        result = held[1]
-    else:
-        reads.pop(slug, None)
-        if not st.button(
-            f"Read {chosen}'s Vivino shop (takes a few minutes)",
-            key="vivino_read",
-        ):
-            st.caption(
-                "Their whole Vivino shop is read page by page and matched to "
-                "their prices here by wine name and vintage, single 0.75l "
-                "bottles only. Kept for a day once read."
+    crawler_unavailable = False
+    try:
+        result = _crawled_comparison_cached(config.label, chosen, slug)
+    except Exception as exc:  # noqa: BLE001 - the live fallback stays available
+        st.warning(f"Could not read crawler Vivino prices: {str(exc)[:300]}")
+        result = None
+        crawler_unavailable = True
+
+    if result is None:
+        held = reads.get(slug)
+        if held and time.time() - held[0] < _VIVINO_TTL_SECONDS:
+            result = replace(
+                held[1],
+                crawler_missing=not crawler_unavailable,
+                crawler_unavailable=crawler_unavailable,
             )
-            return
-        try:
-            with st.spinner(f"Reading {chosen}'s Vivino shop, page by page..."):
-                result = _vivino_comparison_cached(config.label, chosen, slug)
-        except Exception as exc:  # noqa: BLE001 - a bad reply stays in this tab
-            # Not recorded as read: a failure would otherwise restart the
-            # minutes-long pull on every rerun instead of waiting for the button.
-            if _vivino_blocked(exc):
-                # 403 from Vivino is not a bug in this page - it is Vivino's
-                # shared-egress block, permanent until VIVINO_PROXY names a
-                # host Vivino answers - and a raw exception dump reads as one.
-                # Saying "unavailable" plainly is honest where a stack trace
-                # is not: nothing here failed, Vivino refused the request.
-                st.info(
-                    "Their Vivino price: unavailable — Vivino blocks our "
-                    "requests. This is a known, permanent limit for this "
-                    "deployment's egress, not a fault in the page; set "
-                    "VIVINO_PROXY to a forward proxy Vivino will answer to "
-                    "compare here."
+        else:
+            reads.pop(slug, None)
+            if not st.button(
+                f"Read {chosen}'s Vivino shop (takes a few minutes)",
+                key="vivino_read",
+            ):
+                st.caption(
+                    "Their whole Vivino shop is read page by page and matched to "
+                    "their prices here by wine name and vintage, single 0.75l "
+                    "bottles only. "
+                    + (
+                        "The daily crawler is unavailable; the live read is "
+                        "kept behind this button."
+                        if crawler_unavailable
+                        else "The daily crawler has no rows for this merchant "
+                        "yet; the live read is kept behind this button."
+                    )
                 )
-            else:
-                st.warning(f"Could not compare their Vivino prices: {str(exc)[:300]}")
-            return
-        reads[slug] = (time.time(), result)
+                return
+            try:
+                with st.spinner(f"Reading {chosen}'s Vivino shop, page by page..."):
+                    live = _vivino_comparison_cached(config.label, chosen, slug)
+            except Exception as exc:  # noqa: BLE001 - a bad reply stays in this tab
+                # Not recorded as read: a failure would otherwise restart the
+                # minutes-long pull on every rerun instead of waiting for the button.
+                if _vivino_blocked(exc):
+                    # 403 from Vivino is not a bug in this page - it is Vivino's
+                    # shared-egress block, permanent until VIVINO_PROXY names a
+                    # host Vivino answers - and a raw exception dump reads as one.
+                    # Saying "unavailable" plainly is honest where a stack trace
+                    # is not: nothing here failed, Vivino refused the request.
+                    st.info(
+                        "Their Vivino price: unavailable — Vivino blocks our "
+                        "requests. This is a known, permanent limit for this "
+                        "deployment's egress, not a fault in the page; set "
+                        "VIVINO_PROXY to a forward proxy Vivino will answer to "
+                        "compare here."
+                    )
+                else:
+                    st.warning(f"Could not compare their Vivino prices: {str(exc)[:300]}")
+                return
+            result = replace(
+                live,
+                crawler_missing=not crawler_unavailable,
+                crawler_unavailable=crawler_unavailable,
+            )
+            reads[slug] = (time.time(), result)
 
     for line in vivino_client.verdicts(chosen, result):
         st.markdown(line)
+    if result.from_crawler:
+        if result.crawled_at is not None:
+            crawled_at = result.crawled_at
+            if crawled_at.tzinfo is None:
+                crawled_at = crawled_at.replace(tzinfo=_dt.timezone.utc)
+            crawled_at = crawled_at.astimezone(_dt.timezone.utc)
+            freshness = crawled_at.strftime("%Y-%m-%d %H:%M UTC")
+            st.caption(f"Prices from the daily Vivino crawl, last crawled {freshness}.")
+        else:
+            st.caption("Prices from the daily Vivino crawl; crawl freshness was unavailable.")
+    elif result.crawler_missing:
+        st.caption(
+            f"The daily Vivino crawl has no rows for {chosen} yet; "
+            "showing today's live Vivino read."
+        )
+    elif result.crawler_unavailable:
+        st.caption(
+            "The daily Vivino crawl was unavailable; showing today's live "
+            "Vivino read."
+        )
     if not result.matched:
         return
 

@@ -12,6 +12,7 @@ same ones a browser makes opening the shop's public page.
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import re
 import time
@@ -80,6 +81,7 @@ class Shop:
     listed: int  # what Vivino says the shop holds, matched or not
     complete: bool  # False when the request budget ran out first
     packs: int = 0  # wines offered only per bottle of a 3/6/12 pack
+    crawled_at: _dt.datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,10 @@ class Comparison:
     unmatched_ours: int = 0
     ours_counted: int = 0  # our own comparable bottles, matched or not
     packs: int = 0  # Vivino wines left out because their price needs a pack
+    crawled_at: _dt.datetime | None = None
+    from_crawler: bool = False
+    crawler_missing: bool = False
+    crawler_unavailable: bool = False
 
     @property
     def matched(self) -> int:
