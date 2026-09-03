@@ -1496,57 +1496,60 @@ _ENGINEERING_BUNDLE_TTL_SECONDS = 300.0
 # session* has trusted what it is holding, not how old the data itself is;
 # the caption next to Refresh reads this one.
 _ENGINEERING_DATA_AS_OF_KEY = "_engineering_data_as_of"
+# "Refresh data" sets this on the session. It is the one reader who asked for
+# genuinely live data, so their next _engineering_data() call skips both the
+# held bundle and the shared snapshot and pays for a live gather - which then
+# rewrites the snapshot for everyone else.
+_ENGINEERING_FORCE_LIVE_KEY = "_engineering_force_live"
 
 
 def _engineering_data() -> "_EngineeringData":
-    """The current bundle: the session's held one if it still matches, a fresh gather otherwise.
+    """The current bundle: the session's held one if still fresh, the shared snapshot, or a live gather.
 
     Every one of the six engineering pages calls this on its own navigation,
-    each a separate script rerun. The per-read caches (``fetch_tickets`` and
-    the other fourteen) already make a warm *read* cheap; what still ran on
-    every navigation before this was the orchestration around them - the
-    thread pool that gathers all fifteen together - and the reshape that
-    follows.
+    each a separate script rerun. The paths below are tried cheapest first:
 
-    The order of the three paths below is the whole point of this function, and
-    it is not the order they were written in. The cheap check goes first:
+    1. Held by this session and inside its TTL - hand it straight back. Within
+       five minutes a board is not worth a network round trip to re-check.
+    2. Nothing held, or held too long - read the shared snapshot (kept a few
+       minutes fresh by ``warm_board.py``) and serve it, with a live gather
+       started behind the reader. A board minutes old beats a ninety-second
+       wait on a blank page.
+    3. ``Refresh data`` was pressed, or there is no usable snapshot at all -
+       pay for the live gather and rewrite the snapshot from it.
 
-    1. Nothing held by this session - read the on-disk snapshot and serve it,
-       refreshing behind the reader. A board a few minutes old beats an empty
-       screen and an eight-second wait.
-    2. Something held - probe ``fetch_tickets`` and compare fingerprints to see
-       whether the board has moved since this session paid for the rest.
-    3. Neither - pay for a live gather.
-
-    The probe used to run *first*, ahead of both other paths. It is free in
-    cost, being the exact cache the live read would hit, but it was never free
-    in time: on a cold session it is a full paginated ticket fetch, several
-    seconds of it, and it ran to completion before the snapshot was so much as
-    looked at. The one path meant to spare a cold reader the wait was therefore
-    the one path that always paid it. Probing only when there is a held bundle
-    to compare against confines the probe to the case it was written for, where
-    ``fetch_tickets`` is warm and it answers in milliseconds.
+    An earlier version probed ``fetch_tickets`` here to fingerprint-check a
+    held bundle before trusting it. That probe is a full paginated ticket
+    fetch whenever this instance's read cache is cold - which is exactly the
+    case for a session whose bundle came from the snapshot - so it reintroduced
+    the very wait the snapshot removes. The TTL and the warmer together keep
+    the served board fresh enough without it.
     """
     max_results = MAX_RESULTS
     page_size = JIRA_PAGE_SIZE
 
-    held = st.session_state.get(_ENGINEERING_BUNDLE_KEY)
+    force_live = bool(st.session_state.pop(_ENGINEERING_FORCE_LIVE_KEY, False))
 
-    # A missing, stale-beyond-limit or unreadable snapshot falls back to the
-    # live path exactly - the same path a reader with no snapshot has always
-    # taken.
-    if held is None:
+    if not force_live:
+        held = st.session_state.get(_ENGINEERING_BUNDLE_KEY)
+        if held is not None:
+            _held_fingerprint, held_at, held_bundle = held
+            if time.time() - held_at < _ENGINEERING_BUNDLE_TTL_SECONDS:
+                return held_bundle
+
+        # A missing, stale-beyond-limit or unreadable snapshot falls through to
+        # the live gather - the same path a reader with no snapshot takes.
         snapshot = _read_board_snapshot()
         if snapshot is not None:
             snapshot_bundle, written_at = snapshot
             snapshot_fingerprint = _board_fingerprint(
                 snapshot_bundle.raw_df, JQL, FETCH_SCHEMA_VERSION
             )
-            # Held from *now*, not from the snapshot's own age: the TTL below
-            # guards how long this session trusts what it is holding, and the
+            # Held from *now*, not from the snapshot's own age: the TTL guards
+            # how long this session trusts what it is holding, and the
             # background refresh needs the room to finish before that guard
-            # would otherwise force a second, synchronous live gather on this
-            # same session's very next navigation.
+            # would otherwise force a synchronous live gather on this same
+            # session's very next navigation.
             st.session_state[_ENGINEERING_BUNDLE_KEY] = (
                 snapshot_fingerprint,
                 time.time(),
@@ -1555,26 +1558,6 @@ def _engineering_data() -> "_EngineeringData":
             st.session_state[_ENGINEERING_DATA_AS_OF_KEY] = written_at
             _start_background_board_refresh(max_results, page_size)
             return snapshot_bundle
-    else:
-        try:
-            probe_df = fetch_tickets(
-                creds_path=CREDS_PATH,
-                profile_name=PROFILE_NAME,
-                jql=JQL,
-                max_results=max_results,
-                page_size=page_size,
-                schema_version=FETCH_SCHEMA_VERSION,
-            )
-        except Exception:  # noqa: BLE001 - the full read below reports this properly
-            probe_df = None
-
-        if probe_df is not None:
-            held_fingerprint, held_at, held_bundle = held
-            probe_fingerprint = _board_fingerprint(probe_df, JQL, FETCH_SCHEMA_VERSION)
-            if held_fingerprint == probe_fingerprint and (
-                time.time() - held_at < _ENGINEERING_BUNDLE_TTL_SECONDS
-            ):
-                return held_bundle
 
     bundle = _engineering_data_uncached(max_results, page_size)
     fresh_fingerprint = _board_fingerprint(bundle.raw_df, JQL, FETCH_SCHEMA_VERSION)
