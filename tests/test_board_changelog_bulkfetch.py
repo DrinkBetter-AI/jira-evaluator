@@ -159,7 +159,7 @@ def test_attach_reads_histories_in_bulk_and_rebuilds_last_meaningful_activity(
     assert out.loc[1, "changelog"] == {"histories": []}
     # Recomputed from the freshly attached history, not left at None.
     assert str(out.loc[0, "last_meaningful_activity"]).startswith("2026-02-01")
-    assert out.loc[1, "last_meaningful_activity"] is None
+    assert pd.isna(out.loc[1, "last_meaningful_activity"])
 
 
 def test_attach_falls_back_to_no_history_when_the_bulk_read_fails(monkeypatch) -> None:
