@@ -34,7 +34,10 @@ import kpi  # noqa: E402
 import role_kpis  # noqa: E402
 import roles  # noqa: E402
 
-NOW = pd.Timestamp("2026-08-16T12:00:00Z")
+# Anchored to the running clock: see the note in tests/test_integrity.py. The
+# staleness thresholds these fixtures straddle are measured against the real
+# now, so a fixed anchor drifts every fixture across them given enough days.
+NOW = pd.Timestamp.now(tz="UTC")
 
 
 def when(days_ago: float, hour: int = 9, minute: int = 0) -> str:
