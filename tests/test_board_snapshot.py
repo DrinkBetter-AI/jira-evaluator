@@ -132,6 +132,99 @@ def test_write_then_read_round_trips(snapshot_path) -> None:
     assert read_back.pr_count_7 == 5
 
 
+def test_a_cold_session_serves_the_snapshot_without_reading_tickets_first(
+    snapshot_path, monkeypatch
+) -> None:
+    """The snapshot's whole purpose is skipping the wait, so it must skip it.
+
+    ``_engineering_data`` also probes ``fetch_tickets`` to decide whether a
+    bundle the session is already holding is still current. That probe once ran
+    ahead of everything, including this branch - so the one reader the snapshot
+    exists to spare (a cold session, holding nothing) paid a full paginated
+    ticket fetch before the snapshot was even opened. The probe is only
+    meaningful when there is a held bundle to compare against; with nothing
+    held there is nothing to compare, and reading tickets here buys nothing but
+    seconds of blank page.
+    """
+    _write_valid_snapshot(snapshot_path, time.time() - 120.0)
+    monkeypatch.setattr(data_layer.st, "session_state", {})  # cold: nothing held
+
+    # Recorded rather than raised from: the probe's caller catches Exception,
+    # so an AssertionError thrown here would be swallowed and the test would
+    # pass against the very ordering it exists to forbid.
+    probes: list[int] = []
+
+    def _probe(**_kwargs):
+        probes.append(1)
+        return _write_valid_snapshot  # never reached in a passing run
+
+    monkeypatch.setattr(data_layer, "fetch_tickets", _probe)
+    # The refresh is fire-and-forget and would otherwise read live behind us.
+    refreshes: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        data_layer,
+        "_start_background_board_refresh",
+        lambda max_results, page_size: refreshes.append((max_results, page_size)),
+    )
+
+    bundle = data_layer._engineering_data()
+
+    assert probes == []
+    assert list(bundle.df["key"]) == ["ENG-1"]
+    # Served stale on purpose - so the refresh behind the reader is the other
+    # half of the bargain, not an optional extra.
+    assert len(refreshes) == 1
+
+
+def test_a_session_holding_a_bundle_still_probes_before_trusting_it(
+    snapshot_path, monkeypatch
+) -> None:
+    """The probe is confined to its case, not deleted from it.
+
+    A held bundle is only reusable if the board has not moved underneath it,
+    and the probe's fingerprint is the only thing that knows. This is the path
+    where ``fetch_tickets`` is warm and answers in milliseconds.
+    """
+    held_bundle = app._EngineeringData(
+        data={},
+        errors={},
+        raw_df=pd.DataFrame({"key": ["ENG-1"], "status": ["In Progress"]}),
+        df=pd.DataFrame({"key": ["ENG-1"], "status": ["In Progress"]}),
+        events=pd.DataFrame(),
+        github_ready=False,
+        github_error="",
+        open_prs=pd.DataFrame(),
+        merged_prs=pd.DataFrame(),
+        pr_count_7=None,
+        pr_count_30=None,
+        open_count_exact=None,
+        assignees=[],
+        statuses=[],
+        priorities=[],
+        max_results=1000,
+        page_size=250,
+    )
+    fingerprint = data_layer._board_fingerprint(
+        held_bundle.raw_df, data_layer.JQL, data_layer.FETCH_SCHEMA_VERSION
+    )
+    monkeypatch.setattr(
+        data_layer.st,
+        "session_state",
+        {data_layer._ENGINEERING_BUNDLE_KEY: (fingerprint, time.time(), held_bundle)},
+    )
+
+    calls: list[int] = []
+
+    def _probe(**_kwargs):
+        calls.append(1)
+        return held_bundle.raw_df
+
+    monkeypatch.setattr(data_layer, "fetch_tickets", _probe)
+
+    assert data_layer._engineering_data() is held_bundle
+    assert calls == [1]
+
+
 def test_deleting_a_snapshot_that_does_not_exist_does_not_raise(snapshot_path) -> None:
     app._delete_board_snapshot()  # nothing to delete - must be a no-op, not an error
 

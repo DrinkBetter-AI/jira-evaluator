@@ -276,6 +276,14 @@ def load_jira_profile(
 # reads without turning a page load into a burst Jira answers with 429s.
 MAX_PARALLEL_REQUESTS = 8
 
+# The connection pool is sized above that ceiling rather than level with it. The
+# session is shared by every thread, so a pool the same size as the worker count
+# has no slack: a caller that briefly holds a connection past its response, or a
+# second fan-out overlapping the first, pushes somebody into waiting on the pool
+# rather than on Jira. Idle connections cost almost nothing to keep; a read that
+# queues behind one costs a visible piece of the page load.
+_SESSION_POOL_SIZE = MAX_PARALLEL_REQUESTS * 2
+
 # One pooled session per credential set, shared by every JiraClient instance and
 # every thread. Each call used to build its own Session, which meant a fresh TLS
 # handshake per request - measurably a third of the cost of a per-key lookup, and
@@ -302,8 +310,8 @@ def _build_session(email: str, api_token: str) -> requests.Session:
         respect_retry_after_header=True,
     )
     adapter = HTTPAdapter(
-        pool_connections=MAX_PARALLEL_REQUESTS,
-        pool_maxsize=MAX_PARALLEL_REQUESTS,
+        pool_connections=_SESSION_POOL_SIZE,
+        pool_maxsize=_SESSION_POOL_SIZE,
         max_retries=retry,
     )
     session.mount("https://", adapter)
