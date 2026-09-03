@@ -57,6 +57,7 @@ from jira_client import (
     MAX_PARALLEL_REQUESTS,
     JiraClient,
     JiraConfigError,
+    _extract_last_meaningful_activity,
     normalize_base_url,
     load_jira_env,
     load_jira_profile,
@@ -157,7 +158,13 @@ SCOPE_INDIVIDUAL = "Individual"
 # of the current assignee. A stale cache entry from before this change carries
 # no changelog column at all, so the version bump forces a fresh read rather
 # than crediting nothing out of an old, changelog-less cache hit.
-FETCH_SCHEMA_VERSION = 9
+#
+# 10: the board read (fetch_tickets) no longer asks for expand="changelog" -
+# the history now comes from a separate changelog/bulkfetch read
+# (fetch_ticket_changelogs), attached before the board is derived. An old
+# cache entry or snapshot carries a changelog inline; a new one does not and
+# leans on the bulk read instead, so the versions must not share a cache.
+FETCH_SCHEMA_VERSION = 10
 # Ceiling on tickets fetched per run; org-wide JQL can exceed the old fixed 1000.
 MAX_RESULTS = _positive_int(os.getenv("JIRA_MAX_RESULTS"), default=1000)
 # Tickets per Jira page. Each page is a round trip, and at 100 the open-ticket
@@ -216,12 +223,15 @@ def fetch_tickets(
     read_log.mark_executed()
     client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
     _ = schema_version
+    # No expand="changelog": the new /search/jql endpoint serves an expanded
+    # changelog slowly and in small pages, which was most of a cold board
+    # load. The history is read separately by fetch_ticket_changelogs and
+    # attached before the board is derived.
     result = client.search_issues(
         jql=jql,
         fields=DEFAULT_FIELDS,
         max_results=max_results,
         page_size=page_size,
-        expand="changelog",
     )
     for col in [
         "sprint_id",
@@ -237,6 +247,66 @@ def fetch_tickets(
         if col not in result.columns:
             result[col] = pd.NA
     return result
+
+
+@read_log.logged_read("app.fetch_ticket_changelogs")
+@st.cache_data(ttl=300, show_spinner=False, refresh_mode="background")
+def fetch_ticket_changelogs(
+    creds_path: str,
+    profile_name: str,
+    issue_ids: tuple[str, ...],
+    schema_version: int,
+) -> dict[str, list[dict]]:
+    """Change histories for the board's issues, keyed by issue id.
+
+    Split out of ``fetch_tickets`` so the board read itself stays a plain
+    field fetch. Cached on the sorted tuple of ids, so a board whose
+    membership has not changed replays this for free.
+    """
+    read_log.mark_executed()
+    _ = schema_version
+    if not issue_ids:
+        return {}
+    client = JiraClient.resolve(creds_path=creds_path, profile_name=profile_name)
+    return client.get_changelogs_bulk(issue_ids)
+
+
+def _attach_board_changelogs(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Give ``raw_df`` a ``changelog`` column, reading it in bulk if need be.
+
+    A fixture or an older on-disk snapshot already carries ``changelog``
+    inline - leave those untouched. A live board read (``fetch_tickets``) no
+    longer does, so fetch the histories by issue id and attach them in the
+    shape ``integrity.changelog_events`` expects (``{"histories": [...]}``),
+    then recompute ``last_meaningful_activity`` from what was attached.
+
+    A failed bulk read is logged and swallowed: the board renders with no
+    history, exactly as it does from a changelog-less snapshot today.
+    """
+    if "changelog" in raw_df.columns:
+        return raw_df
+    raw_df = raw_df.copy()
+    if "id" not in raw_df.columns:
+        raw_df["changelog"] = None
+        return raw_df
+
+    ids = tuple(sorted({str(i) for i in raw_df["id"].dropna().tolist() if str(i).strip()}))
+    try:
+        by_id = fetch_ticket_changelogs(
+            CREDS_PATH, PROFILE_NAME, ids, FETCH_SCHEMA_VERSION
+        )
+    except Exception:  # noqa: BLE001 - a page without history beats no page
+        logger.exception("Bulk changelog read failed; board renders without history")
+        by_id = {}
+
+    raw_df["changelog"] = [
+        {"histories": by_id.get(str(issue_id), [])} for issue_id in raw_df["id"]
+    ]
+    raw_df["last_meaningful_activity"] = [
+        _extract_last_meaningful_activity({"changelog": changelog})
+        for changelog in raw_df["changelog"]
+    ]
+    return raw_df
 
 
 # The snapshot lists at the top of the page render five columns and an age, and
@@ -1627,6 +1697,9 @@ def _engineering_gather_and_shape(
         return _EngineeringReadOutcome(None, None, True, False)
 
     truncated = len(raw_df) >= max_results
+
+    with _log_stage("changelog:bulkfetch"):
+        raw_df = _attach_board_changelogs(raw_df)
 
     with _log_stage("changelog:derive_board"):
         fingerprint = _board_fingerprint(raw_df, JQL, FETCH_SCHEMA_VERSION)
