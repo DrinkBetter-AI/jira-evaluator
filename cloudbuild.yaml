@@ -92,6 +92,23 @@ steps:
       - "1800"
       - --quiet
 
+  # The warm-board job runs the same image off the request path (see
+  # warm_board.py) so a scheduler can keep the shared GCS snapshot fresh.
+  # Its env, secrets and schedule are set once when the job is created; only
+  # the image needs to track each deploy, and `jobs update` leaves the rest
+  # untouched. Skipped with `|| exit 0` so a first deploy - before the job
+  # exists - is not blocked by it.
+  - id: update-warmer-job
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - >
+        gcloud run jobs update ${_SERVICE}-warmer
+        --region ${_REGION}
+        --image ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
+        --quiet || exit 0
+
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$COMMIT_SHA
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
