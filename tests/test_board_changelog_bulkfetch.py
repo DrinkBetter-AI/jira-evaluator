@@ -103,6 +103,21 @@ def test_attach_leaves_a_frame_that_already_carries_a_changelog_alone() -> None:
     assert out.loc[0, "changelog"] == {"histories": [{"id": "x"}]}
 
 
+def test_attach_treats_an_all_null_changelog_column_as_absent(monkeypatch) -> None:
+    """_issues_to_dataframe emits an all-null changelog column when nothing was
+    expanded - it must not be mistaken for a changelog already carried."""
+    df = pd.DataFrame(
+        {"key": ["ENG-1"], "id": ["1001"], "changelog": [None], "updated": ["2026-01-01"]}
+    )
+    monkeypatch.setattr(
+        data_layer,
+        "fetch_ticket_changelogs",
+        lambda *a, **k: {"1001": [{"id": "h1"}]},
+    )
+    out = data_layer._attach_board_changelogs(df)
+    assert out.loc[0, "changelog"] == {"histories": [{"id": "h1"}]}
+
+
 def test_attach_gives_a_frame_with_no_id_an_empty_changelog_column() -> None:
     df = pd.DataFrame({"key": ["ENG-1"], "updated": ["2026-01-01"]})
     out = data_layer._attach_board_changelogs(df)
@@ -144,7 +159,7 @@ def test_attach_reads_histories_in_bulk_and_rebuilds_last_meaningful_activity(
     assert out.loc[1, "changelog"] == {"histories": []}
     # Recomputed from the freshly attached history, not left at None.
     assert str(out.loc[0, "last_meaningful_activity"]).startswith("2026-02-01")
-    assert out.loc[1, "last_meaningful_activity"] is None
+    assert pd.isna(out.loc[1, "last_meaningful_activity"])
 
 
 def test_attach_falls_back_to_no_history_when_the_bulk_read_fails(monkeypatch) -> None:

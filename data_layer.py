@@ -233,6 +233,12 @@ def fetch_tickets(
         max_results=max_results,
         page_size=page_size,
     )
+    # ``_issues_to_dataframe`` always emits a ``changelog`` column - here it is
+    # all-null, because nothing was expanded. Drop it so
+    # ``_attach_board_changelogs`` knows to read the history in bulk rather
+    # than mistaking an empty column for one already carried.
+    if "changelog" in result.columns:
+        result = result.drop(columns=["changelog"])
     for col in [
         "sprint_id",
         "sprint_name",
@@ -283,7 +289,10 @@ def _attach_board_changelogs(raw_df: pd.DataFrame) -> pd.DataFrame:
     A failed bulk read is logged and swallowed: the board renders with no
     history, exactly as it does from a changelog-less snapshot today.
     """
-    if "changelog" in raw_df.columns:
+    # A column that exists but is entirely null is not a changelog "already
+    # carried" - it is what _issues_to_dataframe leaves behind when nothing
+    # was expanded. Only a column with at least one real entry counts.
+    if "changelog" in raw_df.columns and raw_df["changelog"].notna().any():
         return raw_df
     raw_df = raw_df.copy()
     if "id" not in raw_df.columns:
