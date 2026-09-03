@@ -505,6 +505,57 @@ class JiraClient:
 
         return self._issues_to_dataframe(issues)
 
+    def get_changelogs_bulk(
+        self, issue_ids_or_keys: Iterable[str], page_size: int = 1000
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Full change histories for many issues, keyed by issue id.
+
+        ``POST /rest/api/3/changelog/bulkfetch`` in one request per 1000 issues
+        rather than ``expand=changelog`` on the search: the newer
+        ``/search/jql`` endpoint serves an expanded changelog slowly and in
+        small pages, which is most of a cold board load. This returns the same
+        history entries (``id``/``author``/``created``/``items``) that
+        ``integrity.changelog_events`` reads.
+
+        Keyed by issue id, not key, because that is what the endpoint returns;
+        the caller holds the id->key mapping from its own ticket read.
+        """
+        ids = sorted({str(x).strip() for x in issue_ids_or_keys if str(x).strip()})
+        if not ids:
+            return {}
+
+        url = f"{self.base_url}/rest/api/3/changelog/bulkfetch"
+        out: dict[str, list[dict[str, Any]]] = {}
+        with self._session() as session:
+            for start in range(0, len(ids), 1000):
+                chunk = ids[start : start + 1000]
+                next_page_token: str | None = None
+                while True:
+                    body: dict[str, Any] = {
+                        "issueIdsOrKeys": chunk,
+                        "maxResults": page_size,
+                    }
+                    if next_page_token:
+                        body["nextPageToken"] = next_page_token
+                    response = session.post(url, json=body, timeout=30)
+                    if response.status_code >= 400:
+                        raise RuntimeError(
+                            "Jira changelog bulkfetch failed "
+                            f"({response.status_code}): {response.text[:300]}"
+                        )
+                    payload = response.json() or {}
+                    for entry in payload.get("issueChangeLogs", []):
+                        issue_id = str(entry.get("issueId") or "").strip()
+                        if not issue_id:
+                            continue
+                        histories = entry.get("changeHistories") or []
+                        if isinstance(histories, list):
+                            out.setdefault(issue_id, []).extend(histories)
+                    next_page_token = payload.get("nextPageToken")
+                    if not next_page_token:
+                        break
+        return out
+
     def update_issue(self, key: str, fields: dict[str, Any]) -> None:
         """Update arbitrary fields on a single Jira issue."""
         require_writes_enabled()
@@ -884,6 +935,10 @@ class JiraClient:
             rows.append(
                 {
                     "key": issue.get("key"),
+                    # Numeric issue id, carried so a follow-up changelog read
+                    # (JiraClient.get_changelogs_bulk) can be joined back on -
+                    # that endpoint answers by id, not key.
+                    "id": issue.get("id"),
                     "summary": fields.get("summary"),
                     "description": _adf_to_text(fields.get("description")),
                     "status": status.get("name"),
