@@ -24,11 +24,20 @@ import integrity  # noqa: E402
 import prioritization  # noqa: E402
 
 
-NOW = pd.Timestamp("2026-08-16T12:00:00Z")
+# Anchored to the running clock, not to a date typed into the file. The code
+# under test measures staleness against the real now, so a fixed anchor here
+# does not freeze the fixture - it only fixes one end of the interval and lets
+# the other keep moving. A ticket written as "moved 40 days ago" was 40 days
+# stale on the day the anchor was typed and 58 days stale a fortnight later,
+# which is how a passing suite turns red having tested nothing new.
+#
+# Floored to the minute so durations between two fixture timestamps come out
+# exact rather than carrying whatever microsecond the suite happened to start on.
+NOW = pd.Timestamp.now(tz="UTC").floor("min")
 
 
 def when(days_ago: float, hour: int = 9, minute: int = 0) -> str:
-    """A Jira-shaped timestamp ``days_ago`` days before the fixed NOW."""
+    """A Jira-shaped timestamp ``days_ago`` days before now."""
     stamp = (NOW - pd.Timedelta(days=days_ago)).replace(
         hour=hour, minute=minute, second=0, microsecond=0
     )
@@ -566,7 +575,21 @@ def test_time_in_each_status_comes_from_consecutive_transitions():
 
 def test_the_wait_before_the_first_transition_counts_when_the_board_says_when_it_was_created():
     events = integrity.changelog_events(
-        [issue("VV-41", history(when(5), "Ana", status("Backlog", "In Progress")))]
+        [
+            issue(
+                "VV-41",
+                # Taken at the anchor's own time of day, so the gap below is a
+                # whole number of days. The old expectation of 29.875 was that
+                # whole month minus the three hours between this fixture's 09:00
+                # default and an anchor that happened to be written as 12:00 -
+                # an artifact of the constant, never a property worth asserting.
+                history(
+                    when(5, hour=NOW.hour, minute=NOW.minute),
+                    "Ana",
+                    status("Backlog", "In Progress"),
+                )
+            )
+        ]
     )
     detail, _ = integrity.cycle_time(
         events,
@@ -580,9 +603,9 @@ def test_the_wait_before_the_first_transition_counts_when_the_board_says_when_it
         now=NOW,
     )
     backlog = detail[detail["status"] == "Backlog"].iloc[0]
-    # Created 35 days ago, first moved 5 days ago at 09:00: a month in Backlog
-    # that no other metric on the board reports.
-    assert backlog["days"] == pytest.approx(29.875, abs=0.01)
+    # Created 35 days ago, first moved 5 days ago: a month in Backlog that no
+    # other metric on the board reports.
+    assert backlog["days"] == pytest.approx(30.0, abs=0.01)
 
 
 def test_without_a_ticket_frame_the_cycle_belongs_to_whoever_started_it():
@@ -786,7 +809,10 @@ def test_a_label_only_edit_does_not_drop_a_ticket_out_of_the_stale_queue():
     # The score used the honest clock, not the gamed one.
     assert scored["staleness_days"].iloc[0] > 40.0
     assert scored["masked_days"].iloc[0] > 38.0
-    assert "stale 4" in scored["priority_reasons"].iloc[0]
+    # "stale 40d", not the "stale 4" prefix this used to look for: that prefix
+    # matched anything from 4 to 49 days, so the drift below it had to reach a
+    # fortnight before the assertion noticed.
+    assert "stale 40d" in scored["priority_reasons"].iloc[0]
 
     rollup = prioritization.assignee_rollup(scored, events)
     row = rollup[rollup["assignee"] == "Ana"].iloc[0]

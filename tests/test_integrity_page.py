@@ -33,7 +33,11 @@ import theme_html  # noqa: E402
 from pages import integrity as integrity_page  # noqa: E402
 
 
-NOW = pd.Timestamp("2026-08-19T12:00:00Z")
+# Anchored to the running clock: see the note in tests/test_integrity.py. The
+# cards this page renders read a trailing window, so a fixed anchor eventually
+# slides every synthetic event out of it and the page renders empty - which
+# fails as a missing name, giving no hint that a clock was the cause.
+NOW = pd.Timestamp.now(tz="UTC")
 
 
 # ---------------------------------------------------------------------------

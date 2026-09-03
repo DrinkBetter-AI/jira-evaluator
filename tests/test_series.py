@@ -52,10 +52,20 @@ def test_same_instant_buckets_identically_across_the_teams_four_timezones():
 def test_week_start_is_monday_00_00_utc():
     # A Wednesday, mid-afternoon UTC - the bucket it lands in should open on
     # the Monday of that same week, at midnight UTC.
-    ts = pd.Timestamp("2026-08-19T15:30:00Z")
+    #
+    # Derived from today rather than written down. weekly_buckets anchors its
+    # range on the real now, so with weeks=1 the only bucket is the current
+    # week; a date typed into the test agreed with that for as long as the week
+    # it was typed in, and then began asserting that this week's Monday is some
+    # Monday in the past.
+    now = pd.Timestamp.now(tz="UTC")
+    monday = (now - pd.Timedelta(days=now.dayofweek)).normalize()
+    ts = monday + pd.Timedelta(days=2, hours=15, minutes=30)
     frame = pd.DataFrame({"when": [ts]})
     buckets = series.weekly_buckets(frame, "when", weeks=1)
-    assert buckets[0].week_start == pd.Timestamp("2026-08-17T00:00:00Z")
+    assert buckets[0].week_start == monday
+    assert monday.dayofweek == 0
+    assert (monday.hour, monday.minute, monday.second) == (0, 0, 0)
 
 
 # --------------------------------------------------------------------------- #
