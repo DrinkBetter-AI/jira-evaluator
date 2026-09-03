@@ -11,6 +11,7 @@ import collections
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 import datetime as _dt
+import functools
 import hashlib
 import html
 import logging
@@ -1202,16 +1203,121 @@ class _EngineeringData:
 # Warm board snapshot: a cold start reads this instead of an empty screen and
 # an eight-second wait, while a background thread brings both it and the
 # session's own cache up to date behind the reader.
+#
+# Where the snapshot's bytes live is chosen by environment. A local file is
+# all a single-process ``streamlit run`` or a test needs. A real deployment
+# runs on Cloud Run, where every instance has its own ephemeral disk and the
+# service scales to zero: a local snapshot is empty on every cold container,
+# which is exactly the reader the snapshot exists to spare. Set
+# ``JIRA_DASHBOARD_SNAPSHOT_BUCKET`` and the snapshot becomes one GCS object
+# shared by every instance - and ``warm_board.py`` on a schedule keeps it warm
+# so no reader ever triggers the live gather.
 # --------------------------------------------------------------------------
 
 _SNAPSHOT_PATH = Path(tempfile.gettempdir()) / "jira_dashboard_board_snapshot.pkl"
-# Generous past the ~5-15 minutes a healthy background refresh cycle keeps it
-# at: a bound against a stopped or failing refresh serving a board nobody
-# would recognise, not the cadence itself.
-_SNAPSHOT_STALE_LIMIT_SECONDS = 1800.0
+# The failure bound, not the cadence: a healthy warmer (or the background
+# refresh behind each reader) keeps the snapshot only a few minutes old. This
+# is how stale a *stopped* refresh is allowed to serve before a reader waits
+# for a live gather instead - generous enough to ride out a warmer that missed
+# a couple of cycles, short enough that nobody works off a board from an hour
+# ago without knowing it.
+_SNAPSHOT_STALE_LIMIT_SECONDS = 7200.0
 # Comfortably above a real board's derived frame (no changelog column, no raw
 # issue payloads), well below "a snapshot large enough to be its own outage".
 _SNAPSHOT_MAX_BYTES = 25 * 1024 * 1024
+
+
+class _LocalSnapshotStore:
+    """The snapshot as a file on this instance's disk.
+
+    Written atomically - a per-writer temp file, then a rename - so a reader
+    mid-read never sees a half-written pickle even though a live gather's write
+    and a background refresh's write can land in the same second.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def read(self) -> bytes | None:
+        try:
+            return self._path.read_bytes()
+        except FileNotFoundError:
+            return None
+
+    def write(self, data: bytes) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self._path.with_suffix(
+            f".{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        tmp_path.write_bytes(data)
+        tmp_path.replace(self._path)
+
+    def delete(self) -> None:
+        self._path.unlink(missing_ok=True)
+
+
+class _GcsSnapshotStore:
+    """The snapshot as one GCS object, shared by every Cloud Run instance.
+
+    A GCS object write is atomic - a reader gets the old object whole or the
+    new one whole, never a partial - so there is no temp-and-rename here. The
+    ``google-cloud-storage`` import is lazy: only a bucket-configured deploy
+    pulls the package in, and a test or a local run never touches it.
+    """
+
+    def __init__(self, bucket: str, blob_name: str) -> None:
+        self._bucket_name = bucket
+        self._blob_name = blob_name
+
+    def _blob(self):
+        return _gcs_client().bucket(self._bucket_name).blob(self._blob_name)
+
+    def read(self) -> bytes | None:
+        from google.cloud.exceptions import NotFound
+
+        try:
+            return self._blob().download_as_bytes()
+        except NotFound:
+            return None
+
+    def write(self, data: bytes) -> None:
+        self._blob().upload_from_string(
+            data, content_type="application/octet-stream"
+        )
+
+    def delete(self) -> None:
+        from google.cloud.exceptions import NotFound
+
+        try:
+            self._blob().delete()
+        except NotFound:
+            pass
+
+
+@functools.lru_cache(maxsize=1)
+def _gcs_client():
+    """One Storage client per process; building it hits auth and is not free."""
+    from google.cloud import storage
+
+    return storage.Client()
+
+
+def _snapshot_store() -> "_LocalSnapshotStore | _GcsSnapshotStore":
+    """The store the environment asks for, rebuilt per call.
+
+    Deliberately not cached: it reads ``_SNAPSHOT_PATH`` and the environment
+    fresh each time, which is cheap and lets a test point it somewhere else
+    without a cache to clear. The expensive part - the GCS client - is cached
+    behind ``_gcs_client``.
+    """
+    bucket = os.getenv("JIRA_DASHBOARD_SNAPSHOT_BUCKET", "").strip()
+    if bucket:
+        blob_name = (
+            os.getenv("JIRA_DASHBOARD_SNAPSHOT_OBJECT", "").strip()
+            or "jira_dashboard_board_snapshot.pkl"
+        )
+        return _GcsSnapshotStore(bucket, blob_name)
+    return _LocalSnapshotStore(_SNAPSHOT_PATH)
 
 
 @dataclass(frozen=True)
@@ -1242,12 +1348,12 @@ class _PersistedBoard:
 
 
 def _write_board_snapshot(bundle: "_EngineeringData") -> None:
-    """Persist the derived bundle to local disk, with a written-at stamp.
+    """Persist the derived bundle to the shared store, with a written-at stamp.
 
-    Written atomically (a temp file, then a rename) so a reader mid-read of
-    the real path never sees a half-written pickle. Errors here are logged
-    and swallowed - a snapshot write is a courtesy to the *next* cold start,
-    not something the run that triggered it depends on.
+    The bytes go wherever ``_snapshot_store`` points - a local file, or a GCS
+    object shared across instances. Errors here are logged and swallowed: a
+    snapshot write is a courtesy to the *next* cold start, not something the
+    run that triggered it depends on.
     """
     try:
         persisted = _PersistedBoard(
@@ -1268,38 +1374,30 @@ def _write_board_snapshot(bundle: "_EngineeringData") -> None:
             max_results=bundle.max_results,
             page_size=bundle.page_size,
         )
-        _SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        # Unique per writer: a live gather's own write and a background
-        # refresh's write can land in the same few seconds, and two writers
-        # sharing one temp name means the first to rename it away can leave
-        # the second stat()-ing a file that is no longer there.
-        tmp_path = _SNAPSHOT_PATH.with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
-        with open(tmp_path, "wb") as fh:
-            pickle.dump(persisted, fh, protocol=pickle.HIGHEST_PROTOCOL)
-        if tmp_path.stat().st_size > _SNAPSHOT_MAX_BYTES:
-            tmp_path.unlink(missing_ok=True)
+        data = pickle.dumps(persisted, protocol=pickle.HIGHEST_PROTOCOL)
+        if len(data) > _SNAPSHOT_MAX_BYTES:
             logger.warning(
                 "Board snapshot exceeded %d bytes; not written", _SNAPSHOT_MAX_BYTES
             )
             return
-        tmp_path.replace(_SNAPSHOT_PATH)
+        _snapshot_store().write(data)
     except Exception:  # noqa: BLE001 - a failed write must not break the page that triggered it
         logger.exception("Could not write the board snapshot")
 
 
 def _read_board_snapshot() -> tuple["_EngineeringData", float] | None:
-    """The on-disk snapshot and its age, or None on anything but a good, fresh read.
+    """The shared snapshot and its age, or None on anything but a good, fresh read.
 
-    Fails open, always: a missing file, a snapshot older than the staleness
-    limit, and a corrupt or otherwise unreadable file all take the same path
+    Fails open, always: a missing object, a snapshot older than the staleness
+    limit, and a corrupt or otherwise unreadable payload all take the same path
     back to the caller - None, meaning "read live" - rather than raising into
     a page that only wanted a fast start.
     """
     try:
-        if not _SNAPSHOT_PATH.exists():
+        raw = _snapshot_store().read()
+        if raw is None:
             return None
-        with open(_SNAPSHOT_PATH, "rb") as fh:
-            persisted: _PersistedBoard = pickle.load(fh)
+        persisted: _PersistedBoard = pickle.loads(raw)
         age = time.time() - persisted.written_at
         if age < 0 or age > _SNAPSHOT_STALE_LIMIT_SECONDS:
             return None
@@ -1329,9 +1427,9 @@ def _read_board_snapshot() -> tuple["_EngineeringData", float] | None:
 
 
 def _delete_board_snapshot() -> None:
-    """Drop the on-disk snapshot, so a stale file cannot outlive the reads it came from."""
+    """Drop the snapshot, so a stale one cannot outlive the reads it came from."""
     try:
-        _SNAPSHOT_PATH.unlink(missing_ok=True)
+        _snapshot_store().delete()
     except Exception:  # noqa: BLE001 - deleting a snapshot must not break Refresh
         logger.exception("Could not delete the board snapshot")
 

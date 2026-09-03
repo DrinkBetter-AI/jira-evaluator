@@ -15,6 +15,11 @@ pyyaml>=6.0.0
 python-dotenv>=1.0.0
 psycopg2-binary>=2.9.9
 google-cloud-bigquery>=3.25.0
+# The warm board snapshot's shared home when JIRA_DASHBOARD_SNAPSHOT_BUCKET is
+# set: every Cloud Run instance reads one GCS object instead of gathering the
+# whole board cold. Imported lazily, so a local run without the bucket set
+# never loads it.
+google-cloud-storage>=2.18.0
 db-dtypes>=1.2.0
 # Printing the whole board. WeasyPrint lays the recorded page out as a PDF and
 # needs Pango/Cairo from the image; Kaleido turns each chart into a picture and
