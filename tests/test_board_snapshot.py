@@ -225,6 +225,64 @@ def test_a_session_holding_a_bundle_still_probes_before_trusting_it(
     assert calls == [1]
 
 
+def test_the_store_is_local_by_default_and_gcs_when_a_bucket_is_set(monkeypatch) -> None:
+    monkeypatch.delenv("JIRA_DASHBOARD_SNAPSHOT_BUCKET", raising=False)
+    assert isinstance(data_layer._snapshot_store(), data_layer._LocalSnapshotStore)
+
+    monkeypatch.setenv("JIRA_DASHBOARD_SNAPSHOT_BUCKET", "vinovoss-board-cache")
+    monkeypatch.setenv("JIRA_DASHBOARD_SNAPSHOT_OBJECT", "custom/name.pkl")
+    store = data_layer._snapshot_store()
+    assert isinstance(store, data_layer._GcsSnapshotStore)
+    assert store._bucket_name == "vinovoss-board-cache"
+    assert store._blob_name == "custom/name.pkl"
+
+
+def test_gcs_store_round_trips_through_a_fake_bucket(monkeypatch) -> None:
+    """The GCS path writes whole objects and reads a missing one back as None."""
+
+    class _FakeBlob:
+        def __init__(self, store: dict, name: str) -> None:
+            self._store = store
+            self._name = name
+
+        def upload_from_string(self, data: bytes, content_type: str = "") -> None:
+            self._store[self._name] = data
+
+        def download_as_bytes(self) -> bytes:
+            from google.cloud.exceptions import NotFound
+
+            if self._name not in self._store:
+                raise NotFound(self._name)
+            return self._store[self._name]
+
+        def delete(self) -> None:
+            from google.cloud.exceptions import NotFound
+
+            if self._name not in self._store:
+                raise NotFound(self._name)
+            del self._store[self._name]
+
+    objects: dict[str, bytes] = {}
+
+    class _FakeBucket:
+        def blob(self, name: str) -> _FakeBlob:
+            return _FakeBlob(objects, name)
+
+    class _FakeClient:
+        def bucket(self, name: str) -> _FakeBucket:
+            return _FakeBucket()
+
+    monkeypatch.setattr(data_layer, "_gcs_client", lambda: _FakeClient())
+    store = data_layer._GcsSnapshotStore("bucket", "board.pkl")
+
+    assert store.read() is None  # nothing written yet
+    store.write(b"payload-bytes")
+    assert store.read() == b"payload-bytes"
+    store.delete()
+    assert store.read() is None
+    store.delete()  # deleting a missing object is a no-op, not an error
+
+
 def test_deleting_a_snapshot_that_does_not_exist_does_not_raise(snapshot_path) -> None:
     app._delete_board_snapshot()  # nothing to delete - must be a no-op, not an error
 
