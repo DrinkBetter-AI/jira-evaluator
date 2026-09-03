@@ -712,6 +712,35 @@ _LOADING_CEILING = 0.95
 # at for most of a cold load. One wave is both faster and honest.
 _GATHER_WORKERS = 16
 
+# Widening the pool above is only safe because of this. Nine of the fourteen
+# opening reads are Jira's, and a sixteen-wide pool would put all nine in flight
+# at once against a client that means to hold itself to eight - trading a queue
+# we chose for a rate limit we did not, whose retries cost whole sections of the
+# page rather than a few hundred milliseconds of one. So the pool stays wide,
+# because the GitHub reads have no reason to wait behind Jira, and the ceiling is
+# enforced where it actually belongs: on the Jira tasks themselves.
+#
+# The gate is deliberately not inside JiraClient. A Jira call that fans out
+# internally (``get_issue_transitions_bulk``) would then acquire it from threads
+# that already hold it, which is a deadlock. Wrapping the opening reads - none of
+# which nest - keeps the ceiling honest without that trap.
+_JIRA_GATE = threading.BoundedSemaphore(MAX_PARALLEL_REQUESTS)
+
+
+def _jira_read(task: Callable[[], Any]) -> Callable[[], Any]:
+    """Hold a Jira task behind the client's own concurrency ceiling.
+
+    A worker parked here is parked before it opens a connection, so this queues
+    the reads rather than the responses: the wait lands on our side of the wire
+    instead of on Jira's rate limiter.
+    """
+
+    def _guarded() -> Any:
+        with _JIRA_GATE:
+            return task()
+
+    return _guarded
+
 
 def _load_fraction(finished: int, total: int, elapsed: float) -> float:
     """Where to draw the bar: by the clock, not by the count.
@@ -821,8 +850,12 @@ def _parallel(tasks: dict[str, Callable[[], Any]]) -> dict[str, Any]:
 
 
 def _engineering_reads(max_results: int, page_size: int) -> dict[str, Callable[[], Any]]:
-    """The queries the engineering page opens with, as callables to run together."""
-    return {
+    """The queries the engineering page opens with, as callables to run together.
+
+    Each one comes back wrapped in ``_jira_read``, so the gather may hold them
+    all at once without more than eight of them reaching Jira at once.
+    """
+    reads: dict[str, Callable[[], Any]] = {
         "tickets": lambda: fetch_tickets(
             creds_path=CREDS_PATH,
             profile_name=PROFILE_NAME,
@@ -891,6 +924,7 @@ def _engineering_reads(max_results: int, page_size: int) -> dict[str, Callable[[
             schema_version=FETCH_SCHEMA_VERSION,
         ),
     }
+    return {name: _jira_read(task) for name, task in reads.items()}
 
 
 # Names of the GitHub reads, so a failure in any of them can put the PR sections
