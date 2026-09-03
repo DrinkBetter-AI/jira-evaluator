@@ -702,6 +702,45 @@ _LOADING_PACE_SECONDS = 8.0
 # a load that beats the pace waits at this mark rather than sitting full.
 _LOADING_CEILING = 0.95
 
+# How many opening reads may be in flight at once. Deliberately not
+# MAX_PARALLEL_REQUESTS: that number is how hard a single fan-out leans on Jira,
+# and the opening reads are not a single fan-out - they are split across Jira and
+# GitHub, two unrelated hosts with unrelated rate limits. Capping the pool at
+# eight meant fourteen reads ran in two waves, and because the cheap counts all
+# answer first, the second wave was the five expensive list fetches starting only
+# once the counts were done. That is the "8 of 14" the loading label used to sit
+# at for most of a cold load. One wave is both faster and honest.
+_GATHER_WORKERS = 16
+
+# Widening the pool above is only safe because of this. Nine of the fourteen
+# opening reads are Jira's, and a sixteen-wide pool would put all nine in flight
+# at once against a client that means to hold itself to eight - trading a queue
+# we chose for a rate limit we did not, whose retries cost whole sections of the
+# page rather than a few hundred milliseconds of one. So the pool stays wide,
+# because the GitHub reads have no reason to wait behind Jira, and the ceiling is
+# enforced where it actually belongs: on the Jira tasks themselves.
+#
+# The gate is deliberately not inside JiraClient. A Jira call that fans out
+# internally (``get_issue_transitions_bulk``) would then acquire it from threads
+# that already hold it, which is a deadlock. Wrapping the opening reads - none of
+# which nest - keeps the ceiling honest without that trap.
+_JIRA_GATE = threading.BoundedSemaphore(MAX_PARALLEL_REQUESTS)
+
+
+def _jira_read(task: Callable[[], Any]) -> Callable[[], Any]:
+    """Hold a Jira task behind the client's own concurrency ceiling.
+
+    A worker parked here is parked before it opens a connection, so this queues
+    the reads rather than the responses: the wait lands on our side of the wire
+    instead of on Jira's rate limiter.
+    """
+
+    def _guarded() -> Any:
+        with _JIRA_GATE:
+            return task()
+
+    return _guarded
+
 
 def _load_fraction(finished: int, total: int, elapsed: float) -> float:
     """Where to draw the bar: by the clock, not by the count.
@@ -750,7 +789,7 @@ def _gather(
         return results, errors
 
     started = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_REQUESTS, len(tasks))) as pool:
+    with ThreadPoolExecutor(max_workers=min(_GATHER_WORKERS, len(tasks))) as pool:
         running = {pool.submit(_run, task): name for name, task in tasks.items()}
         total = len(running)
         pending = set(running)
@@ -811,8 +850,12 @@ def _parallel(tasks: dict[str, Callable[[], Any]]) -> dict[str, Any]:
 
 
 def _engineering_reads(max_results: int, page_size: int) -> dict[str, Callable[[], Any]]:
-    """The queries the engineering page opens with, as callables to run together."""
-    return {
+    """The queries the engineering page opens with, as callables to run together.
+
+    Each one comes back wrapped in ``_jira_read``, so the gather may hold them
+    all at once without more than eight of them reaching Jira at once.
+    """
+    reads: dict[str, Callable[[], Any]] = {
         "tickets": lambda: fetch_tickets(
             creds_path=CREDS_PATH,
             profile_name=PROFILE_NAME,
@@ -881,6 +924,7 @@ def _engineering_reads(max_results: int, page_size: int) -> dict[str, Callable[[
             schema_version=FETCH_SCHEMA_VERSION,
         ),
     }
+    return {name: _jira_read(task) for name, task in reads.items()}
 
 
 # Names of the GitHub reads, so a failure in any of them can put the PR sections
@@ -1364,55 +1408,47 @@ def _engineering_data() -> "_EngineeringData":
     the other fourteen) already make a warm *read* cheap; what still ran on
     every navigation before this was the orchestration around them - the
     thread pool that gathers all fifteen together - and the reshape that
-    follows. ``fetch_tickets`` is safe to call speculatively here: it is the
-    exact cache the real read below would hit, so probing it first is not an
-    extra read, and its fingerprint (the Phase 1 key) says whether the board
-    has actually moved since the session last paid for the rest.
+    follows.
+
+    The order of the three paths below is the whole point of this function, and
+    it is not the order they were written in. The cheap check goes first:
+
+    1. Nothing held by this session - read the on-disk snapshot and serve it,
+       refreshing behind the reader. A board a few minutes old beats an empty
+       screen and an eight-second wait.
+    2. Something held - probe ``fetch_tickets`` and compare fingerprints to see
+       whether the board has moved since this session paid for the rest.
+    3. Neither - pay for a live gather.
+
+    The probe used to run *first*, ahead of both other paths. It is free in
+    cost, being the exact cache the live read would hit, but it was never free
+    in time: on a cold session it is a full paginated ticket fetch, several
+    seconds of it, and it ran to completion before the snapshot was so much as
+    looked at. The one path meant to spare a cold reader the wait was therefore
+    the one path that always paid it. Probing only when there is a held bundle
+    to compare against confines the probe to the case it was written for, where
+    ``fetch_tickets`` is warm and it answers in milliseconds.
     """
     max_results = MAX_RESULTS
     page_size = JIRA_PAGE_SIZE
 
-    try:
-        probe_df = fetch_tickets(
-            creds_path=CREDS_PATH,
-            profile_name=PROFILE_NAME,
-            jql=JQL,
-            max_results=max_results,
-            page_size=page_size,
-            schema_version=FETCH_SCHEMA_VERSION,
-        )
-    except Exception:  # noqa: BLE001 - the full read below reports this properly
-        probe_df = None
+    held = st.session_state.get(_ENGINEERING_BUNDLE_KEY)
 
-    if probe_df is not None:
-        probe_fingerprint = _board_fingerprint(probe_df, JQL, FETCH_SCHEMA_VERSION)
-        held = st.session_state.get(_ENGINEERING_BUNDLE_KEY)
-        if held is not None:
-            held_fingerprint, held_at, held_bundle = held
-            if held_fingerprint == probe_fingerprint and (
-                time.time() - held_at < _ENGINEERING_BUNDLE_TTL_SECONDS
-            ):
-                return held_bundle
-
-    # A cold session (nothing held yet) reads the on-disk snapshot before
-    # paying for a live gather - a board a few minutes old beats an empty
-    # screen and an eight-second wait. A background thread brings the
-    # session's own cache and the snapshot up to date behind this reader
-    # without making them wait a second time. A missing, stale-beyond-limit
-    # or unreadable snapshot falls back to the live path exactly - the same
-    # path a reader with no snapshot at all has always taken.
-    if st.session_state.get(_ENGINEERING_BUNDLE_KEY) is None:
+    # A missing, stale-beyond-limit or unreadable snapshot falls back to the
+    # live path exactly - the same path a reader with no snapshot has always
+    # taken.
+    if held is None:
         snapshot = _read_board_snapshot()
         if snapshot is not None:
             snapshot_bundle, written_at = snapshot
             snapshot_fingerprint = _board_fingerprint(
                 snapshot_bundle.raw_df, JQL, FETCH_SCHEMA_VERSION
             )
-            # Held from *now*, not from the snapshot's own age: the TTL above
+            # Held from *now*, not from the snapshot's own age: the TTL below
             # guards how long this session trusts what it is holding, and the
-            # background refresh below needs the room to finish before that
-            # guard would otherwise force a second, synchronous live gather
-            # on this same session's very next navigation.
+            # background refresh needs the room to finish before that guard
+            # would otherwise force a second, synchronous live gather on this
+            # same session's very next navigation.
             st.session_state[_ENGINEERING_BUNDLE_KEY] = (
                 snapshot_fingerprint,
                 time.time(),
@@ -1421,6 +1457,26 @@ def _engineering_data() -> "_EngineeringData":
             st.session_state[_ENGINEERING_DATA_AS_OF_KEY] = written_at
             _start_background_board_refresh(max_results, page_size)
             return snapshot_bundle
+    else:
+        try:
+            probe_df = fetch_tickets(
+                creds_path=CREDS_PATH,
+                profile_name=PROFILE_NAME,
+                jql=JQL,
+                max_results=max_results,
+                page_size=page_size,
+                schema_version=FETCH_SCHEMA_VERSION,
+            )
+        except Exception:  # noqa: BLE001 - the full read below reports this properly
+            probe_df = None
+
+        if probe_df is not None:
+            held_fingerprint, held_at, held_bundle = held
+            probe_fingerprint = _board_fingerprint(probe_df, JQL, FETCH_SCHEMA_VERSION)
+            if held_fingerprint == probe_fingerprint and (
+                time.time() - held_at < _ENGINEERING_BUNDLE_TTL_SECONDS
+            ):
+                return held_bundle
 
     bundle = _engineering_data_uncached(max_results, page_size)
     fresh_fingerprint = _board_fingerprint(bundle.raw_df, JQL, FETCH_SCHEMA_VERSION)
