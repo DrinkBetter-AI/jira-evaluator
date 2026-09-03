@@ -252,12 +252,12 @@ from data_layer import (
     _PersistedBoard,
     _write_board_snapshot,
     _read_board_snapshot,
-    _delete_board_snapshot,
     _ENGINEERING_BG_REFRESH_KEY,
     _start_background_board_refresh,
     _ENGINEERING_BUNDLE_KEY,
     _ENGINEERING_BUNDLE_TTL_SECONDS,
     _ENGINEERING_DATA_AS_OF_KEY,
+    _ENGINEERING_FORCE_LIVE_KEY,
     _engineering_data,
     _EngineeringReadOutcome,
     _engineering_gather_and_shape,
@@ -4962,9 +4962,11 @@ def _clear_page_caches(page_title: str) -> None:
         # match its old fingerprint and hand back the reads just cleared.
         st.session_state.pop(_ENGINEERING_BUNDLE_KEY, None)
         st.session_state.pop(_ENGINEERING_DATA_AS_OF_KEY, None)
-        # Refresh means a genuinely live read, rewritten to disk once it
-        # finishes (_engineering_data does that itself) - not the file this
-        # button was just asked to make stale.
-        _delete_board_snapshot()
+        # Refresh means a genuinely live read for this reader. The flag makes
+        # _engineering_data skip the shared snapshot on the next run and gather
+        # live, then rewrite the snapshot from what it read. The snapshot is
+        # shared by every session now - deleting it here would hand every other
+        # reader a cold ninety-second gather until the warmer rebuilt it.
+        st.session_state[_ENGINEERING_FORCE_LIVE_KEY] = True
     logger.info("Cleared cached reads for the %s page", page_title)
 

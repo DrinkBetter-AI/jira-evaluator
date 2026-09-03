@@ -176,16 +176,8 @@ def test_a_cold_session_serves_the_snapshot_without_reading_tickets_first(
     assert len(refreshes) == 1
 
 
-def test_a_session_holding_a_bundle_still_probes_before_trusting_it(
-    snapshot_path, monkeypatch
-) -> None:
-    """The probe is confined to its case, not deleted from it.
-
-    A held bundle is only reusable if the board has not moved underneath it,
-    and the probe's fingerprint is the only thing that knows. This is the path
-    where ``fetch_tickets`` is warm and answers in milliseconds.
-    """
-    held_bundle = app._EngineeringData(
+def _held_bundle() -> "app._EngineeringData":
+    return app._EngineeringData(
         data={},
         errors={},
         raw_df=pd.DataFrame({"key": ["ENG-1"], "status": ["In Progress"]}),
@@ -204,25 +196,110 @@ def test_a_session_holding_a_bundle_still_probes_before_trusting_it(
         max_results=1000,
         page_size=250,
     )
+
+
+def _no_live_reads(monkeypatch) -> list[int]:
+    """Trip a counter (and never return) if anything reaches a live read.
+
+    ``fetch_tickets`` is the probe that used to run here; ``_engineering_data_uncached``
+    is the full gather. A fast path must touch neither.
+    """
+    hits: list[int] = []
+
+    def _boom(*_a, **_k):
+        hits.append(1)
+        raise AssertionError("a live read ran on what should have been a fast path")
+
+    monkeypatch.setattr(data_layer, "fetch_tickets", _boom)
+    monkeypatch.setattr(data_layer, "_engineering_data_uncached", _boom)
+    return hits
+
+
+def test_a_session_holding_a_fresh_bundle_is_trusted_without_any_read(
+    snapshot_path, monkeypatch
+) -> None:
+    """Inside the TTL a held bundle is handed straight back - no probe, no gather.
+
+    The fingerprint probe that used to guard this was a full paginated ticket
+    fetch whenever the instance's read cache was cold, which reintroduced the
+    very wait the snapshot exists to remove.
+    """
+    held = _held_bundle()
     fingerprint = data_layer._board_fingerprint(
-        held_bundle.raw_df, data_layer.JQL, data_layer.FETCH_SCHEMA_VERSION
+        held.raw_df, data_layer.JQL, data_layer.FETCH_SCHEMA_VERSION
     )
     monkeypatch.setattr(
         data_layer.st,
         "session_state",
-        {data_layer._ENGINEERING_BUNDLE_KEY: (fingerprint, time.time(), held_bundle)},
+        {data_layer._ENGINEERING_BUNDLE_KEY: (fingerprint, time.time(), held)},
+    )
+    _no_live_reads(monkeypatch)
+
+    assert data_layer._engineering_data() is held
+
+
+def test_a_session_holding_a_stale_bundle_falls_back_to_the_shared_snapshot(
+    snapshot_path, monkeypatch
+) -> None:
+    """Past the TTL the held bundle is dropped for the snapshot, not a live gather.
+
+    The shared snapshot is kept minutes-fresh by the warmer, so it is a better
+    board than a bundle this session has been sitting on for over five minutes
+    - and it costs one object read rather than ninety seconds.
+    """
+    _write_valid_snapshot(snapshot_path, time.time() - 120.0)
+    held = _held_bundle()
+    fingerprint = data_layer._board_fingerprint(
+        held.raw_df, data_layer.JQL, data_layer.FETCH_SCHEMA_VERSION
+    )
+    stale_at = time.time() - data_layer._ENGINEERING_BUNDLE_TTL_SECONDS - 1.0
+    monkeypatch.setattr(
+        data_layer.st,
+        "session_state",
+        {data_layer._ENGINEERING_BUNDLE_KEY: (fingerprint, stale_at, held)},
+    )
+    _no_live_reads(monkeypatch)
+    refreshes: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        data_layer,
+        "_start_background_board_refresh",
+        lambda max_results, page_size: refreshes.append((max_results, page_size)),
     )
 
-    calls: list[int] = []
+    bundle = data_layer._engineering_data()
 
-    def _probe(**_kwargs):
-        calls.append(1)
-        return held_bundle.raw_df
+    assert bundle is not held
+    assert list(bundle.df["key"]) == ["ENG-1"]  # from the snapshot fixture
+    assert len(refreshes) == 1
 
-    monkeypatch.setattr(data_layer, "fetch_tickets", _probe)
 
-    assert data_layer._engineering_data() is held_bundle
-    assert calls == [1]
+def test_refresh_forces_a_live_read_and_leaves_the_shared_snapshot_in_place(
+    snapshot_path, monkeypatch
+) -> None:
+    """The force-live flag skips the snapshot; it must not delete it for others.
+
+    A fresh snapshot on disk plus the flag set: the reader who pressed Refresh
+    gathers live, and the snapshot is rewritten from that gather - never
+    removed, which would give every other session a cold gather.
+    """
+    _write_valid_snapshot(snapshot_path, time.time() - 60.0)
+    assert snapshot_path.exists()
+
+    live = _held_bundle()
+    monkeypatch.setattr(
+        data_layer, "_engineering_data_uncached", lambda *_a, **_k: live
+    )
+    monkeypatch.setattr(
+        data_layer.st,
+        "session_state",
+        {data_layer._ENGINEERING_FORCE_LIVE_KEY: True},
+    )
+
+    assert data_layer._engineering_data() is live
+    # Rewritten by the live path, still there for everyone else.
+    assert snapshot_path.exists()
+    # And the flag is one-shot - the next navigation is a normal fast path.
+    assert data_layer._ENGINEERING_FORCE_LIVE_KEY not in data_layer.st.session_state
 
 
 def test_the_store_is_local_by_default_and_gcs_when_a_bucket_is_set(monkeypatch) -> None:
